@@ -1,0 +1,2 @@
+# Project settings — non-secret, committed to git
+# Secrets go in .env (gitignored)

@@ -1,0 +1,17 @@
+[build-system]
+requires = ["setuptools"]
+build-backend = "setuptools.backends._legacy:_Backend"
+
+[project]
+name = "portutils"
+version = "0.1.0"
+requires-python = ">=3.11"
+dependencies = [
+    "pandas",
+    "yfinance",
+    "python-dotenv",
+    "pyyaml",
+]
+
+[tool.setuptools.packages.find]
+where = ["src"]

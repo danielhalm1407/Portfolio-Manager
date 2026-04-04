@@ -1,0 +1,1 @@
+Run the weekly portfolio review: summarise current tilts from outputs/portfolio/, compare against latest research in research/themes/ and research/conviction/, and generate a review report in outputs/reports/.
