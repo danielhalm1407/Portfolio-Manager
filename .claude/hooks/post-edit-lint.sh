@@ -1,3 +1,6 @@
 #!/bin/bash
-# Placeholder: run linting after Claude edits a Python file
-# Example: ruff check --fix "$1"
+# Called by settings.json PostToolUse hook after Edit/Write
+FILE="$1"
+if [[ "$FILE" == *.py ]]; then
+  ruff check --fix "$FILE" 2>/dev/null || true
+fi

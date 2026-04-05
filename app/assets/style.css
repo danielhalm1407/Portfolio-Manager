@@ -1,0 +1,13 @@
+/* Dash auto-serves everything in app/assets/ */
+body {
+    font-family: sans-serif;
+    margin: 2rem;
+    background-color: #0f0f0f;
+    color: #e0e0e0;
+}
+
+nav a {
+    margin-right: 1.5rem;
+    color: #7eb8f7;
+    text-decoration: none;
+}

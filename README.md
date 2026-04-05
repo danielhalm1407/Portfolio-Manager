@@ -46,21 +46,34 @@ Leverage Claude Code with an effective infrastructure, organised into five layer
 Portfolio-Manager/
 │
 ├── CLAUDE.md                              # Top-level: project overview, conventions, agent roles
-├── pyproject.toml                         # Package definition, dependencies
+├── pyproject.toml                         # Package definition, dependencies (dash, plotly, gunicorn included)
+├── Procfile                               # Deployment start command for Render: gunicorn app.main:server
 ├── .env                                   # Secrets and environment-specific config — never committed *
-├── .gitignore                             # Excludes: .env, data/raw/, __pycache__, etc.
+├── .gitignore                             # Excludes: .env, data/raw/, settings.local.json, __pycache__, etc.
 ├── README.md
 │
 ├── .claude/                               # Claude Code config for this project
-│   ├── commands/                          # Slash commands (stored prompts)
+│   ├── settings.json                      # Permissions (allow/deny) + hooks — active Claude Code config **
+│   ├── settings.local.json                # Machine-local overrides — never committed
+│   ├── commands/                          # Slash commands (stored prompts) + skill instruction files
 │   │   ├── run-theme-scan.md
 │   │   ├── build-conviction-brief.md
-│   │   └── weekly-portfolio-review.md
-│   ├── skills/                            # Skill instruction files
+│   │   ├── weekly-portfolio-review.md
 │   │   ├── score-narrative.md
 │   │   └── model-value-chain.md
-│   └── hooks/                             # Event-driven scripts (pre/post tool calls)
-│       └── post-edit-lint.sh
+│   └── hooks/                             # Helper scripts called by settings.json hooks
+│       └── post-edit-lint.sh              # Runs ruff on any .py file Claude edits
+│
+├── app/                                   # Dash dashboard — served publicly via Render
+│   ├── main.py                            # Entry point; exposes `server` for gunicorn
+│   ├── pages/                             # One file per page (Dash multi-page pattern)
+│   │   ├── portfolio.py                   # Weights, tilts, current positions
+│   │   ├── themes.py                      # Scored theme briefs
+│   │   └── conviction.py                  # Deep-dive per name/sector
+│   ├── components/                        # Reusable Plotly chart functions
+│   │   └── charts.py
+│   └── assets/                            # CSS/images — Dash auto-serves this folder
+│       └── style.css
 │
 ├── config/
 │   ├── settings.yaml                      # Non-secret config: model params, thresholds
@@ -118,6 +131,44 @@ Portfolio-Manager/
 ---
 
 ## Appendix
+
+### ** `.claude/settings.json` — Claude Code permissions and hooks
+
+`settings.json` is the active configuration file for Claude Code within this project. Without it, no permissions or hooks are in effect.
+
+**Permissions** control what Claude is allowed to run via `Bash`. The `allow` list whitelists safe commands (pytest, pip, ruff); the `deny` list blocks destructive or sensitive ones (rm -rf, cat .env, force push).
+
+**Hooks** fire automatically when Claude uses a tool. The `PostToolUse` hook with matcher `Edit|Write` runs `post-edit-lint.sh` after every file edit, which applies `ruff` linting to any modified Python file. This keeps code style consistent without requiring a manual step.
+
+`settings.local.json` holds machine-specific overrides and is gitignored — use it for anything that differs between your machines (e.g. allowing `open *` on macOS).
+
+Note: `.claude/skills/` is not a native Claude Code directory. Those files have been moved into `.claude/commands/` alongside slash commands — both are plain `.md` files invoked the same way.
+
+---
+
+### *** Dash dashboard and public deployment
+
+The `app/` directory contains a Dash (Plotly) web application that surfaces portfolio outputs publicly. It follows Dash's multi-page pattern: `app/main.py` is the entry point; individual pages live in `app/pages/`; reusable chart functions live in `app/components/`.
+
+**Running locally:**
+```bash
+pip install -e .
+python app/main.py
+# open http://localhost:8050
+```
+
+**Deploying to Render (free tier):**
+1. Push this repo to GitHub
+2. Go to render.com → New Web Service → connect your repo
+3. Set build command: `pip install -e .`
+4. Set start command: `gunicorn app.main:server`
+5. Render gives you a public URL (`yourapp.onrender.com`) and auto-redeploys on every push to `master`
+
+The `Procfile` at the project root contains the start command for Render. The critical line in `app/main.py` is `server = app.server` — this exposes the underlying Flask server that gunicorn wraps for production.
+
+The free tier spins down after 15 minutes of inactivity; the next visit triggers a ~30 second cold start.
+
+---
 
 ### * `.env` — what it is and why it exists
 

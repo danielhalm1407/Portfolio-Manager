@@ -1,0 +1,30 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python *)",
+      "Bash(pytest *)",
+      "Bash(pip install *)",
+      "Bash(pip install -e *)",
+      "Bash(ruff *)",
+      "Bash(black *)"
+    ],
+    "deny": [
+      "Bash(rm -rf *)",
+      "Bash(cat .env)",
+      "Bash(git push --force *)"
+    ]
+  },
+  "hooks": {
+    "PostToolUse": [
+      {
+        "matcher": "Edit|Write",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash .claude/hooks/post-edit-lint.sh \"$CLAUDE_FILE_PATH\""
+          }
+        ]
+      }
+    ]
+  }
+}

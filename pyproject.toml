@@ -11,6 +11,9 @@ dependencies = [
     "yfinance",
     "python-dotenv",
     "pyyaml",
+    "dash",
+    "plotly",
+    "gunicorn",
 ]
 
 [tool.setuptools.packages.find]
