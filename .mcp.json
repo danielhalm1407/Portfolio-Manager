@@ -1,6 +1,10 @@
 {
   "mcpServers": {
     "gmail": { "command": "mcp-gmail" },
-    "google-calendar": { "command": "mcp-google-calendar" }
+    "google-calendar": { "command": "mcp-google-calendar" },
+    "playwright": {
+      "command": "npx",
+      "args": ["@playwright/mcp@latest"]
+    }
   }
 }
