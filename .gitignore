@@ -31,3 +31,6 @@ Thumbs.db
 
 # Outputs — regenerable, don't commit
 outputs/
+
+# Sandbox — local scratch space, never committed
+sandbox/
