@@ -1,0 +1,6 @@
+{
+  "mcpServers": {
+    "gmail": { "command": "mcp-gmail" },
+    "google-calendar": { "command": "mcp-google-calendar" }
+  }
+}

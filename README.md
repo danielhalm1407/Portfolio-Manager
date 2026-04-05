@@ -52,17 +52,42 @@ Portfolio-Manager/
 ├── .gitignore                             # Excludes: .env, data/raw/, settings.local.json, __pycache__, etc.
 ├── README.md
 │
+├── .mcp.json                              # MCP server declarations (Gmail, Google Calendar)
+│
 ├── .claude/                               # Claude Code config for this project
 │   ├── settings.json                      # Permissions (allow/deny) + hooks — active Claude Code config **
 │   ├── settings.local.json                # Machine-local overrides — never committed
-│   ├── commands/                          # Slash commands (stored prompts) + skill instruction files
+│   │
+│   ├── agents/                            # Subagent definitions — autonomous specialised workers
+│   │   ├── research-agent.md              # Theme extraction from commentary
+│   │   ├── modelling-agent.md             # Structural fundamental analysis
+│   │   ├── allocator-agent.md             # Portfolio construction and risk
+│   │   ├── reporter-agent.md              # Output generation and briefings
+│   │   └── workflows/                     # Multi-agent orchestration definitions
+│   │
+│   ├── agent-memory/                      # Persistent cross-session facts for agents
+│   │
+│   ├── commands/                          # User-triggered /slash commands
 │   │   ├── run-theme-scan.md
-│   │   ├── build-conviction-brief.md
-│   │   ├── weekly-portfolio-review.md
+│   │   └── workflows/                     # Multi-step workflow commands
+│   │       ├── build-conviction-brief.md
+│   │       └── weekly-portfolio-review.md
+│   │
+│   ├── skills/                            # Reusable instruction modules loaded into agents
 │   │   ├── score-narrative.md
-│   │   └── model-value-chain.md
-│   └── hooks/                             # Helper scripts called by settings.json hooks
-│       └── post-edit-lint.sh              # Runs ruff on any .py file Claude edits
+│   │   ├── model-value-chain.md
+│   │   └── presentation/                  # Presentation/reporting skill modules
+│   │
+│   ├── hooks/                             # Lifecycle event scripts wired in settings.json
+│   │   ├── scripts/
+│   │   │   └── post-edit-lint.sh          # Runs ruff on any .py file Claude edits
+│   │   ├── config/                        # Hook configuration files
+│   │   └── sounds/                        # Audio alert assets
+│   │
+│   └── rules/                             # Glob-scoped instructions auto-applied by file context
+│       ├── python.md                      # Applied when **/*.py files are in context
+│       ├── research.md                    # Applied when research/** files are in context
+│       └── notebooks.md                   # Applied when notebooks/**/*.ipynb are in context
 │
 ├── app/                                   # Dash dashboard — served publicly via Render
 │   ├── main.py                            # Entry point; exposes `server` for gunicorn

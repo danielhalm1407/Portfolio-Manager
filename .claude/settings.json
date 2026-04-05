@@ -21,7 +21,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "bash .claude/hooks/post-edit-lint.sh \"$CLAUDE_FILE_PATH\""
+            "command": "bash .claude/hooks/scripts/post-edit-lint.sh \"$CLAUDE_FILE_PATH\""
           }
         ]
       }
