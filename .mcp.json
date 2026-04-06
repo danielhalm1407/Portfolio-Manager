@@ -4,7 +4,7 @@
     "google-calendar": { "command": "mcp-google-calendar" },
     "playwright": {
       "command": "npx",
-      "args": ["@playwright/mcp@latest"]
+      "args": ["-y", "@playwright/mcp@latest"]
     }
   }
 }

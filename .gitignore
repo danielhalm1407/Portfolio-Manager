@@ -35,3 +35,7 @@ outputs/
 
 # Sandbox — local experiments, never committed
 sandbox/
+
+# Playwright — session data (login cookies) and MCP artifacts, never commit
+.playwright-session/
+.playwright-mcp/

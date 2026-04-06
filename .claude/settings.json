@@ -6,7 +6,8 @@
       "Bash(pip install *)",
       "Bash(pip install -e *)",
       "Bash(ruff *)",
-      "Bash(black *)"
+      "Bash(black *)",
+      "mcp__playwright__browser_navigate"
     ],
     "deny": [
       "Bash(rm -rf *)",

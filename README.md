@@ -76,6 +76,7 @@ Portfolio-Manager/
 │   ├── skills/                            # Reusable instruction modules loaded into agents
 │   │   ├── score-narrative.md
 │   │   ├── model-value-chain.md
+│   │   ├── fetch-reuters-section.md       # Playwright-based Reuters headline scraper (interactive)
 │   │   └── presentation/                  # Presentation/reporting skill modules
 │   │
 │   ├── hooks/                             # Lifecycle event scripts wired in settings.json
@@ -109,7 +110,8 @@ Portfolio-Manager/
 │   ├── portutils/                         # Installable package — library code only, no side effects
 │   │   ├── __init__.py
 │   │   ├── ingestion/                     # Data fetch functions (APIs, scrapers)
-│   │   │   └── __init__.py
+│   │   │   ├── __init__.py
+│   │   │   └── reuters.py                 # Playwright-based Reuters scraper (headline + full article)
 │   │   ├── analysis/                      # Core analytical functions
 │   │   │   └── __init__.py
 │   │   ├── portfolio/                     # Allocation, rebalancing, risk functions
@@ -119,6 +121,7 @@ Portfolio-Manager/
 │   │       └── config.py                  # Single loader for .env + settings.yaml
 │   └── pipelines/                         # Runnable scripts — orchestrate workflows, have side effects
 │       ├── daily_ingest.py
+│       ├── scrape_commentary.py           # Scrape Reuters headlines/articles → data/raw/commentary/
 │       ├── theme_scan.py
 │       └── weekly_review.py
 │
@@ -161,7 +164,7 @@ Portfolio-Manager/
 
 `settings.json` is the active configuration file for Claude Code within this project. Without it, no permissions or hooks are in effect.
 
-**Permissions** control what Claude is allowed to run via `Bash`. The `allow` list whitelists safe commands (pytest, pip, ruff); the `deny` list blocks destructive or sensitive ones (rm -rf, cat .env, force push).
+**Permissions** control what Claude is allowed to run via `Bash` or MCP. The `allow` list whitelists safe commands (pytest, pip, ruff, and `mcp__playwright__browser_navigate` for Reuters scraping); the `deny` list blocks destructive or sensitive ones (rm -rf, cat .env, force push).
 
 **Hooks** fire automatically when Claude uses a tool. The `PostToolUse` hook with matcher `Edit|Write` runs `post-edit-lint.sh` after every file edit, which applies `ruff` linting to any modified Python file. This keeps code style consistent without requiring a manual step.
 
