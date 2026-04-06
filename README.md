@@ -40,6 +40,18 @@ Leverage Claude Code with an effective infrastructure, organised into five layer
 - Subagents — specialised agents: **Research** (theme extraction), **Modelling** (structural fundamentals), **Allocator** (portfolio construction), **Reporter** (output generation)
 - Shared state/handoff protocols between agents
 
+## Setup
+
+```bash
+# 1. Install the package and all dependencies into your Python environment
+pip install -e .
+
+# 2. Download the Playwright browser binary (once per machine, not per environment)
+playwright install chromium
+```
+
+The browser binary is stored in a machine-level cache (`%LOCALAPPDATA%\ms-playwright` on Windows). You only need to run `playwright install chromium` once — it is shared across all environments on the same machine.
+
 ## Project Directory Structure
 
 ```
@@ -181,6 +193,7 @@ The `app/` directory contains a Dash (Plotly) web application that surfaces port
 **Running locally:**
 ```bash
 pip install -e .
+playwright install chromium  # only needed if using the Reuters scraper
 python app/main.py
 # open http://localhost:8050
 ```
