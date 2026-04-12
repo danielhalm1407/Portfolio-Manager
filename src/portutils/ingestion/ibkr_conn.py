@@ -1,7 +1,27 @@
 """IBKR connection plumbing — base app class and connect/disconnect helpers.
 
-Every IBKR request module subclasses IBKRApp and reuses connect_ib / disconnect_ib
-so connection logic is defined once.
+Architecture note — why a base class?
+--------------------------------------
+The IB Python API (ibapi) uses a dual-class design:
+
+  • EClient  — the *outgoing* side: methods you call to send requests
+               (reqHistoricalData, reqAccountSummary, etc.).
+  • EWrapper — the *incoming* side: callbacks IBKR fires when data arrives
+               (historicalData, accountSummary, error, etc.).
+
+You must combine both into a single object so that (a) you can *send*
+requests and (b) the same object *receives* the asynchronous responses.
+IBKRApp inherits from both and wires them together in __init__.
+
+Each request type needs its own set of EWrapper callback overrides (e.g.
+historicalData vs. accountSummary).  Rather than cramming every callback into
+one mega-class, we keep IBKRApp thin — just the shared handshake / error
+plumbing — and let each request module in ibkr_requests.py provide a small
+subclass with only the callbacks it needs.  This keeps each request self-
+contained and easy to extend.
+
+connect_ib / disconnect_ib are module-level helpers so every subclass reuses
+the same connection lifecycle logic.
 """
 import time
 from threading import Thread
@@ -9,6 +29,10 @@ from threading import Thread
 from ibapi.client import EClient
 from ibapi.wrapper import EWrapper
 
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Base app class — shared by all request-specific subclasses
+# ═══════════════════════════════════════════════════════════════════════════
 
 class IBKRApp(EWrapper, EClient):
     """Base bridge class for the IB Python API.
@@ -20,48 +44,83 @@ class IBKRApp(EWrapper, EClient):
     """
 
     def __init__(self):
-        # EClient.__init__ requires a reference to the wrapper instance so it
-        # knows where to route incoming messages.  Since IBKRApp is both client
-        # and wrapper, we pass *self* for both roles.
+        # EClient.__init__ needs the wrapper instance so it can route incoming
+        # messages to the right callbacks.  Because IBKRApp is *both* client
+        # and wrapper (dual inheritance), we pass `self` for both roles.
         EClient.__init__(self, self)
-        self.data = []           # subclasses append request-specific dicts here
-        self.finished = False    # flipped to True by the relevant *End() callback
-        self.connected = False   # flipped to True by nextValidId()
+
+        # Subclasses append request-specific dicts here.
+        # _HistDataApp overrides this with a dict keyed by reqId instead.
+        self.data = []
+
+        # Flipped to True by the relevant *End() callback in each subclass
+        # (e.g. historicalDataEnd, accountSummaryEnd).  The get_*() entry
+        # points poll on this flag to know when all data has arrived.
+        self.finished = False
+
+        # Flipped to True by nextValidId() — the first callback IBKR fires
+        # after a successful TCP + handshake connection.
+        self.connected = False
+
+    # --- Handshake callback ------------------------------------------------
 
     def nextValidId(self, orderId):
-        # IBKR fires this callback immediately after a successful connection
-        # handshake.  connect_ib() polls on this flag before sending requests.
+        """Called by IBKR immediately after a successful connection handshake.
+
+        The orderId argument is the next valid order ID (useful for placing
+        trades, but we only use this callback as a "connection ready" signal).
+        connect_ib() polls self.connected before letting callers send requests.
+        """
         self.connected = True
 
+    # --- Error / info callback ---------------------------------------------
+
     def error(self, reqId, errorCode, errorString, advancedOrderRejectJson=''):
-        # IBKR routes all errors, warnings, and info messages through this
-        # single callback.  Codes 2104, 2106, 2158 are routine connection-
-        # status notifications — not real errors.
+        """Central error/info handler.
+
+        IBKR funnels ALL diagnostic messages through this single callback —
+        genuine errors, warnings, and routine status pings alike.  We filter
+        out harmless info codes so they don't clutter the console.
+        """
+        # Codes 2104 ("Market data farm connection is OK"), 2106 ("HMDS data
+        # farm connection is OK"), and 2158 ("Sec-def data farm connection is
+        # OK") are routine connection-status pings, not errors.
         info_codes = {2104, 2106, 2158}
         if errorCode in info_codes:
             return
         print(f'ERROR {reqId} {errorCode} {errorString}')
 
 
-# ---------------------------------------------------------------------------
+# ═══════════════════════════════════════════════════════════════════════════
 # Connection lifecycle helpers
-# ---------------------------------------------------------------------------
+# ═══════════════════════════════════════════════════════════════════════════
 
 def connect_ib(app, host='127.0.0.1', port=7497, client_id=123):
-    """Open the IBKR socket on a daemon thread and block until the handshake completes.
+    """Open the IBKR socket on a daemon thread and block until the handshake
+    completes.
+
+    Why a background thread?
+    ------------------------
+    app.run() enters an infinite read-loop that processes incoming IBKR
+    messages.  If we ran it on the main thread it would block forever, so we
+    spin it off on a daemon thread.  The main thread is then free to call
+    request methods (reqHistoricalData, etc.) while the daemon thread routes
+    the asynchronous responses to our EWrapper callbacks.
 
     Raises ``ConnectionError`` if TWS/Gateway doesn't respond within 10 s.
     """
     def _run():
         try:
-            app.connect(host, port, client_id)
-            app.run()  # blocks, processing incoming IBKR messages
+            app.connect(host, port, client_id)  # open TCP socket
+            app.run()  # blocks forever, dispatching incoming messages
         except Exception as e:
             print(f"Connection error: {e}")
 
+    # daemon=True so the thread dies automatically when the main process exits
     Thread(target=_run, daemon=True).start()
 
     # Poll up to 10 s (100 × 0.1 s) for nextValidId() + valid server version.
+    # We check serverVersion() as an extra guard that the handshake finished.
     for _ in range(100):
         if app.connected:
             try:
@@ -80,7 +139,11 @@ def connect_ib(app, host='127.0.0.1', port=7497, client_id=123):
 
 
 def disconnect_ib(app):
-    """Close the TCP socket and stop the background event loop."""
+    """Close the TCP socket and stop the background event loop.
+
+    Once disconnect() is called the daemon thread's app.run() returns,
+    and because it's a daemon thread it is cleaned up automatically.
+    """
     try:
         app.disconnect()
         print("Disconnected from IBKR")
