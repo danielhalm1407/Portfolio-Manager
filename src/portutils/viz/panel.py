@@ -117,6 +117,108 @@ class PanelBuilder:
         """Daily log returns (first row dropped)."""
         return np.log(self.df_all / self.df_all.shift(1)).dropna()
 
+    # ── portfolio simulation ────────────────────────────────────────────
+
+    def simulate_weights(self, rebal_freq='QE'):
+        """Simulate drifting equal-weights with periodic rebalancing.
+
+        Parameters
+        ----------
+        rebal_freq : str
+            Pandas offset alias for rebalance dates (e.g. 'QE' for quarter-end,
+            'ME' for month-end).  Weights are snapped back to 1/N on these dates.
+
+        Returns
+        -------
+        pd.DataFrame
+            Same shape as ``daily_returns()``, holding beginning-of-period weights.
+        """
+        rets = self.daily_returns()
+        n = len(rets.columns)
+
+        # start with equal weights by default
+        # equal_w is a numpy array of length n (number of assets) where each element is 1/n,
+        # which has dimensions: n x 1 (a column vector), and it represents the equal weight for each asset in the portfolio;
+        equal_w = np.ones(n) / n
+
+        # dates on which we rebalance back to equal weight
+        # Pandas < 2.2 uses 'Q'/'M'; >= 2.2 uses 'QE'/'ME' for offsets,
+        # but to_period() always needs the legacy short form.
+        period_freq = rebal_freq.replace('QE', 'Q').replace('ME', 'M')
+        # we convert the index of the returns DataFrame to a PeriodIndex with the specified frequency,
+        # and then we take the end_time of each period, normalize it to midnight, and
+        #  create a set of these rebalance dates for quick lookup; this way we can easily check if a
+        #  given date is a rebalance date during our iteration over the returns
+        rebal_dates = set(rets.index. # take the index of the returns DataFrame, which is a DatetimeIndex representing the dates of the returns
+                          to_period(period_freq). # convert it to a PeriodIndex with the specified frequency (e.g. quarterly or monthly), which groups the dates into periods based on that frequency
+                          end_time. # take the end time of each period, which gives us the last date of each quarter or month (depending on the frequency we specified); this is important because we want to rebalance at the end of each period
+                          normalize() # normalize the timestamps to midnight (00:00:00) to ensure that we are comparing dates without time components when we check for rebalance dates during our iteration; this is important because the original timestamps might have time components that could cause mismatches when we check if a date is in the rebal_dates set
+                          )
+
+        # initialize a DataFrame to hold the weights, with the same index and columns as the returns DataFrame
+        # and we use dtype=float to ensure that the weights are stored as floating-point numbers for calculation ease
+        weights = pd.DataFrame(index=rets.index, columns=rets.columns, dtype=float)
+        w = equal_w.copy()
+
+        for date in rets.index:
+            weights.loc[date] = w  # beginning-of-period weight (will carry through the drift from the previous period)
+            # drift weights by that day's return
+            # this multiplies the current weights of dimension n x 1 elementwise by (1 + daily return) for each asset,
+            #  which gives us the new weights (as a proportion of the starting value of that portfolio)
+            #   (if was matrix multiplication, we would need to use np.dot or the @ operator)
+            w = w * (1 + rets.loc[date].values)
+            w = w / w.sum()  # renormalise, since overall, will be some proportion of the starting value of the portfolio, 
+            # but we want to keep it as weights that sum to 1
+
+            # snap back to equal weight at period boundaries
+            if date.normalize() in rebal_dates:
+                w = equal_w.copy()
+
+        return weights
+
+    def attribution(self, weights, sector_map):
+        """Compute sector-level return attribution.
+
+        Parameters
+        ----------
+        weights : pd.DataFrame
+            Beginning-of-period weights for each period (from ``simulate_weights``).
+        sector_map : dict[str, list[str]]
+            Mapping of sector name to list of ticker columns.
+
+        Returns
+        -------
+        sector_contrib : pd.DataFrame
+            Cumulative contribution per sector (wealth-index style, base 100).
+        portfolio_series : pd.Series
+            Total portfolio wealth index (base 100).
+        """
+        rets = self.daily_returns()
+        # per-asset weighted contribution each day
+        #   (elementwise multiplication of the weights DataFrame and the returns DataFrame)
+        contrib = weights * rets
+        # roll up to sector level
+        sector_contrib = pd.DataFrame(index=rets.index)
+        for sector, tickers in sector_map.items():
+            sector_contrib[sector] = contrib[tickers].sum(axis=1)
+
+        # cumulative portfolio return -> wealth index (base 100)
+        portfolio_daily = sector_contrib.sum(axis=1)
+        portfolio_series = (1 + portfolio_daily).cumprod() * 100
+        portfolio_series_change = portfolio_series - 100
+
+        # absolute sector contributions: scale each day's percentage contribution
+        # by the portfolio value at the *start* of that day, so the units are
+        # portfolio-value units (not percentages).  This ensures that the
+        # cumulative sector contributions sum exactly to portfolio_series_change.
+        portfolio_prev = portfolio_series.shift(1).fillna(100)  # V_{t-1}
+        sector_abs = pd.DataFrame(index=rets.index)
+        for sector, tickers in sector_map.items():
+            sector_abs[sector] = portfolio_prev * contrib[tickers].sum(axis=1)
+        sector_cum = sector_abs.cumsum()
+
+        return sector_contrib, portfolio_daily, sector_cum, portfolio_series_change, portfolio_series
+
     # ── animation helpers ────────────────────────────────────────────────
 
     @staticmethod
