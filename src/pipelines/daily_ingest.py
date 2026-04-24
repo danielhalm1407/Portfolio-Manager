@@ -3,7 +3,7 @@
 import pandas as pd
 import plotly.io as pio
 from portutils.ingestion.ibkr_requests import get_equity_data
-from portutils.analysis.dash_timeseries_app import make_level_figure
+from portutils.viz.dash_timeseries_app import make_level_figure
 
 pio.renderers.default = 'browser'  # open charts in browser, not inline IPython
 

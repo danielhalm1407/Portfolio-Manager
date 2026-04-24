@@ -1,4 +1,7 @@
 {
+  "enabledPlugins": {
+    "get-shit-done": false
+  },
   "permissions": {
     "allow": [
       "Bash(python *)",

@@ -11,6 +11,14 @@ A thematic-fundamental research engine that converts qualitative market narrativ
 - `research/` is human-readable narrative; `models/` is executable logic
 - `notebooks/` are for thinking; `outputs/` are for decisions
 
+## Key approach flags
+- Before editing any file, read it first. Before modifying a  │
+│ function, grep for all callers. Research before you edit.
+- Please do not re-read the same files that you have already read
+- Focus primarily only on the most relevant files and within those files, the parts of the files (often lines of code) that are most relevant. You do not need to explore the whole directory.
+  - This might involve only editing a specific method within a given py file or class that I wish for you to edit. E.g., In <file> lines <start>-<end>, look at the <function>       │
+│ function.  
+
 ## Agent roles
 - **Research agent** — theme extraction from market commentary
 - **Modelling agent** — structural fundamental analysis

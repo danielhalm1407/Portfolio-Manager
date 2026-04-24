@@ -73,6 +73,14 @@ class IBKRApp(EWrapper, EClient):
         """
         self.connected = True
 
+    def connectionClosed(self):
+        """Called by IBKR when the socket is closed (TWS restart, network drop).
+
+        Resets connected so callers and reserve_order_id() see an accurate flag
+        rather than stale True from the last successful handshake.
+        """
+        self.connected = False
+
     # --- Error / info callback ---------------------------------------------
 
     def error(self, reqId, errorCode, errorString, advancedOrderRejectJson=''):
@@ -103,7 +111,12 @@ def connect_ib(app, host='127.0.0.1', port=7497, client_id=123):
     ------------------------
     app.run() enters an infinite read-loop that processes incoming IBKR
     messages.  If we ran it on the main thread it would block forever, so we
-    spin it off on a daemon thread.  The main thread is then free to call
+    spin it off on a daemon thread.  T
+    
+    A deamon thread is just a thread that automatically dies when the main process
+    exits, so we don't have to worry about cleaning it up manually. 
+    
+    he main thread is then free to call
     request methods (reqHistoricalData, etc.) while the daemon thread routes
     the asynchronous responses to our EWrapper callbacks.
 
