@@ -19,7 +19,7 @@ from plotly.subplots import make_subplots
 
 # %%
 
-# ── Module-level config constants ────────────────────────────────────────────
+# ── 1. Module-level config constants ────────────────────────────────────────────
 # These are shared across notebooks — import them directly:
 #   from portutils.viz.panel import SECTOR_MAP, SECTOR_COLORS, LINE_STYLES
 
@@ -29,6 +29,8 @@ SECTOR_MAP = {
     'Consumer Staples': ['WMT', 'COST', 'PG'],
     'Energy': ['CVX', 'XOM', 'LNG'],
 }
+
+# -- 1.1 Colours and colour scales ---
 
 SECTOR_COLORS = {
     'Tech': '#1f77b4',
@@ -42,6 +44,11 @@ SECTOR_COLOUR_SCALES = {
     'Healthcare': 'Greens',
     'Consumer Staples': 'Reds',
     'Energy': 'Oranges',
+}
+
+EIGENVEC_STYLES = {
+    'Eigenvalue':{'colour': '#00d1ff', 'opacity': 0.7, 'yaxis': 'y2'},
+    'Cumulative Variance':{'colour': "#ffffff", 'size': 8, 'width': 2, 'yaxis': 'y2'}
 }
 
 LINE_STYLES = ['solid', 'solid', 'dash', 'dot']
@@ -111,16 +118,20 @@ class PanelBuilder:
 
     # ── data loading ─────────────────────────────────────────────────────
 
-    def _load(self):
+    def _load(self, 
+              debug_print = False # extra optionality to print loading in each and every dataframe
+              ):
         df_all = pd.DataFrame()
 
         # loop through each ticker
         for ticker in self.tickers:
             filename = self.data_dir / f"{ticker}.csv"
-            print(f"Loading {ticker} from {filename}...")
+            if debug_print:
+                print(f"Loading {ticker} from {filename}...")
             try:
                 df = pd.read_csv(filename)
-                print(f"Successfully loaded {ticker} with shape {df.shape}.")
+                if debug_print:
+                    print(f"Successfully loaded {ticker} with shape {df.shape}.")
                 df.columns = [c.lower() for c in df.columns]
                 # data from ibkr will typically have a "datetime" column instead of "date"
                 if 'datetime' in df.columns:
@@ -564,6 +575,92 @@ class PanelBuilder:
         
         return fig
 
+    def add_pca_waterfall(self,
+                            pca_df=None, 
+                            styles_dict = EIGENVEC_STYLES
+                        ):
+        """Add traces for PCA eigenvalues and cumulative variance."""   
+        # --- 1. add a Scree Plot (Bar Chart of Eigenvalues)
+
+        # initialise a figure
+        fig = go.Figure()
+
+        fig.add_trace(go.Bar(
+            x=pca_df["PC"],
+            y=pca_df["eigenvalue"],
+            name='Eigenvalue',
+            marker_color=styles_dict['Eigenvalue']['colour'],
+            opacity=styles_dict['Eigenvalue']['opacity'],
+        ))
+
+        # B. Cumulative Variance (Line Chart)
+        # Map to secondary Y-axis? Or just show % on hover.
+        # Standard scree plot plots Eigenvalues. 
+        # Sometimes people plot Explained Variance % instead.
+        # Let's plot Explained Variance % (Scree) and Cumulative % (Line).
+        # The user asked for "Spectral Decay", which usually refers to the Eigenvalues themselves.
+        # I will stick to Eigenvalues on the left, but maybe add text for %.
+
+        # Let's do a Dual Axis: Left=Eigenvalue, Right=Cumulative %
+        colour_val = styles_dict['Cumulative Variance']['colour']
+        size_val = styles_dict['Cumulative Variance']['size'] 
+        width_val = styles_dict['Cumulative Variance']['width']
+        yaxis_val = styles_dict.get('Cumulative Variance', {}).get('yaxis',  "y2") # default to "y2" if not specified
+
+
+        fig.add_trace(go.Scatter(
+            x=pca_df["PC"],
+            y=pca_df["cumulative_variance_ratio"],
+            name='Cumulative Variance',
+            mode='lines+markers',
+            marker=dict(color=colour_val, size=size_val),
+            line=dict(color=colour_val, width=width_val),
+            yaxis=yaxis_val
+        ))
+
+        # Update layout for dual y-axes
+        fig = self.apply_dark_theme(
+            fig = fig,
+            second_axis = True,
+            title=dict(
+                    text="<b>Spectral Decomposition of Portfolio Returns</b><br><sup>Eigenvalue Decay (Scree Plot)</sup>",
+                    font=dict(color="#e0e0e0", size=22),
+                    x=0.5, xanchor='center'
+                ),
+            height = 600,
+            margin=dict(t=100, b=50, r=50),
+            showlegend=True,
+            legend=dict(
+                orientation='h',
+                y=1.02, x=0.5, xanchor='center'
+            ),
+            
+            # Axes
+            xaxis=dict(
+                title="Principal Component (Mode)",
+                showgrid=False
+            ),
+            yaxis=dict(
+                title="Eigenvalue Magnitude",
+            ),
+            yaxis2=dict(
+                title="Cumulative Explained Variance",
+                overlaying='y',# 
+                side='right',
+                range=[0, 1.1],
+                tickformat='.0%',
+                showgrid=False,
+                tickfont=dict(color='white'),
+                title_font=dict(color='white')
+            )
+
+        )
+
+        return fig
+                            
+
+        
+    
     # ── animation helpers ────────────────────────────────────────────────
 
     @staticmethod
@@ -822,6 +919,7 @@ class PanelBuilder:
                          width=1200,
                          # animation-label-related-parrameters
                          play_label=None, play_y=-0.25, play_duration=20,
+                         second_axis = False, # whether to apply the standard axis styling to a secondary y-axis (useful for the PCA waterfall plot where we have a secondary y axis for the cumulative variance)
 
                          **layout_overrides 
                          # note that the ** syntax allows us to accept any number of additional keyword
@@ -888,7 +986,11 @@ class PanelBuilder:
         #  this ensures that the axes have the consistent off-white color and grid styling defined in that method
         axis_style = cls.dark_axis_style()
         fig.update_xaxes(axis_style)
-        fig.update_yaxes(axis_style)
+        fig.update_yaxes(axis_style, overwrite = False)
+
+        if second_axis:
+            merged = {**axis_style, **layout_overrides.get('yaxis2', {})}
+            fig.update_layout(yaxis2=merged)
 
 
         return fig
