@@ -1,0 +1,208 @@
+{
+  "1001": {
+    "metadata": {
+      "order_id": 1001,
+      "perm_id": 874223105,
+      "client_id": 98,
+      "parent_id": null,
+      "submitted_at": "2026-05-20T14:32:11.482Z",
+      "contract": {
+        "symbol": "SMH",
+        "sec_type": "STK",
+        "exchange": "SMART",
+        "currency": "USD",
+        "con_id": 270639
+      },
+      "action": "BUY",
+      "order_type": "LMT",
+      "total_qty": 100,
+      "limit_price": 245.50,
+      "tif": "DAY",
+      "market_price_at_submit": 245.62,
+      "strategy_tag": "ou_mean_revert_v1",
+      "rationale": {
+        "expected_return_h": 0.018,
+        "q_low_h": -0.012,
+        "q_high_h": 0.041,
+        "target_weight": 0.08
+      }
+    },
+    "history": [
+      {
+        "ts": "2026-05-20T14:32:11.482Z",
+        "status": "PendingSubmit",
+        "qty_filled": 0,
+        "qty_outstanding": 100,
+        "avg_fill_price": null,
+        "fills": []
+      },
+      {
+        "ts": "2026-05-20T14:32:11.910Z",
+        "status": "Submitted",
+        "qty_filled": 0,
+        "qty_outstanding": 100,
+        "avg_fill_price": null,
+        "fills": []
+      },
+      {
+        "ts": "2026-05-20T14:33:47.221Z",
+        "status": "PartiallyFilled",
+        "qty_filled": 60,
+        "qty_outstanding": 40,
+        "avg_fill_price": 245.48,
+        "fills": [
+          {
+            "exec_id": "0001f4e8.6649abc1.01.01",
+            "ts": "2026-05-20T14:33:47.221Z",
+            "qty": 60,
+            "price": 245.48,
+            "commission": 0.42,
+            "role": "OPEN",
+            "remaining_open_qty": 60,
+            "closed_by": []
+          }
+        ]
+      },
+      {
+        "ts": "2026-05-20T14:35:02.108Z",
+        "status": "Filled",
+        "qty_filled": 100,
+        "qty_outstanding": 0,
+        "avg_fill_price": 245.494,
+        "fills": [
+          {
+            "exec_id": "0001f4e8.6649abc1.01.01",
+            "ts": "2026-05-20T14:33:47.221Z",
+            "qty": 60,
+            "price": 245.48,
+            "commission": 0.42,
+            "role": "OPEN",
+            "remaining_open_qty": 60,
+            "closed_by": []
+          },
+          {
+            "exec_id": "0001f4e8.6649abc1.01.02",
+            "ts": "2026-05-20T14:35:02.108Z",
+            "qty": 40,
+            "price": 245.515,
+            "commission": 0.28,
+            "role": "OPEN",
+            "remaining_open_qty": 40,
+            "closed_by": []
+          }
+        ]
+      }
+    ],
+    "pnl_contribution": {
+      "realised": 0.00,
+      "realised_by_fill": {},
+      "unrealised_snapshot": {
+        "as_of": "2026-05-22T15:00:00.000Z",
+        "mark_price": 247.10,
+        "open_fills": [
+          {
+            "exec_id": "0001f4e8.6649abc1.01.01",
+            "remaining_qty": 60,
+            "entry_price": 245.48,
+            "unrealised": 97.20
+          },
+          {
+            "exec_id": "0001f4e8.6649abc1.01.02",
+            "remaining_qty": 40,
+            "entry_price": 245.515,
+            "unrealised": 63.40
+          }
+        ],
+        "total_unrealised": 160.60
+      },
+      "lifecycle": "LIVE_OPEN"
+    }
+  },
+
+  "1002": {
+    "metadata": {
+      "order_id": 1002,
+      "perm_id": 874223106,
+      "client_id": 98,
+      "parent_id": null,
+      "submitted_at": "2026-05-23T18:11:04.000Z",
+      "contract": {
+        "symbol": "SMH",
+        "sec_type": "STK",
+        "exchange": "SMART",
+        "currency": "USD",
+        "con_id": 270639
+      },
+      "action": "SELL",
+      "order_type": "MKT",
+      "total_qty": 70,
+      "limit_price": null,
+      "tif": "DAY",
+      "market_price_at_submit": 248.30,
+      "strategy_tag": "ou_mean_revert_v1",
+      "rationale": {
+        "expected_return_h": -0.004,
+        "q_low_h": -0.022,
+        "q_high_h": 0.015,
+        "target_weight": 0.024
+      }
+    },
+    "history": [
+      {
+        "ts": "2026-05-23T18:11:04.000Z",
+        "status": "Submitted",
+        "qty_filled": 0,
+        "qty_outstanding": 70,
+        "avg_fill_price": null,
+        "fills": []
+      },
+      {
+        "ts": "2026-05-23T18:11:04.612Z",
+        "status": "Filled",
+        "qty_filled": 70,
+        "qty_outstanding": 0,
+        "avg_fill_price": 248.27,
+        "fills": [
+          {
+            "exec_id": "0001f4e8.66507733.01.01",
+            "ts": "2026-05-23T18:11:04.612Z",
+            "qty": 70,
+            "price": 248.27,
+            "commission": 0.49,
+            "role": "CLOSE",
+            "closes": [
+              {
+                "order_id": 1001,
+                "exec_id": "0001f4e8.6649abc1.01.01",
+                "qty": 60,
+                "entry_price": 245.48,
+                "realised": 167.40
+              },
+              {
+                "order_id": 1001,
+                "exec_id": "0001f4e8.6649abc1.01.02",
+                "qty": 10,
+                "entry_price": 245.515,
+                "realised": 27.55
+              }
+            ],
+            "realised_total": 194.95
+          }
+        ]
+      }
+    ],
+    "pnl_contribution": {
+      "realised": 194.95,
+      "realised_by_fill": {
+        "0001f4e8.66507733.01.01": 194.95
+      },
+      "unrealised_snapshot": {
+        "as_of": "2026-05-23T18:11:04.612Z",
+        "mark_price": 248.27,
+        "open_fills": [],
+        "total_unrealised": 0.00
+      },
+      "lifecycle": "CLOSED_BOOK_DONE"
+    }
+  }
+}

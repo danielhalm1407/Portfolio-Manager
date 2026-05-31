@@ -210,7 +210,7 @@ class PanelBuilder:
         pd.DataFrame
             Same shape as ``daily_returns()``, holding beginning-of-period weights.
         """
-        rets = self.daily_returns()
+        rets = self._daily_returns()
         n = len(rets.columns)
 
         # start with equal weights by default
@@ -270,7 +270,7 @@ class PanelBuilder:
         portfolio_series : pd.Series
             Total portfolio wealth index (base 100).
         """
-        rets = self.daily_returns()
+        rets = self._daily_returns()
         # per-asset weighted contribution each day
         #   (elementwise multiplication of the weights DataFrame and the returns DataFrame)
         contrib = weights * rets
@@ -300,6 +300,7 @@ class PanelBuilder:
 
     def make_panel_subplots(self, 
                             sector_map=SECTOR_MAP, 
+                            titles = None,
                             horizontal_spacing=0.05,
                             # we allow an override to the default number of columns and rows, especially
                             # since these will probably most typically be defined here and not elsewhere
@@ -320,7 +321,7 @@ class PanelBuilder:
         nrows = self.nrows or ((n_sectors - 1) // ncols + 1)
 
         # initialise empty set of titles
-        titles = []
+        titles = titles if titles is not None else []
 
         # we also need to update the titles to show overall returns per group/sector if the user
         #  has chosen to include these overall lines; 
@@ -430,7 +431,7 @@ class PanelBuilder:
             #  we can calculate the row index by taking the column index minus 1
             #  (to convert from 1-based to 0-based indexing), dividing by the number
             #  of columns, and then adding 1 back to convert to 1-based indexing for Plotly's subplot referencing
-            row_num_fig = (col_idx - 1) // self.ncols + 1
+            row_num_fig = ( (col_idx - 1) // self.ncols ) + 1
 
             # note that the % syntax here means modulus, which gives us the remainder
             #  after dividing (col_idx - 1) by self.ncols;
@@ -576,8 +577,29 @@ class PanelBuilder:
         return fig
 
     def add_pca_waterfall(self,
-                            pca_df=None, 
-                            styles_dict = EIGENVEC_STYLES
+                            pca_df=None,
+                            styles_dict = EIGENVEC_STYLES,
+                            title = dict(
+                                text="<b>Spectral Decomposition of Portfolio Returns</b><br><sup>Eigenvalue Decay (Scree Plot)</sup>",
+                                font=dict(color="#e0e0e0", size=22),
+                                x=0.5, xanchor='center'
+                            ),
+                            height = 600,
+                            margin = dict(t=100, b=50, r=50),
+                            showlegend = True,
+                            legend = dict(orientation='h', y=1.02, x=0.5, xanchor='center'),
+                            xaxis = dict(title="Principal Component (Mode)", showgrid=False),
+                            yaxis = dict(title="Eigenvalue Magnitude"),
+                            yaxis2 = dict(
+                                title="Cumulative Explained Variance",
+                                overlaying='y',
+                                side='right',
+                                range=[0, 1.1],
+                                tickformat='.0%',
+                                showgrid=False,
+                                tickfont=dict(color='white'),
+                                title_font=dict(color='white')
+                            )
                         ):
         """Add traces for PCA eigenvalues and cumulative variance."""   
         # --- 1. add a Scree Plot (Bar Chart of Eigenvalues)
@@ -620,45 +642,191 @@ class PanelBuilder:
 
         # Update layout for dual y-axes
         fig = self.apply_dark_theme(
-            fig = fig,
-            second_axis = True,
-            title=dict(
-                    text="<b>Spectral Decomposition of Portfolio Returns</b><br><sup>Eigenvalue Decay (Scree Plot)</sup>",
-                    font=dict(color="#e0e0e0", size=22),
-                    x=0.5, xanchor='center'
-                ),
-            height = 600,
-            margin=dict(t=100, b=50, r=50),
-            showlegend=True,
-            legend=dict(
-                orientation='h',
-                y=1.02, x=0.5, xanchor='center'
-            ),
-            
-            # Axes
-            xaxis=dict(
-                title="Principal Component (Mode)",
-                showgrid=False
-            ),
-            yaxis=dict(
-                title="Eigenvalue Magnitude",
-            ),
-            yaxis2=dict(
-                title="Cumulative Explained Variance",
-                overlaying='y',# 
-                side='right',
-                range=[0, 1.1],
-                tickformat='.0%',
-                showgrid=False,
-                tickfont=dict(color='white'),
-                title_font=dict(color='white')
-            )
-
+            fig=fig,
+            second_axis=True,
+            title=title,
+            height=height,
+            margin=margin,
+            showlegend=showlegend,
+            legend=legend,
+            xaxis=xaxis,
+            yaxis=yaxis,
+            yaxis2=yaxis2
         )
 
         return fig
-                            
 
+    def add_var_explained_chart(self,
+                            var_exp_df=None,
+                            n_pcs = 4, # number of principal components that we allow to explain variation
+                            sector_colors = SECTOR_COLORS,
+                            title_text=None,
+                            title=dict(
+                                text="<b>Idiosyncratic Risk Analysis</b><br><sup>% of Asset Variance Explained by Market & Sector Factors</sup>",
+                                font=dict(size=22),
+                                x=0.5, xanchor='center'
+                            ),
+                            height=600,
+                            width=1000,
+                            margin=dict(t=120, b=50),
+                            xaxis=dict(
+                                title="Asset",
+                                title_font=dict(size=16),
+                                tickfont=dict(size=14)
+                            ),
+                            yaxis=dict(
+                                title="% Variance Explained",
+                                title_font=dict(size=16),
+                                tickfont=dict(size=14),
+                                range=[0, 100] # Full percentage scale
+                            ),                            
+                            legend=dict(
+                                orientation="h", 
+                                y=-0.2, x=0.5, xanchor="center",
+                                font=dict(size=14)
+                            ),                            
+                            # Add an annotation explaining the metric
+                            annotations=[dict(
+                                x=0.5, y=1.08, xref="paper", yref="paper",
+                                text="Higher % = More 'Unique' Movement (Earnings, News, Product Launches)",
+                                showarrow=False,
+                                font=dict(color="gray", size=12)
+                            )]
+                        ):
+        """Add traces for PCA eigenvalues and cumulative variance."""   
+        # --- 1. add a Scree Plot (Bar Chart of Eigenvalues)
+
+        fig = go.Figure()
+
+        # depending on the number of principal components we want to show, the relevant column to plot will be different
+        y_col = f"explained_variance_first_{n_pcs}_pcs"
+
+        # moreover, the title text should change correspondingly
+        title_text_val = title_text or f"<b>Idiosyncratic Risk Analysis</b><br><sup>% of Asset Variance Explained by First {n_pcs} PCs"
+
+        for sector, color in sector_colors.items():
+            subset = var_exp_df[var_exp_df['Sector'] == sector]
+
+            
+            
+            fig.add_trace(go.Bar(
+                x=subset['Ticker'],
+                y=subset[y_col] * 100, # convert to percentage
+                name=sector,
+                marker_color=color,
+                text=subset[y_col].apply(lambda x: f"{100*x:.1f}%"),
+                textposition='auto',
+                textfont=dict(color='white', size=14, weight='bold')
+            ))
+
+        # Update layout for dual y-axes
+        fig = self.apply_dark_theme(
+            fig=fig,
+            title=title,
+            title_text=title_text_val, # overrides just the title text
+            height=height,
+            width=width,
+            margin=margin,
+            legend=legend,
+            xaxis=xaxis,
+            yaxis=yaxis,
+            annotations=annotations
+        )
+
+        return fig
+
+    def add_loadings_comparison(self,
+                            fig=None,
+                            pca_df=None,
+                            ncols = 2,
+                            styles_dict = SECTOR_MAP,
+                            sector_colours = SECTOR_COLORS,
+                            title = dict(
+                                text="<b>Principal Component Loadings</b><br><sup>Decomposing Risk Factors: Market vs. Sector Exposure</sup>",
+                                font=dict(size=22),
+                                x=0.5, xanchor='center'
+                            ),
+                            height = 1000,
+                            width = 1000,
+                            margin = dict(t=160, b=50)
+                        ):
+        """Add traces for PCA eigenvalues and cumulative variance."""   
+        # --- 1. add a Scree Plot (Bar Chart of Eigenvalues)
+
+        # identify how many pcs the df has data for, and iterate through each of those
+
+        # note that the dataframe should have 1 row for each pc, and all of the columns with the prefix
+        # "weight_<asset>" should be the loadings for that pc for a given asset
+
+        # firstly, create a series that just stores the asset names
+        asset_cols = [col for col in pca_df.columns if col.startswith("weight_")]
+        # strip the "weight_" prefix to get the clean asset names
+        asset_names = [col.replace("weight_", "") for col in asset_cols]
+
+        # colour should be the colour for the group/sector that the asset belongs to;
+        #  we can extract this from the styles_dict by matching the asset name to the sector it belongs to,
+        #  and then getting the colour for that sector; this way, we ensure that the loadings for each asset
+        #  are colored according to their sector, which helps visually link them to the corresponding lines
+        #  in the overall returns plot and the correlation heatmaps
+        # combine these into a dummy dataframe with 1 row for each asset name, where the
+        # first column is the asset name, the second is the sector/group that it belongs to as per the
+        # styles_dict.
+        # note that the styles dict has format: {'sector_name': ['asset1', 'asset2', ...]}
+        sector_df = pd.DataFrame({
+            'asset': asset_names,
+            # next(..., 'Unknown') scans sectors, returns first sector whose asset list
+            # contains the asset, falls back to 'Unknown'.
+            'sector': [next((s for s, assets in styles_dict.items() if asset in assets), 'Unknown') for asset in asset_names]
+        })
+        # add the colours for each asset based on the sector they belong to,
+        sector_df['colour'] = sector_df['sector'].map(sector_colours).fillna('#ffffff') # default to white if sector not found
+
+        x_vals = asset_names
+
+        for pc_num in range(pca_df.shape[0]):
+            
+            # similar syntax to before for speccifying row and column numbers
+            fig_row_num = pc_num // ncols + 1
+            fig_col_num = (pc_num % ncols) + 1
+            
+            y_vals = pca_df.loc[pc_num, asset_cols].values
+
+            fig.add_trace(go.Bar(
+                x=x_vals,
+                y=y_vals,
+                marker_color = sector_df['colour'],
+                text = y_vals,
+                texttemplate="%{text:.2f}",
+                textposition="auto",
+                showlegend=False
+            ), row=fig_row_num, col=fig_col_num)
+
+   
+        # Update layout for dual y-axes
+        fig = self.apply_dark_theme(
+            fig=fig,
+            title=title,
+            height=height,
+            width=width,
+            margin=margin
+        )
+        # spoof in a legend
+        for sector in sector_colours.keys():
+            colour_val = sector_colours[sector]
+            fig.add_trace(go.Scatter(
+                x=[None],
+                y=[None],                
+                mode='markers',
+                marker=dict(color=colour_val, size=10), name=sector
+            ))
+
+        fig.update_layout(
+            showlegend=True,
+            legend=dict(orientation="h", y=-0.15, x=0.5, xanchor="center")
+        )
+        
+
+        return fig
         
     
     # ── animation helpers ────────────────────────────────────────────────
@@ -883,7 +1051,7 @@ class PanelBuilder:
                 )
         else:
             if normalise:
-                plot_df = cls._normalise(df)
+                plot_df = (df / df.iloc[0]) * 100
             else:
                 plot_df = df
 
@@ -968,10 +1136,12 @@ class PanelBuilder:
 
         # The below allows us to override any of the base layout settings by passing additional keyword 
         # arguments when calling apply_dark_theme.
-        # note that base is a dictionary and using the .attribute() method allows us to update it with
+        # note that base is a dictionary and using the .update() method allows us to update it with
         # the key-value pairs from layout_overrides, (e.g., if we have showlegend=True, the base dict 
         # will now have 'showlegend': True, added onto the end
-        # so if we pass in something like title="My Title" when calling apply_dark_theme, it will add 'title': 'My Title' to the base dictionary, which will then be applied to the figure's layout; this way, we can easily customize the layout of the figure while still applying the standard dark theme settings as a base
+        # so if we pass in something like title="My Title" when calling apply_dark_theme, it will add 'title':
+        #  'My Title' to the base dictionary, which will then be applied to the figure's layout; this way, 
+        # we can easily customize the layout of the figure while still applying the standard dark theme settings as a base
         base.update(layout_overrides) 
 
         # in the belwo syntax, we apply the possibly overridden base layout settings to the figure
@@ -982,12 +1152,30 @@ class PanelBuilder:
 
         # ----- 2. Axis Styling ----
 
-        # apply the standard dark axis styling to both x and y axes using the dark_axis_style method;
-        #  this ensures that the axes have the consistent off-white color and grid styling defined in that method
+        # apply standard dark styling to all x-axes (including grid lines) and all y-axes (no grid lines)
         axis_style = cls.dark_axis_style()
-        fig.update_xaxes(axis_style)
-        fig.update_yaxes(axis_style, overwrite = False)
 
+        # we don't want the x_axis to inherit gridlines usually
+        x_axis_style = {**axis_style, 'showgrid': False}
+        fig.update_xaxes(x_axis_style)
+
+        # y-axes use the same base style but with showgrid disabled — grid lines on x-axes only
+        # update_yaxes applies to EVERY y-axis in the figure (yaxis, yaxis2, etc.)
+        # overwrite=False only affects nested dict properties (e.g. title=dict(...)): it merges
+        # the existing nested dict with the update rather than replacing it wholesale.
+        # for flat scalar properties (showgrid, gridcolor, tickfont, linecolor, etc.) the flag has
+        # no effect — update_yaxes always overwrites them, including on yaxis2
+        
+        fig.update_yaxes(axis_style, overwrite=False)
+
+        # Because update_yaxes above replaced any yaxis2-specific settings BESIDES nested dict properties
+        # (i.e., title, overlyaing and side, unchanged, but showgrid and tickfont.color were replaced) that were written
+        # in update_layout(**base) (step 1 above), we re-apply them here for the secondary axis.
+        # merged = axis_style defaults overridden by whatever the caller passed as yaxis2 in layout_overrides
+        # (e.g. range, title, overlaying, side, tickformat).
+        # fig.update_layout(yaxis2=merged) MERGES into the existing yaxis2 object — it does NOT
+        # wipe and replace it. Only the keys present in merged are touched; any other properties
+        # already on yaxis2 (written by earlier calls) survive untouched.
         if second_axis:
             merged = {**axis_style, **layout_overrides.get('yaxis2', {})}
             fig.update_layout(yaxis2=merged)

@@ -1,5 +1,24 @@
 """IBKR data request helpers built around a single reusable IBApp instance.
 
+This module owns the WHOLE IBKR stack: the connection lifecycle at the top,
+then the single ``IBApp`` class, then the concrete request workflows.
+
+Why one combined object (EClient + EWrapper)
+--------------------------------------------
+The IB Python API (ibapi) uses a dual-class design:
+
+  • EClient  — the *outgoing* side: methods you call to send requests
+               (reqHistoricalData, reqAccountSummary, etc.).
+  • EWrapper — the *incoming* side: callbacks IBKR fires when data arrives
+               (historicalData, accountSummary, error, etc.).
+
+You must combine both into a single object so that (a) you can *send* requests
+and (b) the same object *receives* the asynchronous responses.  ``IBApp``
+inherits from both and wires them together in ``__init__`` via
+``EClient.__init__(self, self)`` — passing ``self`` as both the client and the
+wrapper.  ``connect_ib`` / ``disconnect_ib`` (module-level helpers below) drive
+the connection lifecycle so the request workflows stay decoupled from it.
+
 Design intent
 -------------
 There are two separate concerns in this module:
@@ -21,12 +40,78 @@ import itertools
 import pathlib
 import threading
 import time
+from threading import Thread  # connect_ib spins app.run() on a daemon reader thread
 
 import pandas as pd
+from ibapi.client import EClient    # outgoing request side of the IB API
+from ibapi.wrapper import EWrapper  # incoming callback side of the IB API
 from ibapi.contract import Contract
 from ibapi.order import Order
 
-from .ibkr_conn import IBKRApp, connect_ib, disconnect_ib
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Connection lifecycle (host / port / handshake)
+# ═══════════════════════════════════════════════════════════════════════════
+
+def connect_ib(app, host='127.0.0.1', port=7497, client_id=123):
+    """Open the IBKR socket on a daemon thread and block until the handshake
+    completes.
+
+    Why a background thread?
+    ------------------------
+    app.run() enters an infinite read-loop that processes incoming IBKR
+    messages.  If we ran it on the main thread it would block forever, so we
+    spin it off on a daemon thread.  T
+
+    A deamon thread is just a thread that automatically dies when the main process
+    exits, so we don't have to worry about cleaning it up manually.
+
+    he main thread is then free to call
+    request methods (reqHistoricalData, etc.) while the daemon thread routes
+    the asynchronous responses to our EWrapper callbacks.
+
+    Raises ``ConnectionError`` if TWS/Gateway doesn't respond within 10 s.
+    """
+    def _run():
+        try:
+            app.connect(host, port, client_id)  # open TCP socket
+            app.run()  # blocks forever, dispatching incoming messages
+        except Exception as e:
+            print(f"Connection error: {e}")
+
+    # daemon=True so the thread dies automatically when the main process exits
+    Thread(target=_run, daemon=True).start()
+
+    # Poll up to 10 s (100 × 0.1 s) for nextValidId() + valid server version.
+    # We check serverVersion() as an extra guard that the handshake finished.
+    for _ in range(100):
+        if app.connected:
+            try:
+                if app.serverVersion() is not None and app.serverVersion() > 0:
+                    break
+            except Exception:
+                pass
+        time.sleep(0.1)
+
+    if not app.connected:
+        raise ConnectionError(
+            f"Failed to connect to IBKR at {host}:{port} — is TWS/Gateway running?"
+        )
+
+    print(f"Connected to IBKR (Server Version: {app.serverVersion()})")
+
+
+def disconnect_ib(app):
+    """Close the TCP socket and stop the background event loop.
+
+    Once disconnect() is called the daemon thread's app.run() returns,
+    and because it's a daemon thread it is cleaned up automatically.
+    """
+    try:
+        app.disconnect()
+        print("Disconnected from IBKR")
+    except Exception as e:
+        print(f"Disconnect error: {e}")
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -57,7 +142,10 @@ def contract(
 
 
 def market_order(action, quantity):
-    """Build a basic market order."""
+    """
+    Builds a basic market order, in the standard IBKR Order
+    object format
+    """
     order = Order()
     order.action = action.upper()
     order.orderType = 'MKT'
@@ -68,7 +156,14 @@ def market_order(action, quantity):
 
 
 def limit_order(action, quantity, limit_price):
-    """Build a basic limit order."""
+    """
+    Build a basic limit order:
+    This starts with the market_order function defined above,
+    because it already initialises the standard Order() object that IBKR
+    expects, and already assigns some of the initial parameters, like 
+    the action and quantity. We then modify the orderType to be a limit order,
+    and set the lmtPrice to the limit_price provided as an input argument
+    """
     order = market_order(action, quantity)
     order.orderType = 'LMT'
     order.lmtPrice = float(limit_price)
@@ -172,7 +267,7 @@ _TERMINAL_ORDER_STATES = {
 # Shared IB app class
 # ═══════════════════════════════════════════════════════════════════════════
 
-class IBApp(IBKRApp):
+class IBApp(EWrapper, EClient):
     """Single TWS/Gateway app that stores callback state for many request types.
 
     This class is intentionally *not* the place where we define the higher-level
@@ -185,31 +280,73 @@ class IBApp(IBKRApp):
     """
 
     def __init__(self, on_tick=None):
-        # the super() call comes from IBKRApp, which is in turn from the IB API
-        # library. It initializes the shared client/wrapper plumbing
-        # this effectively initialises our IBApp as an instance of both the
-        # Eclient and EWrapper, which means it can both send requests and receive callbacks. 
-        # -----------
-        # this object can both SEND requests and RECEIVE asynchronous callbacks.
-        # -----
-        # By calling super().__init__() first, we ensure that all necessary base
-        # setup is complete before we add our own state containers below.
-        # This extends to inheriting the built-in constructor for EClient, which sets up an EWrapper
-        # first, as is typically required. This is similar to using 
-        # IBApp(EClient, EWrapper) and then within its __init__(), having:
-        # EClient.__init__(self, self) directly [first self is the client, second self is the wrapper]
-        #  but super() is more robust to future changes in the class hierarchy.
-        super().__init__()
+        # IBApp is BOTH the EClient (outgoing: it SENDS requests) and the
+        # EWrapper (incoming: it RECEIVES the asynchronous callbacks).  The IB
+        # API requires the client to be constructed with a reference to the
+        # wrapper that will receive its callbacks.  Because this one object plays
+        # both roles, we pass `self` as that wrapper — hence
+        # EClient.__init__(self, self): the first `self` is the client being
+        # initialised, the second `self` is the wrapper it will route incoming
+        # messages to.
+        #
+        # How this could instead have been done with super():
+        #   Previously IBApp inherited from an intermediate base (IBKRApp) and
+        #   called super().__init__() here.  That base's __init__ in turn ran
+        #   EClient.__init__(self, self) for us, so a single super() call set up
+        #   all the shared client/wrapper plumbing before we added our own state
+        #   containers below.  The appeal of super() is that it follows the MRO
+        #   (Method Resolution Order — the fixed order Python searches base
+        #   classes for a method/attribute), so if another base were inserted
+        #   later, super() would initialise it without us naming the class.
+        # Why we DON'T use super() here:
+        #   We have collapsed that intermediate base away — IBApp now inherits
+        #   EWrapper and EClient directly — so there is a single, fixed base to
+        #   initialise.  Naming EClient.__init__ explicitly is clearer about what
+        #   is being set up, and avoids any ambiguity over which base super()
+        #   would resolve to first across the two-parent MRO.
+        EClient.__init__(self, self)
+
+        # Flipped to True by nextValidId() — the first callback IBKR fires after a
+        # successful TCP + handshake connection — and back to False by
+        # connectionClosed().  connect_ib() polls this before letting callers send
+        # requests, and reserve_order_id() also gates on it for a quick local check.
+        self.connected = False
 
         self.on_tick = on_tick
-        # a reentrant lock that ensures thread-safe access to shared state like
-        #  historical_data and account_summary_rows
+
+        # For the below, it is key to understand threads and locks
+
+        # == What a thread is and why we use it ==
+        # A thread is a separate flow of execution 
+        # Within the IB API, the socket connection to TWS/Gateway runs on a background thread 
+        # that listens for incoming messages and dispatches them to the appropriate EWrapper callbacks.
+        # On the other hand, the main thread is where we issue requests and run our application logic.
+        # The fact that we have at least 2 threads (main thread + IB API thread) is why we need to be
+        #  careful about shared state and use locks
+
+        # === What a lock is and why we use it ===
+        #  note that all a lock is is a synchronization primitive that can be used
+        #  to protect access to shared resources in a multi-threaded environment.
+
+        # Operationally, it is used a 'with self.lock' guard around any code 
+        # that reads or writes shared state, to make sure that only one thread 
+        # can execute that code at a time, which prevents race conditions and
+        #  keeps the internal state consistent even when multiple callbacks arrive concurrently.
+
+        # In object terms, what this is specifically is an instance of a threading.RLock()
+        #  object,  which is a type of lock that can be acquired multiple times by the
+        #  same thread without causing a deadlock.
         self.lock = threading.RLock()
 
         # These counters hand out unique request IDs and order IDs.  Keeping
         # them on the app ensures every helper function uses the same shared
         # connection-safe sequence.
+        # set to be an itertools.count() object that generates an infinite 
+        # sequence of integers starting from 1.
         self._req_id_source = itertools.count(1)
+        # Next valid order id, populated by the nextValidId() EWrapper callback
+        # right after connect. Required by placeOrder; we increment per order
+        # (locally, via reserve_order_id) rather than re-querying IBKR each time.
         self.next_order_id = None
 
         # Store transient events per request so caller-side helper functions can
@@ -321,6 +458,9 @@ class IBApp(IBKRApp):
         - This method increments `self.next_order_id` under a lock so multiple
           callers cannot reserve the same ID.
         """
+        # first, check that we're connected at all before trying to reserve an
+        #  order ID, because if we're not connected, we won't receive the 
+        # nextValidId callback and the logic below will just wait until it times out.
         if not self.connected:
             raise ConnectionError('IBApp is not connected to TWS/Gateway.')
 
@@ -332,6 +472,8 @@ class IBApp(IBKRApp):
         # to deliver the callback. If timeout==0, we skip waiting and fail fast.
         # we only wait for a callback because upon connection, we should receive a
         # self.next_order_id from the nextValidId callback, automatically
+
+
         if self.next_order_id is None and timeout:
             # Compute an absolute deadline so our polling loop cannot run
             # indefinitely if IBKR never responds.
@@ -361,11 +503,41 @@ class IBApp(IBKRApp):
     # --- EWrapper callbacks: connection / handshake -----------------------
 
     def nextValidId(self, orderId):
-        # Set next_order_id before calling super() so that the polling loop in
-        # connect_ib() cannot observe connected=True while next_order_id is
-        # still None (race window between the two lines).
+        # IBKR fires this as its FIRST message after a successful handshake, so it
+        # doubles as our "connection ready" signal (connect_ib() polls connected).
+        # Set next_order_id BEFORE flipping connected so the connect_ib() poll loop
+        # cannot observe connected=True while next_order_id is still None (race
+        # window between the two lines).  We set connected here directly now that
+        # IBApp has no IBKRApp parent to delegate to.
         self.next_order_id = orderId
-        super().nextValidId(orderId)
+        self.connected = True
+
+    def connectionClosed(self):
+        # Called by IBKR when the socket is closed (TWS restart, network drop).
+        # Reset connected so callers and reserve_order_id() see an accurate flag
+        # rather than a stale True left over from the last successful handshake.
+        self.connected = False
+
+    def error(self, reqId, *args):
+        # ibapi 10.30+ widened this callback: legacy signature was
+        #   (reqId, errorCode, errorString, advancedOrderRejectJson="")
+        # newer builds (10.47+) pass an additional `errorTime` (epoch ms) and may
+        # reorder/extend further. Accept *args and locate fields by type to stay
+        # forward-compatible.
+        errorCode = None
+        errorString = ""
+        for a in args:
+            if isinstance(a, int) and errorCode is None:
+                errorCode = a
+            elif isinstance(a, str) and not errorString:
+                errorString = a
+        # Codes 2104 ("Market data farm connection is OK"), 2106 ("HMDS data farm
+        # connection is OK"), 2158 ("Sec-def data farm connection is OK") and 2176
+        # are routine connection-status pings, not errors — swallow them so they
+        # don't clutter the console.
+        if errorCode in (2104, 2106, 2158, 2176):
+            return
+        print(f"IB Error {reqId}: {errorCode} - {errorString}")
 
     def managedAccounts(self, accountsList):
         self.managed_accounts = [acct for acct in accountsList.split(',') if acct]
@@ -397,6 +569,10 @@ class IBApp(IBKRApp):
         symbol's bars separate until the outer helper function assembles the
         final DataFrames.
         """
+        # first, use a self.lock guard to ensure that only one thread can 
+        # execute this block at a time, which prevents race conditions 
+        # when multiple historicalData callbacks arrive concurrently 
+        # and try to update the same app.historical_data dict.
         with self.lock:
             self.historical_data.setdefault(reqId, []).append({
                 'datetime': bar.date,
@@ -417,6 +593,21 @@ class IBApp(IBKRApp):
 
     def accountSummary(self, reqId, account, tag, value, currency):
         """Collect tag/value rows from reqAccountSummary()."""
+
+        # as per the API docus, this could include things like:
+        # NetLiquidation, TotalCashValue, AvailableFunds
+        # as we have right now by default, but can also include things like:
+        # EquityWithLoanValue
+
+        # It is returned to us through the EWrapper class in a callback that 
+        # takes the form of a dict with keys:
+        # 'reqId', 'account', 'tag', 'value', and 'currency'.
+
+
+        # ----i.e., from the API docs: 
+        # def accountSummary(self, reqId: int, account: str, tag: str, value: str,currency: str):
+        # print("AccountSummary. ReqId:", reqId, "Account:", account,"Tag: ", tag, "Value:", value, "Currency:", currency)
+
         row = {
             'reqId': reqId,
             'account': account,
@@ -743,6 +934,12 @@ def get_equity_data(
         results = {}
         for req_id, sym in id_to_symbol.items():
             with app.lock:
+                # here, the variable bars is a list of dicts, where each dict
+                #  represents a historical bar with keys like:
+                #   'datetime', 'open', 'high', 'low', 'close', and 'volume'. 
+                # This list was populated by the historicalData() callback as 
+                # the data arrived from IBKR, and collected in the app.historical_data 
+                # dict under the key of this req_id.
                 bars = list(app.historical_data.get(req_id, []))
 
             if not bars:
@@ -774,10 +971,13 @@ def get_equity_data(
 # ═══════════════════════════════════════════════════════════════════════════
 
 # note that the below are self defined methods that adust for IBKR's infrastructure:
-# They first make a request through an instance, app, of the IBApp 
-# (e.g. through app.reqAllOpenOrders() [just like EClient.reqAllOpenOrders()], 
-# and then waits for the relevant callback to set app.finished = True, at which point
-#  it returns the data collected in app.data by the relevant callback
+# They first make a request through an instance, app, of the IBApp
+# (e.g. through app.reqAllOpenOrders() [just like EClient.reqAllOpenOrders()],
+# and then wait for the relevant callback to .set() a per-request threading.Event
+# (stored in app._hist_events / _account_events / _pnl_events keyed by reqId, or
+# one of the shared events like app.positions_event), at which point the data the
+# callbacks deposited (app.historical_data, app.account_summary_rows, etc.) is
+# read back and assembled into the return value.
 
 
 def get_account_data(
@@ -823,6 +1023,9 @@ def get_account_data(
         # --- Send the request ---------------------------------------------
         # IBKR will stream one callback per tag, followed by accountSummaryEnd().
         print("Requesting account summary with reqId:", req_id)
+        # finally calls the fundamental reqAccountSummary() method from the EClient class, 
+        # which sends the request to TWS/Gateway, and then we wait for the callbacks to arrive
+        #  and update our app's state accordingly.
         app.reqAccountSummary(
             reqId=req_id,
             groupName=group,
@@ -835,6 +1038,7 @@ def get_account_data(
         print("Account summary response received.")
 
         # --- Build the DataFrame ------------------------------------------
+        #
         with app.lock:
             rows = [row for row in app.account_summary_rows if row['reqId'] == req_id]
 
@@ -1027,8 +1231,16 @@ class OrderApp:
         # Reserve the next valid order ID from the shared app so we remain in
         # sync with the TWS session across every order helper.
         order_id = self.app.reserve_order_id()
+        # note that the above returns the next valid order ID but also increments
+        # the app's internal counter and next_order_id to be this same order_id returned
+        # to us just now +1:
+        # this is so the next call to reserve_order_id() will return a different ID, 
+        # which is important for keeping our orders in sync with TWS/Gateway.
 
-        # Place the order on the live TWS connection.
+        # Place the order on the live TWS connection, using the built-in 
+        # EClient method.  
+        # The app's callbacks will update its internal state as the order
+        # is processed.
         self.app.placeOrder(order_id, contract_obj, order)
         return order_id
 

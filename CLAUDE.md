@@ -25,6 +25,53 @@ A thematic-fundamental research engine that converts qualitative market narrativ
 - **Allocator agent** — portfolio construction and risk
 - **Reporter agent** — output generation and briefings
 
+## Comments — RETENTION IS MANDATORY
+- **Never delete or shorten an existing comment** unless I have *explicitly* told you to. When you move, refactor, or relocate code, the comments travel with it verbatim. Editing the logic of a line does not license you to drop the comment above it — update it to stay accurate, but keep it.
+- **Comment-retention requirement**
+Move every comment with its code. The dual-class rationale,
+the daemon-thread explanation in `connect_ib`, and the kts-style reasoning already in
+`IBApp` must all survive the collapse. Update (don't delete) the `nextValidId` comment
+to reflect that it now sets `connected` itself. Apply the **comment-combination
+policy** above wherever an attribute or helper exists in more than one file.
+
+- **Always write fairly detailed comments**, especially a comment above each key or non-trivial line of code. Explain *why*, not just *what*.
+- **Maintain the logical, grounded explanatory style already used in `orders/kts.py`** — a header block summarising the function's role / threading model / when it's called, then a short rationale comment above each meaningful step. New code should read like the surrounding kts.py code.
+
+Example of the expected style (from `orders/kts.py`):
+
+```python
+def _check_auto_signal(self, last_price):
+    # ============================================================================
+    # AUTO-TRADE SIGNAL CHECK — OU mean-reversion.
+    # Called from on_tick at bar-close cadence (controlled by Eval-every-N-bars
+    # dropdown). Returns silently if the signal is off, the model is not yet
+    # calibrated, or the signal condition is not met. When the signal fires, an
+    # order is DISPATCHED via root.after(0, ...) so it runs on the Tk main thread
+    # (we are on the IB reader thread here — Tk widgets are NOT thread-safe).
+    # ============================================================================
+
+    # Gate 1: master toggle. If the user untoggled Auto-trade, do nothing.
+    if not self.auto_trade_var.get():
+        return
+    # Gate 2: the model must be calibrated. Without phi/mu/sigma and a KalmanOU
+    # instance, there are no bands and no forecast — nothing to act on.
+    if self.kalman is None or self.sigma is None or self.mu is None:
+        return
+    # Gate 3: sanitize the price. Bad ticks (None / NaN / inf / 0) must never
+    # reach the band comparison or the order dispatch.
+    if last_price is None or not np.isfinite(last_price) or last_price <= 0:
+        return
+
+    # Read the band multiplier k from the slider — same value used by redraw_chart
+    # to draw the dotted yellow bands, so the trader sees exactly what the algo
+    # is reasoning about.
+    k = float(self.band_mult_var.get())
+    # Compute upper trading band: mu + k * sigma (stationary std).
+    upper = self.mu + k * self.sigma
+    # Compute lower trading band: mu - k * sigma.
+    lower = self.mu - k * self.sigma
+```
+
 ## Python
 - Package: `portutils` (installed via `pip install -e .`)
 - Python >=3.11

@@ -1,6 +1,9 @@
 # Secrets
 .env
 
+# KTS debug logs
+orders/logs/
+
 # Python
 __pycache__/
 *.py[cod]

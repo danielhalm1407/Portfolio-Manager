@@ -1,4 +1,6 @@
-# %%
+# %% 1. Import libraries
+
+# 1. Import libraries
 # Imports
 
 import importlib
@@ -10,40 +12,46 @@ from portutils.ingestion import ibkr_requests
 from portutils.ingestion.ibkr_requests import IBApp, get_account_data, OrderApp
 
 
-# %%
+# %% Reload custom package
+
+# Reload custom package
+
 # Reload module during development (re-import names after reload)
 importlib.reload(ibkr_requests)
 from portutils.ingestion.ibkr_requests import IBApp, get_account_data, OrderApp, connection_status
 
-# %%
-# Calculate what position sizes to take based upon portfolio weights
+# %% 2. Initialise connection and order app
 
-# %%
+# 2. Initialise connection and order app
 
 
-# Initialise connection
 # initialise an instance of the IBApp class, which is our wrapper around the IBKR API.
 ib_app = IBApp()
 # call the start method on that instance of the IBApp, which starts the connection 
 # and the background thread that listens for messages from IBKR.
 ib_app.start(client_id = 125)
 
-# %%
-ib_app.close()
+# %% 2.1 Input into our custom maed OrderApp class, which is a wrapper around the IBApp that provides some convenience methods for submitting orders.
 
-# %%
+# 2.1 Input into our custom maed OrderApp class, which is a wrapper around the IBApp that provides some convenience methods for submitting orders.
 order_app = OrderApp(ib_app)
 
-# %%
+# %% 2.2 Check connection status
+
+# 2.2 Check connection status
 connection_status(ib_app)
 
-# %%
+# %% 3.1 Get portfolio info and value
+
+# 3.1 Get portfolio info and value
+
+# Define  function that can:
 # get account data, figure out our portfolio value and how much we should have 
 # in each position based on the weights, and then calculate how many units of
 # each stock we should have based on the current price of each stock.
 def get_portfolio_info_and_val(
                             app=ib_app,
-                            account="DUP102412",
+                            account="DUP102412",# paper trading account
                             useful_cols = ['symbol', 'currency', 'position', 'marketPrice',
                             'marketValue', 'unrealizedPnL','realizedPnL'],
                             print_statements = True
@@ -66,39 +74,77 @@ def get_portfolio_info_and_val(
 
     return portfolio_info, float(port_val), float(mkt_val)
 
-#%%
+# %% 3.2 Run function to get portfolio info and value
+
+# 3.2 Run function to get portfolio info and value
 
 port_df, port_val, mkt_val = get_portfolio_info_and_val()
 
+# %% 3.3 Display portfolio info
 
-# %%
+# 3.3 Display portfolio info
 port_df
 
-# %%
+# %% 3.4 Update porfolio value with 10% of the remaining cash in the account
+
+# 3.4 Update porfolio value with 10% of the remaining cash in the account
+# basically just return the cash value upon requesting it from IBKR
+acct = get_account_data(app=ib_app)
+cash = float(acct.loc[acct['tag'] == 'TotalCashValue', 'value'].iloc[0])
+
+# %% 4.5 Display new portfolio value
+
+# 4.5 Display new portfolio value
+# This allows us to keep accumulating/depositing in and rebalancing
+print(
+      f"Cash available in the account: {cash}\n"
+      f"Adding 10% of this to the portfolio value would add {cash * 0.1}\n"
+      f"to the portfolio value of {port_val}, taking it to {port_val + cash * 0.1}, "
+      f"or increasing total 'available weight' to  {(port_val + cash * 0.1) / (port_val):.8f}"
+  )
+# %% 4.1 Rebalancing
+
+# 4.1 Rebalancing
+
+# %% 4.1 Calculate new weights for the portfolio
+
+# For the sake of illustration and experimentation, let's always assign target weights that are slightly different from the current weights,
+# and also clear some predefined 'minimum turnover'
+
+min_turnover = 0.02
+
 # create some dummy weights just for experimentation
 # weights = pd.Series(1/len(port_df), index=port_df.index)
 
 # create weights closer to those that we really want
-weights = pd.Series([0.45, 0.4, 0.05,0.05,0.05], index=port_df.index)
+target_weights = pd.Series([0.45, 0.4, 0.05,0.05,0.05], index=port_df.index)
+
+
+
 weights
 
-# %%
+# %% Calculate what position sizes to take based upon portfolio weights
 
+# Calculate what position sizes to take based upon portfolio weights
 def calculate_target_positions(
         port_df, 
-        weights, 
+        target_weights, 
         port_val, 
+        min_turnover=0.02,
         prop_exposure=0.1 # just to control us having still a fair amount of cash left
         ):
     # calculate target value for each position based on the weights and total portfolio value
-    port_df["target_weight"] = weights
+    port_df["target_weight"] = target_weights
     port_df["target_value"] = port_df["target_weight"] * port_val
     port_df["current_value"] = port_df["marketValue"]
+    port_df["current_weight"] = port_df["current_value"] / port_val
+    port_df["weight_diff"] = port_df["target_weight"] - port_df["current_weight"]
+    port_df["clears_min_turnover"] = port_df["weight_diff"].abs() > min_turnover
     port_df["value_diff"] = port_df["target_value"] - port_df["current_value"]
     port_df["units_diff"] = round(port_df["value_diff"] / port_df["marketPrice"])
     return port_df
 
-target_positions = calculate_target_positions(port_df, weights, mkt_val)
+target_positions = calculate_target_positions(port_df, target_weights, mkt_val)
 
 # %%
 
