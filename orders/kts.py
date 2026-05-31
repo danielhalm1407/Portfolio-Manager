@@ -18,25 +18,42 @@ OU model vs. observed prices via the noise lever. IBKR API only.
 • OU forecast: Purple dots show pure OU forward prediction from current state (no new observations).
 """
 
+import sys
 import tkinter as tk
 from tkinter import ttk, messagebox
 import threading
 import time
 import os
+import pathlib
 import math
+import statistics
 import numpy as np
+import pandas as pd
 import matplotlib.pyplot as plt
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 from matplotlib.patches import Rectangle
 import matplotlib.dates as mdates
 from collections import deque
+from dataclasses import dataclass, field
 from datetime import datetime
 from decimal import Decimal
 
-from ibapi.client import EClient
-from ibapi.wrapper import EWrapper
-from ibapi.contract import Contract
-from ibapi.order import Order
+# kts.py is a runnable script living in orders/ (not an installed package), so we
+# add the repo's src/ directory to sys.path before importing the shared portutils
+# library. parents[1] of orders/kts.py is the repo root; the library lives under
+# src/portutils. This lets us reuse the single IBApp / order builders / historical
+# helper that now own ALL the IBKR plumbing, instead of kts maintaining its own
+# duplicate IBApp. (Side effects in a runnable script are fine — see src/CLAUDE.md;
+# only library code must stay import-clean.)
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1] / "src"))
+from portutils.ingestion.ibkr_requests import (
+    IBApp,                          # the single, shared EClient+EWrapper app
+    OrderApp,                       # thread-safe order placement (locked id alloc)
+    contract as build_contract,     # Contract builder (aliased so self.contract() can wrap it)
+    market_order,                   # STK/CASH market order builder
+    crypto_marketable_limit_order,  # PAXOS IOC marketable-limit builder
+    get_historical_bars,            # one-shot intraday OHLCV pull (list[dict])
+)
 
 # -----------------------------------------------------------------------------
 # Lightweight debug logger.
@@ -236,239 +253,6 @@ class KalmanOU:
 
 
 # -----------------------------------------------------------------------------
-# IBKR API wrapper: historical bars, live ticks, orders
-# -----------------------------------------------------------------------------
-class IBApp(EWrapper, EClient):
-    """TWS/Gateway connection: stores historical bars by reqId, forwards last price to on_tick."""
-    # -------------------------------------------------------------------------
-    # Note on the `if self.on_tick:` guards used in tickPrice and _maybe_emit_mid
-    # -------------------------------------------------------------------------
-    # The constructor accepts on_tick=None, so IBApp can be used standalone for
-    # historical-only pulls, REPL testing, or scripts that only need positions /
-    # account values, with no live tick consumer wired in. Calling None as a
-    # function would raise TypeError on every tick — and tickPrice runs on the
-    # ibapi EReader thread, where an uncaught exception can destabilise the
-    # reader loop, silently kill the stream, and not surface in main-thread
-    # tracebacks. The guard is a cheap branch that keeps IBApp decoupled from
-    # the strategy layer (KalmanTradingApp) while staying robust on the reader
-    # thread.
-    # -------------------------------------------------------------------------
-
-    def __init__(self, on_tick=None):
-        # initializes the shared client/wrapper plumbing
-        # this effectively initialises our IBApp as an instance of both the
-        # Eclient and EWrapper, which means it can both send requests and receive callbacks. 
-        # -----------
-        # this object can both SEND requests and RECEIVE asynchronous callbacks.
-        # -----
-        # By calling super().__init__() first, we ensure that all necessary base
-        # setup is complete before we add our own state containers below.
-        # This extends to inheriting the built-in constructor for EClient, which sets up an EWrapper
-        # first, as is typically required. This is similar to using 
-        # IBApp(EClient, EWrapper) and then within its __init__(), having:
-        # EClient.__init__(self, self) directly [first self is the client, second self is the wrapper]
-        #  but super() is more robust to future changes in the class hierarchy.
-        EClient.__init__(self, self)
-
-        # initialise key parameters
-        # NOTE: none of these are built-in attrs of EClient/EWrapper. They are
-        # our own state containers. ibapi is asynchronous: EClient sends requests
-        # and returns immediately; results arrive later on the EReader thread via
-        # EWrapper callbacks. We need instance attrs as buffers so the callback
-        # thread can write and the main thread can read.
-
-        # Our own connection flag, flipped True in connectAck() and False in
-        # connectionClosed(). EClient has isConnected() internally, but we keep
-        # this for quick local checks and to gate startup logic.
-        self.connected = False
-        # Next valid order id, populated by the nextValidId() EWrapper callback
-        # right after connect. Required by placeOrder; we increment per order.
-        self.next_order_id = None
-        # User-supplied callback fired on each price update (LAST or synthesized
-        # mid). Lets the Kalman/strategy layer consume ticks without subclassing.
-        #
-        # Type: a *callable* — any Python object implementing __call__ with the
-        # signature on_tick(price: float, ts: datetime) -> None. In practice it
-        # is the bound method KalmanTradingApp.on_tick (see line ~894), passed
-        # in at construction: IBApp(on_tick=self.on_tick) at line ~460. Bound
-        # methods are first-class objects in Python, so storing one as an attr
-        # is just a reference — no copy, no subclassing needed.
-        #
-        # How it is "updated": it isn't, really. The attribute is set once at
-        # __init__ and stays pointing at the same callable for the lifetime of
-        # the IBApp. What changes are the *arguments* we invoke it with on each
-        # tick. It is called from:
-        #   - tickPrice() when tickType == LAST (line ~360): self.on_tick(price, datetime.now())
-        #   - _maybe_emit_mid() when synthesizing a mid from bid/ask (line ~398)
-        # Both fire on the EReader thread, so the callee must be thread-safe
-        # w.r.t. any Tk/GUI state it touches.
-        #
-        # What it feeds into: KalmanTradingApp.on_tick consumes the price and
-        #   (a) appends to the raw tick deque,
-        #   (b) advances the rolling bar (self.current_bar / self.bar_start),
-        #   (c) on bar close, calls self.kalman.update(price) to advance the
-        #       Kalman filter state, appends to self.kalman_prices, and may
-        #       dispatch orders if the price breaches kalman.x ± k*sigma.
-        # If on_tick is None (no consumer wired in), tickPrice simply skips
-        # the call — see `if self.on_tick:` guards at lines ~354 and ~396.
-        self.on_tick = on_tick
-        # Latest trade price, written by tickPrice() when tickType == LAST (4).
-        self.last_price = None
-        # Latest top-of-book quote, written by tickPrice() for BID (1) / ASK (2).
-        # Used to synthesize mid when LAST is stale (FX/CRYPTO).
-        self.bid = self.ask = None
-        # reqId -> list of BarData, accumulated in historicalData() callback and
-        # finalised in historicalDataEnd(). Dict so multiple concurrent reqs
-        # don't collide.
-        self.historical_data = {}
-        # Signalled by historicalDataEnd() so a waiting thread can block on
-        # .wait() until the bar dump is complete.
-        self.hist_done = threading.Event()
-        # symbol/conId -> position info, populated by position() callback after
-        # reqPositions(). Snapshot of current account holdings.
-        self.positions = {}
-        # Net liquidation / cash value, written by updateAccountValue() callback
-        # after reqAccountUpdates(). Used for sizing.
-        self.account_value = None
-        # Provenance tag set right before each on_tick call so the consumer can
-        # log where the price came from (LAST tick vs synthesized mid).
-        self._last_tick_source = "?"
-        # Active secType, set by KalmanTradingApp.toggle_stream right before
-        # reqMktData. Used to gate the LAST-short-circuit in _maybe_emit_mid:
-        # FX/CRYPTO need continuous mid updates because LAST is sparse / stale.
-        self.sectype = "STK"
-        # Dedup guard so identical consecutive mids don't spam on_tick.
-        self._last_emitted_mid = None
-
-    def error(self, reqId, *args):
-        # ibapi 10.30+ widened this callback: legacy signature was
-        #   (reqId, errorCode, errorString, advancedOrderRejectJson="")
-        # newer builds (10.47+) pass an additional `errorTime` (epoch ms) and may
-        # reorder/extend further. Accept *args and locate fields by type to stay
-        # forward-compatible.
-        errorCode = None
-        errorString = ""
-        for a in args:
-            if isinstance(a, int) and errorCode is None:
-                errorCode = a
-            elif isinstance(a, str) and not errorString:
-                errorString = a
-        if errorCode in (2104, 2106, 2158, 2176):
-            return
-        print(f"IB Error {reqId}: {errorCode} - {errorString}")
-
-    def nextValidId(self, orderId: int):
-        # EWrapper callback fired by TWS once after the API handshake completes
-        # (and again on demand via reqIds(-1)). `orderId` is the next integer
-        # safe to use as an outgoing placeOrder() id.
-        #
-        # Order IDs vs request IDs:
-        #   - Order IDs (placeOrder) MUST be unique and monotonically increasing
-        #     per session. TWS seeds the starting value here; we increment our
-        #     local copy after each placeOrder.
-        #   - Request IDs (reqMktData, reqHistoricalData, reqPositions, ...) are
-        #     a separate namespace chosen by us and are not affected by this.
-        #
-        # Setting self.connected = True here (not in connectAck) treats the
-        # arrival of nextValidId as the true "API ready" signal: the socket is
-        # up AND the server has acknowledged we can send orders/requests.
-        self.connected = True
-        self.next_order_id = orderId
-
-    def tickPrice(self, reqId, tickType, price, attrib):
-        # IB delivers different tickType IDs depending on the data tier:
-        #   LIVE  (entitlement / paid sub):  1=BID, 2=ASK, 4=LAST
-        #   DELAYED (free, ~15min lag):     66=BID, 67=ASK, 68=LAST
-        #   FROZEN/DELAYED-FROZEN: same IDs as their non-frozen counterparts.
-        # The tier is selected by IBApp.reqMarketDataType(...) before reqMktData.
-        # If we only listen on 4 we miss every delayed feed entirely (which is what
-        # was happening for BTC on a Sunday: ticks arrived as type 68, were ignored,
-        # so on_tick never fired and the green Kalman line sat frozen).
-        dlog("tick", reqId=reqId, ttype=tickType, price=price,
-             bid=self.bid, ask=self.ask, last=self.last_price)
-        if price <= 0:
-            return
-        if tickType in (4, 68):          # LAST (live) or LAST (delayed)
-            self.last_price = price
-            # Guard: on_tick may be None when IBApp is used without a strategy
-            # consumer (see class-level note). Skip the call rather than blow
-            # up the EReader thread with a TypeError on None(...).
-            if self.on_tick:
-                self._last_tick_source = f"LAST({tickType})"
-                # now that we have received a clear last price tick,
-                # we trigger the on_tick callback with this price, 
-                # which will then drive the Kalman filter update,
-                # and chart redraw in the main app.
-                self.on_tick(price, datetime.now())
-        elif tickType in (1, 66):        # BID (live) or BID (delayed)
-            self.bid = price
-            # now that we have a new bid, we can attempt to synthesize a mid price
-            #  if we also have an ask, but the last price is stale or missing
-            #  (common for FX/crypto).
-            self._maybe_emit_mid()
-        elif tickType in (2, 67):        # ASK (live) or ASK (delayed)
-            self.ask = price
-            self._maybe_emit_mid()
-
-    def _maybe_emit_mid(self):
-        # FX (and frequently crypto on PAXOS) never sends LAST ticks — only BID/ASK.
-        # Without this, on_tick would never fire and the Kalman line would freeze
-        # even though quotes are streaming. Synthesize a "last" from the mid of
-        # the most recent bid/ask pair and route it through on_tick.
-        # Guarded: only when no real LAST has been seen, so equities keep using
-        # their genuine print ticks rather than mid-of-book.
-        # Equities (STK) prefer real LAST prints; if one has arrived, suppress
-        # mid synth so on_tick is driven by genuine trades. FX/CRYPTO have no
-        # meaningful LAST stream — bid/ask is the continuous signal there, so
-        # we keep emitting mids regardless of any stale LAST that may have been
-        # cached for the price label.
-        if self.last_price is not None and self.sectype not in ("CASH", "CRYPTO"):
-            dlog("mid_skip", reason="last_alr_set", last=self.last_price, bid=self.bid, ask=self.ask)
-            return
-        if self.bid is None or self.ask is None or self.ask <= self.bid:
-            dlog("mid_skip", reason="not_ready", bid=self.bid, ask=self.ask)
-            return
-        mid = 0.5 * (self.bid + self.ask)
-        # Skip duplicate emits when neither side moved.
-        if self._last_emitted_mid == mid:
-            return
-        self._last_emitted_mid = mid
-        dlog("mid_emit", mid=mid, bid=self.bid, ask=self.ask, spread=self.ask - self.bid)
-
-        # Guard: same rationale as the LAST branch in tickPrice — on_tick may
-        # be None for IBApp instances with no strategy consumer attached.
-        if self.on_tick:
-            self._last_tick_source = "MID"
-            self.on_tick(mid, datetime.now())
-
-    def historicalData(self, reqId, bar):
-        if reqId not in self.historical_data:
-            self.historical_data[reqId] = []
-        self.historical_data[reqId].append({
-            'date': bar.date, 'open': bar.open, 'high': bar.high,
-            'low': bar.low, 'close': bar.close, 'volume': bar.volume
-        })
-        dlog("hist_bar", reqId=reqId, date=bar.date, o=bar.open, h=bar.high, l=bar.low, c=bar.close)
-
-    def historicalDataEnd(self, reqId, start, end):
-        bars = self.historical_data.get(reqId, [])
-        first = bars[0]['date'] if bars else None
-        last = bars[-1]['date'] if bars else None
-        dlog("hist_end", reqId=reqId, n=len(bars), first=first, last=last, start=start, end=end)
-        self.hist_done.set()
-
-    def position(self, account: str, contract: Contract, position: float, avgCost: float):
-        self.positions[contract.symbol] = {'position': position, 'avgCost': avgCost}
-
-    def accountSummary(self, reqId: int, account: str, tag: str, value: str, currency: str):
-        if tag == "NetLiquidation":
-            try:
-                self.account_value = float(value)
-            except ValueError:
-                pass
-
-
-# -----------------------------------------------------------------------------
 # Map noise lever [0, 100] to observation noise scale: 0 = trust prices, 100 = trust OU
 # -----------------------------------------------------------------------------
 def noise_lever_to_scale(lever_percent):
@@ -480,6 +264,116 @@ def noise_lever_to_scale(lever_percent):
     if p >= 1.0:
         return 1e8
     return 0.1 + (10.0 - 0.1) * p
+
+
+# -----------------------------------------------------------------------------
+# RISK/RETURN VIEW OBJECT (plan §7.1 — "per-asset forecast distribution object").
+# This is the single bundle the recommendation panel renders. It carries BOTH the
+# forecast distribution (expected return + worst/best case) AND the concrete trade
+# that distribution implies (direction, size, weight + value deltas). Computed once
+# per bar close by _compute_recommendation and handed straight to
+# _update_recommendation_panel — so the panel and the chart cone always agree
+# because they were derived from the same model state at the same instant.
+# -----------------------------------------------------------------------------
+@dataclass
+class ForecastView:
+    # --- distribution (the "what do we expect" half) ---
+    r_hat_h: float          # expected H-step simple return  (central/p_now - 1)
+    q_low: float            # worst-case return  to reasonably account for (low quantile)
+    q_high: float           # best-case  return  to reasonably account for (high quantile)
+    central_price: float    # H-step OU mean projection (the purple cone's endpoint)
+    mu_now: float           # current long-run mean μ (reversion target right now)
+    p_now: float            # spot price the return/weights are measured against
+    # --- trade (the "so what do we do" half — §3c order spec) ---
+    direction: str          # "long" / "short" / "flat"
+    qty: float              # signed units to trade to reach the target weight
+    w_current: float        # current portfolio weight (value_current / account_value)
+    w_target: float         # risk-capped target weight from r_hat_h
+    w_delta: float          # w_target - w_current (what the recommendation moves)
+    value_current: float    # $ exposure now
+    value_target: float     # $ exposure after the trade
+    value_delta: float      # $ to trade (value_target - value_current)
+    binding_cap: str        # which cap set w_target: "none"/"idio_floor"/"factor"/"portfolio"
+
+
+# -----------------------------------------------------------------------------
+# FILL — one execution print, the atomic unit the accounting engine consumes
+# (plan §7.3). Deliberately shaped to be a SUPERSET of what IBKR's execDetails
+# returns (order_id/qty/price/side/time/perm_id) PLUS our own extras (source +
+# the forecast context at decision time) so the SAME object works for a simulated
+# replay fill and, later, a live IBKR fill — apply_fill never has to branch on which.
+# -----------------------------------------------------------------------------
+@dataclass
+class Fill:
+    order_id: int           # which order this fill belongs to (our counter in sim)
+    ts: datetime            # fill timestamp (bar timestamp in replay)
+    side: int               # +1 = BUY, -1 = SELL  (signed so apply_fill is direction-agnostic)
+    qty: float              # ABSOLUTE units filled (magnitude only; sign carried by `side`)
+    price: float            # fill price
+    perm_id: int | None = None          # IBKR permId — None in pure sim
+    source: str = "sim"                 # "sim" (replay) vs "live" (real IBKR fill) — our provenance field
+    # forecast context stamped at decision time — OUR extra fields beyond IBKR (§7.3).
+    r_hat: float | None = None
+    q_low: float | None = None
+    q_high: float | None = None
+    binding_cap: str | None = None
+
+
+# -----------------------------------------------------------------------------
+# SIM EXECUTION BACKEND (plan §7.3, replay half only).
+# Backend-agnostic design: the accounting engine (KalmanTradingApp.apply_fill)
+# only ever sees a Fill, never knows whether it came from IBKR or from here. This
+# backend is the REPLAY/PAPER source: given a recommended trade it synthesizes a
+# Fill at the bar's price (no network, no order id from TWS) and funnels it through
+# apply_fill. The LiveExecutionBackend (not built here — out of scope for the
+# simulated path) would instead call OrderApp.place_order and build Fills from the
+# execDetails callbacks. Keeping them behind one `execute` signature means the GUI
+# code that requests a trade is identical in both modes.
+# -----------------------------------------------------------------------------
+class SimExecutionBackend:
+    def __init__(self, app):
+        # Hold a back-reference to the owning KalmanTradingApp so we can funnel the
+        # synthesized fill into its apply_fill (the single mutator of position/P&L).
+        self.app = app
+        # Local monotone order-id counter. In sim there is no TWS to hand out ids,
+        # so we mint our own starting at 1 — purely a ledger key, never sent anywhere.
+        self._next_id = 1
+
+    def execute(self, side, qty, price, ts, ctx=None):
+        # Synthesize an immediate fill at `price` (no slippage model yet — a future
+        # extension per §4c). `side` is +1/-1, `qty` is the absolute size. `ctx` is an
+        # optional ForecastView whose context we stamp onto the fill (our extra fields).
+        # Mint the next sim order id and advance the counter.
+        oid = self._next_id
+        self._next_id += 1
+        # Build the Fill. source="sim" tags provenance so replay rows are
+        # distinguishable from live ones later in the same state_df.
+        fill = Fill(
+            order_id=oid, ts=ts, side=int(side), qty=abs(float(qty)),
+            price=float(price), source="sim",
+            # Stamp the forecast context (if a recommendation drove the trade) so the
+            # ledger remembers WHY each fill happened — our edge over IBKR's bare prints.
+            r_hat=(ctx.r_hat_h if ctx is not None else None),
+            q_low=(ctx.q_low if ctx is not None else None),
+            q_high=(ctx.q_high if ctx is not None else None),
+            binding_cap=(ctx.binding_cap if ctx is not None else None),
+        )
+        # Route through the app's accounting engine — the ONLY place position/P&L move.
+        self.app.apply_fill(fill)
+        return fill
+
+
+# -----------------------------------------------------------------------------
+# RISK / RETURN ENGINE CONSTANTS (plan §7.1 + §3a).
+# Quantile probabilities define how wide "worst/best case to reasonably account
+# for" is; the REC_* constants parameterise the v1 piecewise-linear weight map.
+# Kept module-level so the panel, the chart bands, and auto-trade all agree.
+# -----------------------------------------------------------------------------
+Q_LOW_P = 0.05          # low quantile = worst-case return (≈ P5)
+Q_HIGH_P = 0.95         # high quantile = best-case return (≈ P95)
+REC_ALPHA = 2.0         # slope mapping expected return -> target weight (w = α·r̂)
+REC_W_CAP = 0.15        # max |target weight| when downside risk is benign (15%)
+REC_QLOW_FLOOR = -0.05  # if worst-case return < this (-5%), cap collapses to 0 (no trade)
 
 
 # -----------------------------------------------------------------------------
@@ -594,8 +488,71 @@ class KalmanTradingApp:
         self.entry_price = 0.0
         self.cash = 100000.0
         self.order_id = None
+        # OrderApp wrapper around self.ib; built once in connect_ib after the
+        # handshake (it refuses an unconnected app). None until then.
+        self.order_app = None
+        # reqId for the live market-data subscription. The library hands out ids
+        # from a counter that STARTS AT 1, and we must not clash with it: a
+        # hardcoded reqId=1 (as the old kts used) would collide with the first
+        # next_req_id() a historical pull allocates. So we reserve a real id from
+        # the shared counter when the stream opens (toggle_stream) and reuse it for
+        # the matching cancelMktData. None while not streaming.
+        self._mkt_data_req_id = None
         self._chart_update_scheduled = False
         self._last_redraw_time = 0.0
+
+        # ---- SIMULATED / REPLAY ACCOUNTING STATE (plan §7.3, replay half) ----
+        # When sim_mode is on, trades do NOT go to IBKR — they are filled locally by
+        # SimExecutionBackend and booked through apply_fill, which is the SOLE mutator
+        # of the figures below. self.position (the optimistic live counter) is left
+        # untouched in sim mode; these sim_* fields are the source of truth instead.
+        #   sim_position    — signed open units (long > 0, short < 0).
+        #   sim_avg_entry   — VWAP of the CURRENTLY-OPEN units (0 when flat).
+        #   sim_realised    — cumulative crystallised P&L from closed units.
+        # Unrealised P&L is derived on the fly (last_price vs sim_avg_entry), never stored
+        # as authoritative — it changes every tick, so we recompute it when marking.
+        self.sim_position = 0.0
+        self.sim_avg_entry = 0.0
+        self.sim_realised = 0.0
+        # Units closed in the bar currently being marked — reset each bar, used by the
+        # position-breakdown plot's "closed_units" scatter markers (§4c plot 2).
+        self._sim_closed_this_bar = 0.0
+        # Backend that turns a recommended/clicked trade into a Fill (no network).
+        self.exec_backend = SimExecutionBackend(self)
+        # STATE DATAFRAME — the single source of truth for ALL replay plots (§4b/§4c).
+        # One row per marked bar, indexed by bar timestamp. The top widgets (position
+        # + P&L) and every new axis are just VIEWS of this frame's latest row / columns.
+        # Columns mirror the §4b table plus a few derived/contextual extras.
+        self.state_df = pd.DataFrame(
+            columns=[
+                "position", "avg_entry_price", "entry_cost", "mark_value",
+                "unrealised_pnl", "realised_pnl", "total_pnl", "last_price",
+                "intended", "filled", "unfilled", "closed_units",
+                # forecast context at the bar (our extras beyond IBKR) — for inspection.
+                "r_hat", "q_low", "q_high",
+            ]
+        )
+
+        # ---- TOGGLE VARS for the new stacked plots (§7.2) ----
+        # Each flips a line's set_visible without a full recompute. Defaults keep the
+        # P&L decomposition and position breakdown visible once state exists; price
+        # chart is always on.
+        self.show_realised_var = tk.BooleanVar(value=True)
+        self.show_unrealised_var = tk.BooleanVar(value=True)
+        self.show_total_var = tk.BooleanVar(value=True)
+        self.show_filled_var = tk.BooleanVar(value=True)
+        self.show_intended_var = tk.BooleanVar(value=True)
+        self.show_entry_var = tk.BooleanVar(value=True)
+        # Master switch for the lower analytics axes. Off by default so the app opens
+        # looking exactly like before (price only); flip on to reveal P&L/position/entry.
+        self.show_analytics_var = tk.BooleanVar(value=True)
+        # Paper/simulated trading switch. Default ON so the accounting engine + replay
+        # plots work with NO IBKR connection (pure replay). Off = route orders live.
+        self.sim_mode_var = tk.BooleanVar(value=True)
+
+        # ForecastView most recently computed — cached so manual redraws can reuse it
+        # for the quantile bands without recomputing the model. None until first bar.
+        self._last_forecast_view = None
 
         self.setup_styles()
         self.setup_ui()
@@ -621,7 +578,9 @@ class KalmanTradingApp:
         self.root.columnconfigure(0, weight=1)
         self.root.rowconfigure(0, weight=1)
         main.columnconfigure(0, weight=1)
-        main.rowconfigure(6, weight=1)
+        # Chart now lives on row 7 (a Recommendation frame was inserted at row 6),
+        # so it is row 7 that must stretch to fill vertical space.
+        main.rowconfigure(7, weight=1)
 
         header = ttk.Frame(main)
         header.grid(row=0, column=0, sticky='ew', pady=(0, 10))
@@ -771,13 +730,74 @@ class KalmanTradingApp:
         self.auto_status_lbl = tk.Label(row_auto, text="auto: idle",
                                         font=('Consolas', 10), bg='#0d1117', fg='#8b949e')
         self.auto_status_lbl.pack(side='left', padx=(8, 0))
+        # Paper/simulated trading toggle. ON (default) = trades are filled locally by
+        # SimExecutionBackend and booked into state_df (no IBKR order goes out), so the
+        # whole risk/return + P&L stack works with no live connection. OFF = route to
+        # IBKR via OrderApp (the original live path). Placed here so it sits with the
+        # other trade controls and the user can see at a glance which mode they're in.
+        ttk.Checkbutton(row_auto, text="Simulated (paper)",
+                        variable=self.sim_mode_var).pack(side='right', padx=(12, 0))
+
+        # ---- RECOMMENDATION PANEL (plan §7.1, PRIORITY 1) ----
+        # Surfaces the DECISION before any plotting: expected return, worst case (red),
+        # best case (green), and the concrete recommended order (direction + size +
+        # weight/value deltas) plus which cap is currently binding. Shown in BOTH manual
+        # and auto modes so the user sees exactly what auto-trade would dispatch before
+        # clicking anything. Populated by _update_recommendation_panel(fv) each bar close.
+        rec = ttk.LabelFrame(main, text="Recommendation — expected / worst / best case + suggested trade", padding=8)
+        rec.grid(row=6, column=0, sticky='ew', pady=(0, 8))
+        rec_row = ttk.Frame(rec)
+        rec_row.grid(row=0, column=0, sticky='ew')
+        # Expected H-step return — neutral colour (it's the central estimate, not a risk).
+        ttk.Label(rec_row, text="E[r]:").pack(side='left', padx=(0, 2))
+        self.rec_ret_lbl = tk.Label(rec_row, text="—", font=('Consolas', 11, 'bold'), bg='#0d1117', fg='#c9d1d9')
+        self.rec_ret_lbl.pack(side='left', padx=(0, 12))
+        # Worst-case return (low quantile) — red, intensity scales with downside size.
+        ttk.Label(rec_row, text="worst:").pack(side='left', padx=(0, 2))
+        self.rec_worst_lbl = tk.Label(rec_row, text="—", font=('Consolas', 11, 'bold'), bg='#0d1117', fg='#f85149')
+        self.rec_worst_lbl.pack(side='left', padx=(0, 12))
+        # Best-case return (high quantile) — green, intensity scales with upside size.
+        ttk.Label(rec_row, text="best:").pack(side='left', padx=(0, 2))
+        self.rec_best_lbl = tk.Label(rec_row, text="—", font=('Consolas', 11, 'bold'), bg='#0d1117', fg='#3fb950')
+        self.rec_best_lbl.pack(side='left', padx=(0, 16))
+        # The concrete recommended order (direction + qty + value delta) — the §3c spec
+        # collapsed to one readable line; this is exactly what auto-trade would send.
+        ttk.Label(rec_row, text="trade:").pack(side='left', padx=(0, 2))
+        self.rec_trade_lbl = tk.Label(rec_row, text="—", font=('Consolas', 11, 'bold'), bg='#0d1117', fg='#58a6ff')
+        self.rec_trade_lbl.pack(side='left', padx=(0, 16))
+        # Which cap (if any) is binding the target weight — explains a flat/clipped call.
+        ttk.Label(rec_row, text="cap:").pack(side='left', padx=(0, 2))
+        self.rec_cap_lbl = tk.Label(rec_row, text="—", font=('Consolas', 10), bg='#0d1117', fg='#8b949e')
+        self.rec_cap_lbl.pack(side='left')
 
         chart_frame = ttk.LabelFrame(main, text="OHLC | Orange = Kalman mean (history) | Solid line = live mean (updates every tick) | Purple = OU forecast", padding=6)
-        chart_frame.grid(row=6, column=0, sticky='nsew')
+        chart_frame.grid(row=7, column=0, sticky='nsew')
         chart_frame.columnconfigure(0, weight=1)
-        chart_frame.rowconfigure(0, weight=1)
+        # Row 0 = plot-series toggles, row 1 = the canvas (which stretches).
+        chart_frame.rowconfigure(1, weight=1)
+
+        # ---- PLOT TOGGLE ROW (§7.2 series visibility, Tk checkbuttons) ----
+        # Flipping these calls redraw_chart, which respects each var via set_visible /
+        # by skipping a sub-axis. Lets the user isolate, e.g., just total P&L.
+        toggles = ttk.Frame(chart_frame)
+        toggles.grid(row=0, column=0, sticky='ew', pady=(0, 4))
+        ttk.Checkbutton(toggles, text="Analytics axes", variable=self.show_analytics_var,
+                        command=self._rebuild_chart_axes).pack(side='left', padx=(0, 12))
+        ttk.Checkbutton(toggles, text="Realised", variable=self.show_realised_var,
+                        command=self.redraw_chart).pack(side='left', padx=(0, 8))
+        ttk.Checkbutton(toggles, text="Unrealised", variable=self.show_unrealised_var,
+                        command=self.redraw_chart).pack(side='left', padx=(0, 8))
+        ttk.Checkbutton(toggles, text="Total P&L", variable=self.show_total_var,
+                        command=self.redraw_chart).pack(side='left', padx=(0, 12))
+        ttk.Checkbutton(toggles, text="Filled", variable=self.show_filled_var,
+                        command=self.redraw_chart).pack(side='left', padx=(0, 8))
+        ttk.Checkbutton(toggles, text="Intended", variable=self.show_intended_var,
+                        command=self.redraw_chart).pack(side='left', padx=(0, 12))
+        ttk.Checkbutton(toggles, text="Entry vs mkt", variable=self.show_entry_var,
+                        command=self.redraw_chart).pack(side='left', padx=(0, 8))
+
         self.chart_container = ttk.Frame(chart_frame)
-        self.chart_container.grid(row=0, column=0, sticky='nsew')
+        self.chart_container.grid(row=1, column=0, sticky='nsew')
         self.chart_container.columnconfigure(0, weight=1)
         self.chart_container.rowconfigure(0, weight=1)
 
@@ -794,26 +814,70 @@ class KalmanTradingApp:
             self.kalman.R = (self.sigma ** 2) * max(scale, 0.01)
             self.redraw_chart()
 
-    def setup_chart(self):
-        plt.style.use('dark_background')
-        self.fig, self.ax = plt.subplots(figsize=(11, 5), facecolor='#0d1117')
-        self.ax.set_facecolor('#161b22')
-        self.ax.tick_params(colors='#8b949e')
-        self.ax.spines['bottom'].set_color('#30363d')
-        self.ax.spines['top'].set_color('#30363d')
-        self.ax.spines['left'].set_color('#30363d')
-        self.ax.spines['right'].set_color('#30363d')
-        self.canvas = FigureCanvasTkAgg(self.fig, master=self.chart_container)
-        self.canvas.get_tk_widget().grid(row=0, column=0, sticky='nsew')
+    def _style_ax(self, ax):
+        # Apply the shared dark GitHub-dark palette to one axis. Factored out because
+        # we now have up to four stacked axes (price + P&L + position + entry) instead
+        # of one, and every one of them needs the same facecolor / tick / spine colours.
+        ax.set_facecolor('#161b22')
+        ax.tick_params(colors='#8b949e')
+        for side in ('bottom', 'top', 'left', 'right'):
+            ax.spines[side].set_color('#30363d')
 
-        # Hover annotation showing OHLC of the bar under the cursor. Single
-        # reusable Annotation toggled visible/invisible to avoid leaking artists.
+    def _build_axes(self):
+        # (Re)build the axis layout on self.fig. Called by setup_chart and whenever the
+        # "Analytics axes" toggle flips (_rebuild_chart_axes). Two layouts:
+        #   • analytics ON  -> 4 stacked, shared-x axes (plan §7.2): price (tall),
+        #     P&L decomposition, position breakdown, entry-vs-market. sharex=True so
+        #     panning/zooming the price axis moves all of them together, and they line
+        #     up bar-for-bar (everything is plotted against the same bar index).
+        #   • analytics OFF -> a single price axis, identical to the original app.
+        # We clear the figure first so toggling doesn't leak orphaned axes.
+        self.fig.clear()
+        if self.show_analytics_var.get():
+            # height_ratios: price dominates; the three analytics panes are short.
+            gs = self.fig.add_gridspec(4, 1, height_ratios=[3, 1, 1, 1], hspace=0.08)
+            self.ax = self.fig.add_subplot(gs[0])
+            self.ax_pnl = self.fig.add_subplot(gs[1], sharex=self.ax)
+            self.ax_pos = self.fig.add_subplot(gs[2], sharex=self.ax)
+            self.ax_entry = self.fig.add_subplot(gs[3], sharex=self.ax)
+            for ax in (self.ax, self.ax_pnl, self.ax_pos, self.ax_entry):
+                self._style_ax(ax)
+            # Hide the x tick labels on every axis except the bottom one — they share x,
+            # so repeating the labels four times is noise.
+            for ax in (self.ax, self.ax_pnl, self.ax_pos):
+                ax.tick_params(labelbottom=False)
+        else:
+            # Single-axis fallback: the analytics axes simply don't exist.
+            self.ax = self.fig.add_subplot(1, 1, 1)
+            self.ax_pnl = self.ax_pos = self.ax_entry = None
+            self._style_ax(self.ax)
+
+        # Hover annotation lives on the PRICE axis only. Rebuilt here because fig.clear()
+        # destroyed any previous one. Single reusable Annotation toggled visible/invisible.
         self._hover_annot = self.ax.annotate(
             "", xy=(0, 0), xytext=(12, 12), textcoords='offset points',
             bbox=dict(boxstyle='round,pad=0.4', fc='#161b22', ec='#58a6ff', alpha=0.95),
             color='#c9d1d9', fontsize=9, family='Consolas', zorder=10,
         )
         self._hover_annot.set_visible(False)
+
+    def _rebuild_chart_axes(self):
+        # Toggle handler for "Analytics axes": rebuild the layout then repaint. Kept
+        # separate from redraw_chart because redraw assumes the axes already exist;
+        # this is the only place that changes how many axes there ARE.
+        self._build_axes()
+        self.redraw_chart()
+
+    def setup_chart(self):
+        plt.style.use('dark_background')
+        # Create the figure + canvas ONCE; the axes inside are (re)built by _build_axes
+        # so we can switch between the single-axis and stacked-analytics layouts without
+        # tearing down the Tk canvas.
+        self.fig = plt.figure(figsize=(11, 6), facecolor='#0d1117')
+        self.canvas = FigureCanvasTkAgg(self.fig, master=self.chart_container)
+        self.canvas.get_tk_widget().grid(row=0, column=0, sticky='nsew')
+        self._build_axes()
+
         self.canvas.mpl_connect('motion_notify_event', self._on_hover)
         self.canvas.mpl_connect('axes_leave_event', self._on_hover_leave)
         self._last_log_time = 0.0
@@ -876,13 +940,19 @@ class KalmanTradingApp:
         # Builds the Contract object passed to every reqMktData / reqHistoricalData
         # / placeOrder. The (secType, exchange) pair drives which venue IB routes to
         # and which entitlement tier applies — wrong combo is the most common cause
-        # of 10089 / "no data" errors. secType + exchange now come from the UI.
-        c = Contract()
-        c.symbol = self.symbol_var.get().strip().upper()
-        c.secType = self.sectype_var.get().strip().upper()
-        c.exchange = self.exchange_var.get().strip().upper()
-        c.currency = "USD"
-        return c
+        # of 10089 / "no data" errors. secType + exchange come from the UI.
+        #
+        # We delegate the actual Contract construction to the library builder
+        # (portutils.ingestion.ibkr_requests.contract, imported as build_contract)
+        # so the Contract field-setting lives in ONE place shared with every other
+        # request workflow. This method just reads the current Tk variables and
+        # forwards them; the GUI keeps owning "what the user picked".
+        return build_contract(
+            symbol=self.symbol_var.get().strip().upper(),
+            sec_type=self.sectype_var.get().strip().upper(),
+            exchange=self.exchange_var.get().strip().upper(),
+            currency="USD",
+        )
 
     def _on_sectype_change(self, _evt):
         # Convenience: snap exchange to the conventional default whenever the user
@@ -891,35 +961,81 @@ class KalmanTradingApp:
         self.exchange_var.set(mapping.get(self.sectype_var.get(), "SMART"))
 
     def connect_ib(self):
+        # Already connected? Nothing to do — guard against a double-click on Connect.
         if self.connected:
             return
         try:
-            port = int(self.port_var.get())
-            self.ib.connect(self.host_var.get(), port, 98)
-            self.api_thread = threading.Thread(target=self.ib.run, daemon=True)
-            self.api_thread.start()
-            for _ in range(50):
-                time.sleep(0.1)
-                if self.ib.connected:
+            # ── Part 1: open the connection via the shared library ──────────────
+            # The raw connect + daemon-thread + poll loop that used to live here is
+            # GONE — the library does all of it (and more) inside IBApp.start():
+            #   • start() runs the module-level connect_ib(), which spins app.run()
+            #     on a daemon reader thread and polls up to 10 s for the handshake,
+            #     with an extra serverVersion()>0 guard the old kts loop lacked;
+            #   • start() also auto-retries the client id on error 326
+            #     (client_id -> +1 -> +2) if TWS says the id is already in use.
+            # We pass our own UI-driven params; client_id 98 keeps this GUI on its
+            # own id so it doesn't collide with notebook/pipeline sessions on 123.
+            # start() raises ConnectionError on failure, caught below.
+            self.ib.start(
+                host=self.host_var.get(),
+                port=int(self.port_var.get()),
+                client_id=98,
+            )
+
+            # ── Part 2: GUI bookkeeping + post-connect seeding (stays in the GUI) ─
+            # These touch Tk widgets and app state, so they CANNOT move into the
+            # library — they live here by design.
+            #
+            # Mark our own connected flag. NOTE: self.ib.connected is a SEPARATE
+            # flag living on the IBApp; we don't set it here. It is flipped to True
+            # by the IBApp.nextValidId() EWrapper callback (the first message TWS
+            # sends after the handshake) — possible only because self.ib is an
+            # EClient+EWrapper, so it RECEIVES that callback on the reader thread.
+            # start() already blocked until that happened, so by now it is True.
+            self.connected = True
+            # Seed our local order id from the value nextValidId() populated on the
+            # app. (Order placement now goes through OrderApp, which reserves ids
+            # under a lock — see place_trade — but we keep this for display.)
+            self.order_id = self.ib.next_order_id
+            # OrderApp wraps the live, connected app and serialises order-id
+            # reservation. Build it ONCE here, now that app.connected is True
+            # (OrderApp.__init__ refuses an unconnected app).
+            self.order_app = OrderApp(self.ib)
+            # Flip the toolbar button states to the connected configuration.
+            self.connect_btn.config(state='disabled')
+            self.disc_btn.config(state='normal')
+            self.stream_btn.config(state='normal')
+            self.refresh_btn.config(state='normal')
+            self.status_lbl.config(text="● Connected", fg='#3fb950')
+            # Fire two snapshot requests right after connect. Besides seeding the
+            # data we want, a successful round-trip is our manual confirmation that
+            # the API link really is live (start() proves the handshake; these
+            # prove we can actually request and receive):
+            #   • reqAccountSummary -> accountSummary() callback fills
+            #     app.account_value (NetLiquidation), shown in the portfolio label;
+            #   • reqPositions -> position() callbacks fill app.positions, so the
+            #     GUI can display our current holding for the active symbol (and,
+            #     later, surface the whole portfolio elsewhere in the UI).
+            self.ib.reqAccountSummary(9001, "All", "NetLiquidation")
+            self.ib.reqPositions()
+            # Give the callbacks a brief moment to arrive on the reader thread
+            # before we read app.positions below (these are async; 0.3 s is enough
+            # for a local TWS round-trip without freezing the UI noticeably).
+            time.sleep(0.3)
+            # Pre-load our position/entry price for the symbol currently in the box,
+            # so the GUI starts in sync with the real account rather than flat.
+            # NOTE: the library keys app.positions by (account, conId or symbol) —
+            # NOT by bare symbol as the old kts IBApp did — so we scan the values
+            # for a matching symbol instead of doing a direct dict lookup.
+            sym = self.symbol_var.get().strip().upper()
+            for pos in self.ib.positions.values():
+                if pos.get('symbol') == sym:
+                    self.position = int(pos['position'])
+                    self.entry_price = pos['avgCost']
                     break
-            if self.ib.connected:
-                self.connected = True
-                self.order_id = self.ib.next_order_id
-                self.connect_btn.config(state='disabled')
-                self.disc_btn.config(state='normal')
-                self.stream_btn.config(state='normal')
-                self.refresh_btn.config(state='normal')
-                self.status_lbl.config(text="● Connected", fg='#3fb950')
-                self.ib.reqAccountSummary(9001, "All", "NetLiquidation")
-                self.ib.reqPositions()
-                time.sleep(0.3)
-                sym = self.symbol_var.get().strip().upper()
-                if sym in self.ib.positions:
-                    self.position = int(self.ib.positions[sym]['position'])
-                    self.entry_price = self.ib.positions[sym]['avgCost']
-            else:
-                messagebox.showerror("Connection", "Could not connect to TWS/Gateway")
         except Exception as e:
+            # start() raises ConnectionError on failure; any other setup error also
+            # lands here. Surface it in the same popup the old code used.
             messagebox.showerror("Connection", str(e))
 
     def disconnect_ib(self):
@@ -937,7 +1053,11 @@ class KalmanTradingApp:
 
     def clear_chart(self):
         if self.streaming:
-            self.ib.cancelMktData(1)
+            # Cancel the live subscription using the SAME reqId we opened it with
+            # (allocated from the shared counter in toggle_stream), not a literal 1.
+            if self._mkt_data_req_id is not None:
+                self.ib.cancelMktData(self._mkt_data_req_id)
+                self._mkt_data_req_id = None
             self.streaming = False
             self.stream_btn.config(text="▶ Start stream")
             self.status_lbl.config(text="● Connected", fg='#3fb950')
@@ -960,6 +1080,11 @@ class KalmanTradingApp:
         # linger after the chart is cleared.
         if hasattr(self, 'auto_status_lbl'):
             self.auto_status_lbl.config(text="auto: idle", fg='#8b949e')
+        # Wipe the sim/replay ledger + state_df so a fresh symbol/run starts from a
+        # clean book (plan §7.3). Also resets the recommendation panel below.
+        self._reset_accounting()
+        if hasattr(self, 'rec_ret_lbl'):
+            self._update_recommendation_panel(None)
         self.redraw_chart()
 
     def toggle_stream(self):
@@ -978,12 +1103,16 @@ class KalmanTradingApp:
             return
         if self.streaming:
             # Up to this click we were streaming -> user clicked to STOP. Tear down subscription.
-            # cancelMktData(reqId=1) tells TWS to stop sending ticks for the request that was
-            # opened below with reqMktData(1, ...). It is NOT a loop — it's a single cancel
-            # message. After this, tickPrice callbacks for reqId 1 stop arriving, so on_tick
+            # cancelMktData(reqId) tells TWS to stop sending ticks for the request that was
+            # opened below with reqMktData(reqId, ...). It is NOT a loop — it's a single cancel
+            # message. After this, tickPrice callbacks for that reqId stop arriving, so on_tick
             # is no longer fed. The IB reader thread itself keeps running (still alive for
             # historical data, account updates, orders); only this market-data stream stops.
-            self.ib.cancelMktData(1)
+            # We cancel with the reqId we actually opened with (from next_req_id), not a
+            # literal 1, so we don't accidentally cancel some other request.
+            if self._mkt_data_req_id is not None:
+                self.ib.cancelMktData(self._mkt_data_req_id)
+                self._mkt_data_req_id = None
             self.streaming = False
             self.stream_btn.config(text="▶ Start stream")
             self.status_lbl.config(text="● Connected", fg='#3fb950')
@@ -1018,16 +1147,24 @@ class KalmanTradingApp:
             # or suppress them in favor of LAST (STK).
             self.ib.sectype = self.sectype_var.get().strip().upper()
             self.ib._last_emitted_mid = None  # reset dedup across symbols
-            # reqMktData opens a streaming subscription. reqId=1 is the handle we later pass
-            # to cancelMktData. After this returns, the IB reader thread will start invoking
-            # IBApp.tickPrice for every tick — which in turn calls self.on_tick (see below).
-            # This is the "engine": from here on, every tick from TWS drives one pass through
-            # on_tick. No polling, no while loop on our side.
+            # Allocate a UNIQUE reqId for this subscription from the app's shared
+            # counter. This is the Blocker #6 fix: the counter starts at 1, so a
+            # hardcoded reqId=1 here would collide with the first id a historical
+            # pull (get_historical_bars -> next_req_id) hands out, and TWS would
+            # mis-route ticks vs bars. We stash it so the STOP branch / clear_chart
+            # cancel the exact same id.
+            self._mkt_data_req_id = self.ib.next_req_id()
+            # reqMktData opens a streaming subscription. The reqId we just reserved
+            # is the handle we later pass to cancelMktData. After this returns, the
+            # IB reader thread will start invoking IBApp.tickPrice for every tick —
+            # which in turn calls self.on_tick (see below). This is the "engine":
+            # from here on, every tick from TWS drives one pass through on_tick.
+            # No polling, no while loop on our side.
             #
             # Args: (reqId, contract, genericTickList="", snapshot=False,
             #        regulatorySnapshot=False, mktDataOptions=[]).
             # snapshot=False => streaming (what we want). True would deliver one frame.
-            self.ib.reqMktData(1, self.contract(), "", False, False, [])
+            self.ib.reqMktData(self._mkt_data_req_id, self.contract(), "", False, False, [])
             self.streaming = True
             self.stream_btn.config(text="■ Stop stream")
             self.status_lbl.config(text="● Streaming", fg='#58a6ff')
@@ -1043,6 +1180,12 @@ class KalmanTradingApp:
         # ============================================================================
 
         kx_before = self.kalman.x if self.kalman is not None else None
+        # in the below getattr, "_last_tick_source" is an optional attribute 
+        # that IBApp.tickPrice sets to "LAST" or "BID/ASK/MID" depending on the tickType. 
+        # It's just for logging/debugging so we can see which feed the tick came from; 
+        # it has no functional role.
+        # note that the syntax of getattr(obj, "attr", default) means "get obj.attr 
+        # if it exists, else return default".
         src = getattr(self.ib, "_last_tick_source", "?")
         dlog("on_tick_in", price=price, src=src, kx_before=kx_before,
              bar_start=self.bar_start, cur_bar=self.current_bar)
@@ -1134,6 +1277,14 @@ class KalmanTradingApp:
                 # `price` here is the closing tick of the bar we JUST finalized — it
                 # is the most authoritative "last price" for signal evaluation.
                 self._check_auto_signal(price)
+
+            # ---- SIM/REPLAY: mark the book + refresh the decision at bar close ----
+            # Capture the CLOSED bar's timestamp and closing price BEFORE we reset
+            # bar_start to the new forming bar below. Then dispatch the recommendation
+            # refresh + state_df mark onto the Tk main thread (we're on the IB reader
+            # thread here; both touch Tk widgets / pandas state owned by the main thread).
+            closed_bar_ts = self.bar_start
+            self.root.after(0, lambda t=closed_bar_ts, p=price: self._on_bar_close(t, p))
 
             # Start a fresh forming bar anchored at this tick.
             self.current_bar = [ts, price, price, price, price]
@@ -1247,61 +1398,39 @@ class KalmanTradingApp:
         # 3) Noise-lever -> observation-noise scale R. High scale => trust OU more.
         scale = noise_lever_to_scale(self.noise_lever_var.get())
 
-        # 4) Cross-thread handshake setup.
-        #    historical_data[reqId] will be populated by IBApp.historicalData callbacks
-        #    fired on the IB reader thread. hist_done is a threading.Event that the IB
-        #    thread will .set() when historicalDataEnd arrives. We clear both first so
-        #    we don't see stale data from a prior request.
-        self.ib.historical_data.clear()
-        self.ib.hist_done.clear()
-
-        # 4b) Same delayed-data opt-in we use for the live stream. Historical bars
-        #     do NOT strictly require this — reqHistoricalData generally returns
-        #     bars even without a live entitlement, because historical data has its
-        #     own (usually free) entitlement tier. But setting it here keeps the
-        #     two calls consistent: if the user picks a symbol with no live sub
-        #     (e.g. BTC), historical still works, and the subsequent reqMktData
-        #     won't error out with 10089. Calling reqMarketDataType more than
-        #     once is safe — IB just remembers the latest choice.
-        # Read the tier from the same UI combobox that toggle_stream uses, so
-        # historical and live stay in lockstep when the user flips Live<->Delayed.
+        # 4) Delayed-data opt-in (same tier we use for the live stream). Historical
+        #    bars do NOT strictly require this — reqHistoricalData generally returns
+        #    bars even without a live entitlement, because historical data has its
+        #    own (usually free) tier. But setting it keeps historical and live in
+        #    lockstep when the user flips Live<->Delayed, and means a symbol with no
+        #    live sub (e.g. BTC) still calibrates and won't 10089 on the later
+        #    reqMktData. Calling reqMarketDataType more than once is safe — IB keeps
+        #    the latest choice.
         self.ib.reqMarketDataType(self._mkt_data_type_code())
 
-        # 5) Fire the async historical request (reqId=2). Returns immediately; the IB
-        #    thread will start streaming bars into historical_data[2] via the
-        #    IBApp.historicalData callback, terminated by historicalDataEnd which
-        #    sets the hist_done event we wait on below.
-        #
-        # Args: (reqId, contract, endDateTime="", durationStr, barSizeSetting,
-        #        whatToShow="TRADES", useRTH=1, formatDate=1, keepUpToDate=False,
-        #        chartOptions=[]).
-        #   whatToShow="TRADES" -> traded prices (for non-trading symbols like FX
-        #     use "MIDPOINT" or "BID_ASK" instead, else IB returns no bars).
-        #   useRTH=1 -> regular trading hours only. Set to 0 to include extended
-        #     hours / 24h sessions (relevant for crypto, FX, futures on a Sunday).
-        #   keepUpToDate=False -> one-shot pull, not a streaming subscription.
-        # Pick whatToShow + useRTH by secType:
-        #   STK    -> TRADES, RTH only (typical equity behavior).
-        #   CASH   -> MIDPOINT, useRTH=0 (FX has no trades; 24h session).
-        #   CRYPTO -> MIDPOINT, useRTH=0 (PAXOS quotes ~24/7, no "trade" data either).
+        # 5) Pick whatToShow + useRTH by secType (TRADES on a non-trading symbol
+        #    returns zero bars, so this matters):
+        #      STK            -> TRADES,   RTH only (typical equity behavior).
+        #      CASH (FX)      -> MIDPOINT, useRTH=0 (FX has no trades; 24h session).
+        #      CRYPTO (PAXOS) -> MIDPOINT, useRTH=0 (~24/7, no "trade" data either).
         sectype = self.sectype_var.get().strip().upper()
-        if sectype == "CASH":
-            what_to_show, use_rth = "MIDPOINT", 0
-        elif sectype == "CRYPTO":
+        if sectype in ("CASH", "CRYPTO"):
             what_to_show, use_rth = "MIDPOINT", 0
         else:
             what_to_show, use_rth = "TRADES", 1
-        self.ib.reqHistoricalData(2, self.contract(), "", duration_str, bar_size_setting, what_to_show, use_rth, 1, False, [])
 
-        # 6) BLOCK the main thread until the IB thread signals "done" (or 20s timeout).
-        #    This is why refresh_30m feels synchronous even though IB's API is async:
-        #    we wait on the Event the IB thread will set. If the user clicked Refresh
-        #    mid-stream, the Tk UI is unresponsive for up to 20s here — acceptable
-        #    because this only runs at calibration time, not per-tick.
-        self.ib.hist_done.wait(timeout=20)
-
-        # 7) Pull the bars the IB thread deposited. If empty, abort with a popup.
-        bars = self.ib.historical_data.get(2, [])
+        # 6) Pull the bars via the shared library helper. This REPLACES the old
+        #    hand-rolled reqId=2 + hist_done handshake: get_historical_bars allocates
+        #    a UNIQUE reqId from the app counter and uses its own per-request Event,
+        #    so it can never collide with the live market-data subscription. It still
+        #    BLOCKS the Tk main thread until historicalDataEnd (or a 20s timeout) —
+        #    acceptable because this only runs at calibration time, not per-tick —
+        #    and returns a list of bar dicts (keys datetime/open/high/low/close/volume).
+        bars = get_historical_bars(
+            self.ib, self.contract(),
+            duration=duration_str, bar_size=bar_size_setting,
+            what_to_show=what_to_show, use_rth=use_rth, timeout=20,
+        )
         if not bars:
             messagebox.showwarning("Data", "No historical bars received. Check symbol and market hours.")
             return
@@ -1314,7 +1443,9 @@ class KalmanTradingApp:
                 # space and an optional timezone token. Old code used [:16] +
                 # '%Y%m%d  %H:%M' (two spaces) which silently failed for every
                 # bar and dropped to datetime.now(), making hover tooltips lie.
-                parts = b['date'].split()
+                # NOTE: the library helper stores the date under the 'datetime' key
+                # (matching historicalData()), not 'date' as the old kts IBApp did.
+                parts = b['datetime'].split()
                 t = datetime.strptime(f"{parts[0]} {parts[1]}", '%Y%m%d %H:%M:%S')
             except Exception:
                 t = datetime.now()
@@ -1446,8 +1577,12 @@ class KalmanTradingApp:
             cap = 100.0
         # Signed delta this order would add to our running position.
         delta = side * step_qty
-        # Projected new position if we DID place this order.
-        projected = self.position + delta
+        # Projected new position if we DID place this order. Use the mode-appropriate
+        # current position: the sim accounting engine's figure in paper mode, the
+        # optimistic live counter otherwise — so the cap reflects the book we actually
+        # have in the active mode (in sim self.position stays 0 and would never cap).
+        cur_pos = self.sim_position if self.sim_mode_var.get() else self.position
+        projected = cur_pos + delta
         # Cap check: refuse the trade if it would breach |max position|. We also
         # surface a lightweight UI hint + log line so the user understands WHY a
         # visually-obvious band breach failed to fire.
@@ -1476,31 +1611,36 @@ class KalmanTradingApp:
 
     def place_trade(self, side):
         # ============================================================================
-        # MANUAL order entry. There is NO automated signal logic anywhere in this file.
-        # This method is only invoked via the three Tkinter buttons wired up in setup_ui:
-        #   "Long"  -> place_trade( 1)   (BUY  100 shares market)
-        #   "Short" -> place_trade(-1)   (SELL 100 shares market)
-        #   "Close" -> place_trade( 0)   (flatten current position with opposite side)
-        # The buttons use lambdas:
-        #     ttk.Button(..., command=lambda: self.place_trade(1)).pack(...)
-        # so Tk fires this method on the MAIN thread when the user clicks. on_tick does
-        # NOT call place_trade — the Kalman mean is displayed but never compared to
-        # price to generate a signal. If you wanted auto-trading, you'd add a check in
-        # on_tick (e.g. if price < kalman.x - k*sigma) and dispatch the order via
-        # root.after(0, lambda: self.place_trade(1)) so it lands on the main thread.
+        # Order entry. Invoked two ways, BOTH on the Tk MAIN thread:
+        #   (a) the three Tkinter buttons wired up in setup_ui:
+        #         "Long"  -> place_trade( 1)   (BUY  open)
+        #         "Short" -> place_trade(-1)   (SELL open)
+        #         "Close" -> place_trade( 0)   (flatten current position)
+        #       via lambdas, e.g. ttk.Button(..., command=lambda: self.place_trade(1));
+        #   (b) the auto-trade signal: _check_auto_signal (on the IB reader thread)
+        #       dispatches self.root.after(0, lambda s=side: self.place_trade(s)) so the
+        #       actual order placement still lands on the Tk main thread.
+        # Order CONSTRUCTION is delegated to the shared library builders, and SENDING
+        # goes through OrderApp (which reserves the order id under a lock) — so this
+        # method only does GUI-side concerns: sizing, the crypto price reference, and
+        # optimistic position bookkeeping.
         # ============================================================================
 
-        # Guard: need a live connection and an allocated order id from nextValidId.
-        if not self.connected or self.ib.next_order_id is None:
+        # Mode split. In SIMULATED (paper) mode trades are filled locally — no IBKR,
+        # so no connection / order id is required; pure replay works offline. In LIVE
+        # mode we need the connection + an allocated order id + a built OrderApp (all
+        # established in connect_ib once the handshake completes).
+        sim = self.sim_mode_var.get()
+        if not sim and (not self.connected or self.ib.next_order_id is None or self.order_app is None):
             messagebox.showerror("Trade", "Not connected or no order ID.")
             return
 
-        contract = self.contract()
-        is_crypto = contract.secType == "CRYPTO"
+        contract_obj = self.contract()
+        is_crypto = contract_obj.secType == "CRYPTO"
 
         # Default open size:
-        #   - STK/CASH: 100 units (shares / base-currency units).
-        #   - CRYPTO: 0.001 BTC (~$70 at $70k BTC). 100 BTC default would be
+        #   - STK/CASH: 10 units (shares / base-currency units).
+        #   - CRYPTO: 0.001 BTC (~$70 at $70k BTC). A 100-BTC default would be
         #     a multi-million-dollar order on PAXOS and instantly rejected.
         # Must be Decimal for ibapi >=10.19 to preserve fractional precision —
         # passing a float here can serialize as "0.0010000000000001" and break
@@ -1510,89 +1650,88 @@ class KalmanTradingApp:
         else:
             qty = 10
 
+        # Current position depends on mode: sim_position (accounting engine) when
+        # simulating, else the optimistic live counter.
+        cur_pos = self.sim_position if sim else self.position
+
+        # Decide action + final qty for OPEN vs CLOSE.
         if side == 0:
             # CLOSE: flatten by sending the opposite-direction order for
             # |current position| units. If we're flat already, nothing to do.
-            if self.position == 0:
+            if cur_pos == 0:
                 messagebox.showinfo("Close", "No position to close.")
                 return
-            # For crypto, self.position is stored as a number; wrap in Decimal
-            # so the IOC limit order below carries fractional size correctly.
-            qty = Decimal(str(abs(self.position))) if is_crypto else abs(self.position)
-            order = Order()
-            order.action = "SELL" if self.position > 0 else "BUY"
+            # For crypto, the position is stored as a number; wrap in Decimal
+            # so the IOC limit order carries fractional size correctly.
+            qty = Decimal(str(abs(cur_pos))) if is_crypto else abs(cur_pos)
+            action = "SELL" if cur_pos > 0 else "BUY"
         else:
             # OPEN long (side=+1) or short (side=-1).
-            order = Order()
-            order.action = "BUY" if side == 1 else "SELL"
+            action = "BUY" if side == 1 else "SELL"
 
-        order.totalQuantity = qty
+        # Signed side for the accounting engine / fill: +1 BUY, -1 SELL.
+        fill_side = 1 if action == "BUY" else -1
 
+        # ── SIMULATED FILL (plan §7.3, replay half — no IBKR) ──────────────────
+        if sim:
+            # Pick a fill reference price. Crypto uses ask (BUY) / bid (SELL) when a
+            # live quote exists; everything else (and offline replay) falls back to the
+            # current mark (_last_mark_price). This is the price the synthesized Fill
+            # books at — a slippage model can layer on later (§4c note).
+            if is_crypto:
+                fill_price = self.ib.ask if action == "BUY" else self.ib.bid
+                if fill_price is None:
+                    fill_price = self._last_mark_price()
+            else:
+                fill_price = self._last_mark_price()
+            if fill_price is None or not np.isfinite(fill_price) or fill_price <= 0:
+                messagebox.showerror("Trade", "No price reference for simulated fill.")
+                return
+            # Mark timestamp = the current bar's start so the resulting state_df row
+            # overwrites this bar's row (one row per bar) instead of scattering off-grid
+            # rows on every mid-bar click.
+            mark_ts = self.bar_start or datetime.now()
+            # exec_backend.execute synthesizes the Fill and funnels it through apply_fill
+            # — the SOLE mutator of sim_position/P&L — stamping the current forecast
+            # context so the ledger remembers WHY the trade happened (our extra fields).
+            self.exec_backend.execute(fill_side, float(qty), fill_price,
+                                      mark_ts, ctx=self._last_forecast_view)
+            # Re-mark the book and refresh panel + plots immediately, so position / P&L
+            # move on the click itself (not only at the next bar close).
+            self._record_state_row(mark_ts, self._last_mark_price())
+            self.update_portfolio_display()
+            self._refresh_recommendation()
+            self.redraw_chart()
+            return
+
+        # ── LIVE PATH (unchanged) ──────────────────────────────────────────────
+        # Build the order via the shared library builders. The PAXOS IOC/tick-snap
+        # rules and the eTradeOnly/firmQuoteOnly hasattr guard now live INSIDE those
+        # builders (crypto_marketable_limit_order / market_order), so they are not
+        # duplicated here. The CLOSE leg routes through the SAME builders as OPEN.
         if is_crypto:
-            # PAXOS (IB's crypto venue) DOES NOT accept MKT orders. It only
-            # supports LMT with tif="IOC" (immediate-or-cancel marketable
-            # limit). Submitting MKT here is the most common cause of silent
-            # crypto-order rejection (error 201 / "Order rejected - reason:").
-            #
-            # Strategy: build a "marketable" limit by crossing the spread by a
-            # small buffer so the IOC fills against the resting opposite side.
-            # If the order doesn't fill within the IOC window, TWS cancels it
-            # rather than resting it on the book.
-            #
-            # Buffer = 10 bps (0.1%). Tight enough to avoid bad fills, wide
-            # enough to clear normal PAXOS spread (~5-20 bps on BTC/USD).
-            ref = self.ib.ask if order.action == "BUY" else self.ib.bid
+            # PAXOS rejects MKT — it needs a marketable IOC limit. The builder crosses
+            # the spread and snaps to tick; we just supply the reference price: the ask
+            # for a BUY / bid for a SELL, falling back to last_price. The None-check
+            # stays here in the GUI (the builder assumes a valid, non-None ref).
+            ref = self.ib.ask if action == "BUY" else self.ib.bid
             if ref is None:
-                # No top-of-book yet — fall back to last_price or refuse.
                 ref = self.ib.last_price
             if ref is None:
                 messagebox.showerror("Trade", "No price reference for crypto LMT order.")
                 return
-            buf = 1.001 if order.action == "BUY" else 0.999
-            raw_px = ref * buf
-            # PAXOS BTC/USD uses a coarse minTick (currently $0.50, sometimes
-            # higher at very high BTC prices). Submitting a price with $0.01
-            # precision triggers Error 110 "price does not conform to the
-            # minimum price variation". Snap to the next valid grid point in
-            # the safe direction: round UP for BUY (so the marketable limit
-            # still crosses), round DOWN for SELL. Using $0.50 as a
-            # conservative default — works for all current PAXOS crypto
-            # symbols. For a more robust impl, query reqContractDetails and
-            # use details.minTick.
-            tick = 0.50
-            if order.action == "BUY":
-                # note that mat.ceil means round up: 
-                # the fact that we are rounding up raw_px / tick means we are 
-                # rounding up the number of ticks to quote
-                snapped = math.ceil(raw_px / tick) * tick
-            else:
-                snapped = math.floor(raw_px / tick) * tick
-            order.orderType = "LMT"
-            order.lmtPrice = round(snapped, 2)
-            order.tif = "IOC"
-            # PAXOS quotes 24/7; without this flag, off-hours orders (which is
-            # most of the time for crypto) get rejected as "outside RTH".
-            order.outsideRth = True
+            order = crypto_marketable_limit_order(action, qty, ref)
         else:
-            # Equities / FX: plain market order is fine.
-            order.orderType = "MKT"
+            # Equities / FX: plain market order.
+            order = market_order(action, qty)
 
-        # eTradeOnly / firmQuoteOnly were REMOVED from the Order class in
-        # ibapi >=10.19. On older builds they default to True and block routing
-        # for retail; on newer builds setting them either raises AttributeError
-        # or makes TWS reject with "Error validating request" (321). Guard with
-        # hasattr so the same code runs on both old and new ibapi.
-        if hasattr(order, "eTradeOnly"):
-            order.eTradeOnly = False
-        if hasattr(order, "firmQuoteOnly"):
-            order.firmQuoteOnly = False
-
-        # Send the order to TWS. placeOrder is async — TWS will reply via
-        # orderStatus/execDetails/openOrder callbacks (not handled in this file),
-        # so we update our local "position" optimistically without waiting for fills.
-        self.ib.placeOrder(self.ib.next_order_id, contract, order)
-        # Each order needs a unique id; bump locally rather than re-asking IB.
-        self.ib.next_order_id += 1
+        # Send through OrderApp.place_order: it reserves the next order id UNDER A LOCK
+        # (reserve_order_id) and calls placeOrder, so two concurrent dispatches (a
+        # manual click racing the auto-trade signal) can't grab the same id — this
+        # replaces the old un-locked `self.ib.next_order_id += 1`. placeOrder is async:
+        # TWS replies via orderStatus/execDetails callbacks (not handled here), so we
+        # update our local position optimistically without waiting for fills.
+        self.order_app.place_order(contract_obj, order)
 
         # Optimistic local bookkeeping. If the order partially fills or is rejected,
         # this number will drift from reality — IBApp.position callbacks (populated by
@@ -1604,14 +1743,281 @@ class KalmanTradingApp:
         self.update_portfolio_display()
 
     def update_portfolio_display(self):
-        self.pos_lbl.config(text=str(self.position))
-        val = self.ib.account_value if self.ib.account_value is not None else self.cash
+        # In sim mode the authoritative position is the accounting engine's
+        # sim_position (filled units); in live mode it's the optimistic self.position.
+        # Show whichever matches the active mode so the top widget never lies.
+        shown_pos = self.sim_position if self.sim_mode_var.get() else self.position
+        # Trim trailing zeros on fractional (crypto) sizes for readability.
+        self.pos_lbl.config(text=f"{shown_pos:g}")
+        # Portfolio value: live NetLiquidation if connected, else our sim cash base
+        # plus realised + unrealised P&L (so the figure moves in pure replay too).
+        if self.ib.account_value is not None and not self.sim_mode_var.get():
+            val = self.ib.account_value
+        else:
+            unreal = self._sim_unrealised(self._last_mark_price())
+            val = self.cash + self.sim_realised + unreal
         self.port_lbl.config(text=f"{val:,.2f}")
 
+    # ========================================================================
+    # RISK / RETURN ENGINE (plan §7.1, PRIORITY 1)
+    # ========================================================================
+    def _last_mark_price(self):
+        # Best available "current price" for marking the book: the live last tick if
+        # we have one, else the forming bar's close, else μ. Used by P&L marking and
+        # the recommendation's r_hat denominator.
+        if self.ib.last_price is not None and np.isfinite(self.ib.last_price):
+            return float(self.ib.last_price)
+        if self.current_bar is not None:
+            return float(self.current_bar[4])
+        if self.ohlc_bars:
+            return float(self.ohlc_bars[-1]['c'])
+        return float(self.mu) if self.mu is not None else None
+
+    def _forecast_quantiles(self, h, qs):
+        # Gaussian closed-form quantile PATHS over steps 1..h (plan §7.1, 1d option 1).
+        # For step k the OU conditional std is σ·sqrt(1 − φ^(2k)); the q-quantile price
+        # is central_k + z(q)·std_k, with central_k from KalmanOU.forecast and z(q) the
+        # standard-normal inverse-CDF (statistics.NormalDist — no scipy dependency).
+        # Returns {q: [price_1..price_h]} so the chart can fill_between band paths and
+        # _compute_recommendation can read the final-step value via [-1]. Designed so the
+        # bootstrap / Monte-Carlo variants (1d options 2/3) are drop-in replacements.
+        if self.kalman is None or self.sigma is None:
+            return {}
+        central = self.kalman.forecast(h)
+        phi = self.kalman.phi
+        out = {}
+        for q in qs:
+            z = statistics.NormalDist().inv_cdf(q)
+            path = []
+            for k in range(1, h + 1):
+                std_k = self.sigma * math.sqrt(max(1.0 - phi ** (2 * k), 0.0))
+                path.append(central[k - 1] + z * std_k)
+            out[q] = path
+        return out
+
+    def _compute_recommendation(self):
+        # Build a ForecastView from the CURRENT model state (plan §7.1). Returns None
+        # if the model isn't calibrated or there's no price to measure against.
+        if self.kalman is None or self.sigma is None or self.mu is None:
+            return None
+        p_now = self._last_mark_price()
+        if p_now is None or not np.isfinite(p_now) or p_now <= 0:
+            return None
+
+        # Horizon H reuses the existing forecast-horizon control (panel ↔ chart agree).
+        try:
+            H = max(1, int(self.forecast_horizon_var.get()))
+        except (TypeError, ValueError):
+            H = 5
+
+        # Central H-step projection -> expected simple return (§1c).
+        central = self.kalman.forecast(H)[-1]
+        r_hat_h = central / p_now - 1.0
+        # Worst/best-case returns from the H-step quantile prices (final step).
+        qbands = self._forecast_quantiles(H, (Q_LOW_P, Q_HIGH_P))
+        if qbands:
+            q_low_ret = qbands[Q_LOW_P][-1] / p_now - 1.0
+            q_high_ret = qbands[Q_HIGH_P][-1] / p_now - 1.0
+        else:
+            q_low_ret = q_high_ret = r_hat_h
+
+        # ---- risk-aware weight cap (§3a v1) ----
+        # If the worst case is worse than the hard floor, no trade is allowed at all.
+        if q_low_ret < REC_QLOW_FLOOR:
+            w_cap = 0.0
+            binding_cap = "idio_floor"
+        else:
+            # Otherwise scale the cap down linearly as the worst case worsens toward the
+            # floor: benign downside -> full REC_W_CAP; near the floor -> ~0.
+            frac = (q_low_ret - REC_QLOW_FLOOR) / (0.0 - REC_QLOW_FLOOR)
+            w_cap = REC_W_CAP * max(0.0, min(1.0, frac))
+            binding_cap = "none"
+
+        # Map expected return -> target weight (piecewise linear), then clip to ±cap.
+        w_unclipped = REC_ALPHA * r_hat_h
+        w_target = max(-w_cap, min(w_cap, w_unclipped))
+        # Flag if the cap (not the raw signal) is what limited the size.
+        if binding_cap == "none" and abs(w_unclipped) > w_cap and w_cap > 0:
+            binding_cap = "idio_floor"
+
+        # ---- translate weight into a concrete order (§3c) ----
+        # Account value: live NetLiq when trading live, else the sim cash + P&L base.
+        if self.ib.account_value is not None and not self.sim_mode_var.get():
+            account_value = float(self.ib.account_value)
+        else:
+            account_value = self.cash + self.sim_realised + self._sim_unrealised(p_now)
+        if account_value <= 0:
+            account_value = self.cash
+        cur_pos = self.sim_position if self.sim_mode_var.get() else self.position
+        value_current = cur_pos * p_now
+        w_current = value_current / account_value if account_value else 0.0
+        value_target = w_target * account_value
+        value_delta = value_target - value_current
+        w_delta = w_target - w_current
+        qty = value_delta / p_now if p_now else 0.0
+        direction = "long" if qty > 1e-12 else ("short" if qty < -1e-12 else "flat")
+
+        return ForecastView(
+            r_hat_h=r_hat_h, q_low=q_low_ret, q_high=q_high_ret,
+            central_price=central, mu_now=float(self.mu), p_now=p_now,
+            direction=direction, qty=qty, w_current=w_current, w_target=w_target,
+            w_delta=w_delta, value_current=value_current, value_target=value_target,
+            value_delta=value_delta, binding_cap=binding_cap,
+        )
+
+    def _intensity_hex(self, base_rgb, magnitude, scale):
+        # Interpolate a colour from dim grey toward `base_rgb` as |magnitude| grows
+        # (capped at `scale`). Gives the panel its "green brighter = more upside,
+        # red brighter = more downside" feel (§3b) without external colour libs.
+        t = max(0.0, min(1.0, abs(magnitude) / scale)) if scale else 0.0
+        dim = (0.4, 0.4, 0.4)
+        r = dim[0] + (base_rgb[0] - dim[0]) * t
+        g = dim[1] + (base_rgb[1] - dim[1]) * t
+        b = dim[2] + (base_rgb[2] - dim[2]) * t
+        return f'#{int(r*255):02x}{int(g*255):02x}{int(b*255):02x}'
+
+    def _update_recommendation_panel(self, fv):
+        # Render a ForecastView into the panel labels (plan §7.1). Tk-thread only.
+        if fv is None:
+            for lbl in (self.rec_ret_lbl, self.rec_worst_lbl, self.rec_best_lbl,
+                        self.rec_trade_lbl):
+                lbl.config(text="—")
+            self.rec_cap_lbl.config(text="—")
+            return
+        # Expected return — neutral.
+        self.rec_ret_lbl.config(text=f"{fv.r_hat_h*100:+.2f}%")
+        # Worst case — red, intensity by downside magnitude (scaled vs a 10% reference).
+        self.rec_worst_lbl.config(
+            text=f"{fv.q_low*100:+.2f}%",
+            fg=self._intensity_hex((0.97, 0.32, 0.29), fv.q_low, 0.10))
+        # Best case — green, intensity by upside magnitude.
+        self.rec_best_lbl.config(
+            text=f"{fv.q_high*100:+.2f}%",
+            fg=self._intensity_hex((0.25, 0.73, 0.31), fv.q_high, 0.10))
+        # Recommended order line: direction + |qty| + $ value delta.
+        if fv.direction == "flat":
+            self.rec_trade_lbl.config(text="flat (no trade)")
+        else:
+            self.rec_trade_lbl.config(
+                text=f"{fv.direction.upper()} {abs(fv.qty):.4g} (${fv.value_delta:+,.0f})")
+        # Binding cap explainer.
+        self.rec_cap_lbl.config(
+            text=f"{fv.binding_cap}  w {fv.w_current*100:.1f}%→{fv.w_target*100:.1f}%")
+
+    def _refresh_recommendation(self):
+        # Compute + render the recommendation, caching the view so redraw_chart's
+        # quantile bands can reuse it. Safe to call on the Tk main thread only.
+        fv = self._compute_recommendation()
+        self._last_forecast_view = fv
+        self._update_recommendation_panel(fv)
+
+    def _on_bar_close(self, ts, price):
+        # Tk-thread bar-close hook for the sim/replay stack (dispatched from on_tick).
+        # Refresh the recommendation FIRST so the freshly-computed forecast context is
+        # what gets stamped into the new state_df row, then mark the book at this bar's
+        # close. Recompute order: panel -> ledger row -> (chart redrawn separately by
+        # the existing _deferred_chart_update on the same bar close).
+        self._refresh_recommendation()
+        self._record_state_row(ts, price)
+
+    # ========================================================================
+    # ACCOUNTING ENGINE (plan §7.3 / §4b) — the SOLE mutator of sim position/P&L.
+    # ========================================================================
+    def apply_fill(self, fill):
+        # Apply one Fill to the running book per the §4b rules. `fill.side` is +1 BUY /
+        # -1 SELL; `fill.qty` is the absolute size. Updates sim_position, sim_avg_entry
+        # and sim_realised in place and accumulates closed units for the current bar.
+        signed_qty = fill.side * fill.qty          # +long add / -short add
+        pos = self.sim_position
+        avg = self.sim_avg_entry
+        price = fill.price
+
+        if pos == 0 or (pos > 0 and signed_qty > 0) or (pos < 0 and signed_qty < 0):
+            # SAME DIRECTION (or opening from flat): position grows. New avg entry is the
+            # volume-weighted average of the old open units and the new fill.
+            new_pos = pos + signed_qty
+            if pos == 0:
+                avg = price
+            else:
+                avg = (avg * abs(pos) + price * abs(signed_qty)) / abs(new_pos)
+            self.sim_position = new_pos
+            self.sim_avg_entry = avg
+        else:
+            # OPPOSITE DIRECTION: the fill reduces (and maybe flips) the position.
+            closing = min(abs(signed_qty), abs(pos))   # units actually closed here
+            # Realised P&L on the closed units: sign(pos)·(price − avg)·units.
+            self.sim_realised += np.sign(pos) * (price - avg) * closing
+            self._sim_closed_this_bar += closing
+            if abs(signed_qty) <= abs(pos):
+                # Pure reduction (no flip): avg entry of the surviving units is unchanged.
+                self.sim_position = pos + signed_qty
+                if self.sim_position == 0:
+                    self.sim_avg_entry = 0.0
+            else:
+                # FLIP: close all old units (done above) then OPEN the remainder on the
+                # opposite side at the fill price (new leg, fresh avg entry).
+                remainder = abs(signed_qty) - abs(pos)
+                self.sim_position = np.sign(signed_qty) * remainder
+                self.sim_avg_entry = price
+
+    def _sim_unrealised(self, price):
+        # Mark-to-market P&L on currently-open units at `price`. Zero when flat or when
+        # no price is available. (last_price − avg_entry)·position carries the sign
+        # correctly for both long and short books.
+        if price is None or not np.isfinite(price) or self.sim_position == 0:
+            return 0.0
+        return (price - self.sim_avg_entry) * self.sim_position
+
+    def _record_state_row(self, ts, price):
+        # Append/refresh the state_df row for bar timestamp `ts`, marked at `price`
+        # (plan §4b — state_df is the single source of truth for all replay plots). Each
+        # bar close calls this once; the top widgets and every analytics axis read it.
+        if price is None or not np.isfinite(price):
+            price = self.sim_avg_entry or 0.0
+        unreal = self._sim_unrealised(price)
+        fv = self._last_forecast_view
+        row = {
+            "position": self.sim_position,
+            "avg_entry_price": self.sim_avg_entry,
+            "entry_cost": self.sim_avg_entry * self.sim_position,
+            "mark_value": price * self.sim_position,
+            "unrealised_pnl": unreal,
+            "realised_pnl": self.sim_realised,
+            "total_pnl": self.sim_realised + unreal,
+            "last_price": price,
+            # In sim, intended == filled (immediate fills); unfilled is the residual,
+            # always ~0 here but wired so the live path (partial fills) reuses the plot.
+            "intended": self.sim_position,
+            "filled": self.sim_position,
+            "unfilled": 0.0,
+            "closed_units": self._sim_closed_this_bar,
+            "r_hat": fv.r_hat_h if fv is not None else np.nan,
+            "q_low": fv.q_low if fv is not None else np.nan,
+            "q_high": fv.q_high if fv is not None else np.nan,
+        }
+        # One row per bar timestamp: overwrite if the bar is re-marked, else append.
+        self.state_df.loc[ts] = row
+        # Reset the per-bar closure accumulator now that it's been recorded.
+        self._sim_closed_this_bar = 0.0
+
+    def _reset_accounting(self):
+        # Wipe all sim accounting + the state_df. Called from clear_chart so a fresh
+        # symbol/run doesn't inherit a stale ledger.
+        self.sim_position = 0.0
+        self.sim_avg_entry = 0.0
+        self.sim_realised = 0.0
+        self._sim_closed_this_bar = 0.0
+        self.state_df = self.state_df.iloc[0:0]
+        self.exec_backend = SimExecutionBackend(self)
+        self._last_forecast_view = None
+
     def redraw_chart(self):
+        # ORCHESTRATOR (plan §7.2). Clears every axis, then delegates to one _draw_*
+        # helper per pane so each concern (price / P&L / position / entry) is isolated
+        # and individually testable. The analytics axes are only touched when they
+        # exist (analytics toggle on) and there is state_df data to plot.
         self.ax.clear()
-        self.ax.set_facecolor('#161b22')
-        self.ax.tick_params(colors='#8b949e')
+        self._style_ax(self.ax)
         # Reattach hover annotation after ax.clear() (clear() removed it).
         if hasattr(self, '_hover_annot'):
             self._hover_annot = self.ax.annotate(
@@ -1620,6 +2026,24 @@ class KalmanTradingApp:
                 color='#c9d1d9', fontsize=9, family='Consolas', zorder=10,
             )
             self._hover_annot.set_visible(False)
+        # PRICE PANE — the original chart, now in its own helper.
+        self._draw_price()
+        # ANALYTICS PANES — only if the stacked layout is active. Each clears + restyles
+        # its axis then draws from state_df (replay/sim source of truth).
+        if self.ax_pnl is not None:
+            for ax in (self.ax_pnl, self.ax_pos, self.ax_entry):
+                ax.clear()
+                self._style_ax(ax)
+            self._draw_pnl()
+            self._draw_positions()
+            self._draw_entry_vs_market()
+        self.canvas.draw_idle()
+
+    def _draw_price(self):
+        # PRICE PANE (extracted verbatim from the original redraw_chart, with the
+        # ±1σ forecast cone swapped for explicit quantile bands per §7.2/§1d). Draws
+        # candles, the close line, the Kalman history dots, the live mean / μ / bands,
+        # and the OU forecast with worst/best-case quantile shading.
         has_current = self.current_bar is not None and (self.ohlc_bars or self.streaming)
         n = len(self.ohlc_bars)
         # Throttled snapshot log: at most once per 500ms.
@@ -1633,7 +2057,6 @@ class KalmanTradingApp:
         if not self.ohlc_bars and not has_current:
             self.ax.set_ylabel("Price", color='#c9d1d9')
             self.ax.set_xlabel("Bar index", color='#8b949e')
-            self.canvas.draw_idle()
             return
         if self.ohlc_bars:
             t = [b['t'] for b in self.ohlc_bars]
@@ -1707,34 +2130,141 @@ class KalmanTradingApp:
             self.ax.axhline(y=lower, color='#d29922', linestyle=':', linewidth=1.2,
                             alpha=0.8, zorder=3, label=f'Lower band (μ − {k:.2f}σ)')
 
-        # ---- OU FORECAST: dots OR line + ±1σ cone ----
-        # Mean path: x_k = μ + φ^k * (x - μ), k = 1..H (= KalmanOU.forecast).
-        # k-step conditional variance (OU):
-        #   Var(x_{t+k}|x_t) = σ_eps^2 * (1 - φ^(2k)) / (1 - φ^2)
-        #                    = σ_stationary^2 * (1 - φ^(2k))
-        # 1σ cone half-width at step k: σ * sqrt(1 - φ^(2k)). As k→∞, → σ.
+        # ---- OU FORECAST: central path + explicit WORST/BEST-CASE quantile bands ----
+        # (plan §7.2 / §1d) — the ±1σ Gaussian cone is replaced by the same quantile
+        # PATHS the recommendation panel reasons about (_forecast_quantiles), so the
+        # shaded region the trader sees == the q_low/q_high that drive the trade. The
+        # central path is still the OU mean projection (KalmanOU.forecast). Bands come
+        # from Q_LOW_P / Q_HIGH_P; inner bands can be stacked later at other alphas.
         if self.show_forecast_bounds_var.get() and self.kalman is not None and self.sigma is not None:
             H = max(1, int(self.forecast_horizon_var.get()))
             mean_path = self.kalman.forecast(H)
-            phi = self.kalman.phi
-            ks = np.arange(1, H + 1)
-            cone = self.sigma * np.sqrt(np.maximum(1.0 - phi ** (2 * ks), 0.0))
+            # Per-step quantile price paths (dict {q: [p_1..p_H]}).
+            qbands = self._forecast_quantiles(H, (Q_LOW_P, Q_HIGH_P))
             fc_x = list(range(n_draw, n_draw + H))
-            upper_fc = np.array(mean_path) + cone
-            lower_fc = np.array(mean_path) - cone
             self.ax.plot(fc_x, mean_path, color='#a371f7', linewidth=1.6,
                          alpha=0.9, zorder=5, label='OU forecast')
-            self.ax.fill_between(fc_x, lower_fc, upper_fc, color='#a371f7', alpha=0.18,
-                                 zorder=4, linewidth=0, label='OU ±1σ cone')
+            if qbands:
+                lower_fc = qbands[Q_LOW_P]
+                upper_fc = qbands[Q_HIGH_P]
+                self.ax.fill_between(
+                    fc_x, lower_fc, upper_fc, color='#a371f7', alpha=0.18,
+                    zorder=4, linewidth=0,
+                    label=f'OU P{int(Q_LOW_P*100)}–P{int(Q_HIGH_P*100)} band')
         elif self.forecast_prices:
             fc_x = list(range(n_draw, n_draw + len(self.forecast_prices)))
             self.ax.scatter(fc_x, self.forecast_prices, color='#a371f7', s=22, zorder=5, label='OU forecast')
         self.ax.set_ylabel("Price", color='#c9d1d9')
-        self.ax.set_xlabel("Bar index", color='#8b949e')
+        # Only the price axis carries the x-label when analytics axes are stacked below
+        # it (the bottom analytics axis re-labels it); standalone, it labels itself.
+        if self.ax_pnl is None:
+            self.ax.set_xlabel("Bar index", color='#8b949e')
         handles, labels = self.ax.get_legend_handles_labels()
         if handles:
             self.ax.legend(loc='upper left', fontsize=8)
-        self.canvas.draw_idle()
+
+    def _state_xy(self, column):
+        # Helper: return (x_indices, y_values) for one state_df column, with x = the
+        # row's integer position so it lines up bar-for-bar with the price candles
+        # (which are also drawn at integer indices). Empty frame -> empty lists.
+        if self.state_df.empty or column not in self.state_df.columns:
+            return [], []
+        y = self.state_df[column].to_list()
+        return list(range(len(y))), y
+
+    def _draw_pnl(self):
+        # P&L DECOMPOSITION PANE (§4c plot 1). Three toggleable line series sourced
+        # straight from state_df: realised (crystallised), unrealised (mark-to-market
+        # on open units), and total (their sum). All from the SAME frame the top
+        # widget summarises, so the number on screen and the curve never disagree.
+        if self.state_df.empty:
+            self.ax_pnl.set_ylabel("P&L", color='#c9d1d9', fontsize=8)
+            return
+        x, _ = self._state_xy("total_pnl")
+        if self.show_realised_var.get():
+            self.ax_pnl.plot(x, self.state_df["realised_pnl"].to_list(),
+                             color='#3fb950', linewidth=1.2, label='realised')
+        if self.show_unrealised_var.get():
+            self.ax_pnl.plot(x, self.state_df["unrealised_pnl"].to_list(),
+                             color='#58a6ff', linewidth=1.2, label='unrealised')
+        if self.show_total_var.get():
+            self.ax_pnl.plot(x, self.state_df["total_pnl"].to_list(),
+                             color='#f0883e', linewidth=1.5, label='total')
+        # Zero reference so sign of P&L reads at a glance.
+        self.ax_pnl.axhline(0, color='#30363d', linewidth=0.8, zorder=1)
+        self.ax_pnl.set_ylabel("P&L", color='#c9d1d9', fontsize=8)
+        h, _l = self.ax_pnl.get_legend_handles_labels()
+        if h:
+            self.ax_pnl.legend(loc='upper left', fontsize=7, ncol=3)
+
+    def _draw_positions(self):
+        # POSITION BREAKDOWN PANE (§4c plot 2). filled (actually held), intended
+        # (target the recommendation wanted), unfilled (= intended − filled), and a
+        # scatter of unit closures over time. In pure sim every order fills instantly,
+        # so intended == filled and unfilled ≈ 0 — but the series are wired so the live
+        # path (partial fills) reuses the exact same plot.
+        if self.state_df.empty:
+            self.ax_pos.set_ylabel("Units", color='#c9d1d9', fontsize=8)
+            return
+        x, _ = self._state_xy("filled")
+        if self.show_filled_var.get():
+            self.ax_pos.plot(x, self.state_df["filled"].to_list(),
+                             color='#7ee787', linewidth=1.4, label='filled')
+        if self.show_intended_var.get():
+            self.ax_pos.plot(x, self.state_df["intended"].to_list(),
+                             color='#d29922', linewidth=1.0, linestyle='--', label='intended')
+            self.ax_pos.plot(x, self.state_df["unfilled"].to_list(),
+                             color='#f85149', linewidth=0.8, alpha=0.7, label='unfilled')
+        # closed_units markers: only where a closure happened (non-zero), so the chart
+        # isn't littered with zeros. Size scaled by magnitude for quick visual weight.
+        closed = self.state_df["closed_units"].to_list()
+        cx = [i for i, v in enumerate(closed) if v]
+        cy = [closed[i] for i in cx]
+        if cx:
+            self.ax_pos.scatter(cx, cy, color='#a371f7', s=24, zorder=5, label='closed')
+        self.ax_pos.axhline(0, color='#30363d', linewidth=0.8, zorder=1)
+        self.ax_pos.set_ylabel("Units", color='#c9d1d9', fontsize=8)
+        h, _l = self.ax_pos.get_legend_handles_labels()
+        if h:
+            self.ax_pos.legend(loc='upper left', fontsize=7, ncol=4)
+
+    def _draw_entry_vs_market(self):
+        # ENTRY-vs-MARKET PANE (§4c plot 3). avg_entry_price and last_price on one
+        # axis, with the background shaded by position SIGN — blue while long, pink
+        # while short, neutral when flat — by walking contiguous same-sign runs in
+        # state_df and drawing one axvspan per run (matplotlib has no vectorised band).
+        if self.state_df.empty:
+            self.ax_entry.set_ylabel("Entry/mkt", color='#c9d1d9', fontsize=8)
+            self.ax_entry.set_xlabel("Bar index", color='#8b949e')
+            return
+        x, _ = self._state_xy("last_price")
+        if self.show_entry_var.get():
+            # avg_entry_price is 0 when flat; mask those so the line doesn't dive to 0.
+            entry = [e if p != 0 else np.nan
+                     for e, p in zip(self.state_df["avg_entry_price"].to_list(),
+                                     self.state_df["position"].to_list())]
+            self.ax_entry.plot(x, entry, color='#d29922', linewidth=1.2, label='avg entry')
+        self.ax_entry.plot(x, self.state_df["last_price"].to_list(),
+                           color='#58a6ff', linewidth=1.0, alpha=0.8, label='last')
+        # Background sign shading: iterate runs of constant sign(position).
+        pos = self.state_df["position"].to_list()
+        i = 0
+        n = len(pos)
+        while i < n:
+            s = 0 if pos[i] == 0 else (1 if pos[i] > 0 else -1)
+            j = i
+            while j + 1 < n and (0 if pos[j + 1] == 0 else (1 if pos[j + 1] > 0 else -1)) == s:
+                j += 1
+            if s != 0:
+                # span from i-0.5 to j+0.5 so candles sit inside their shaded run.
+                color = '#1f6feb' if s > 0 else '#db61a2'
+                self.ax_entry.axvspan(i - 0.5, j + 0.5, color=color, alpha=0.10, zorder=0)
+            i = j + 1
+        self.ax_entry.set_ylabel("Entry/mkt", color='#c9d1d9', fontsize=8)
+        self.ax_entry.set_xlabel("Bar index", color='#8b949e')
+        h, _l = self.ax_entry.get_legend_handles_labels()
+        if h:
+            self.ax_entry.legend(loc='upper left', fontsize=7, ncol=2)
 
     def refresh_timer(self):
         self.update_portfolio_display()

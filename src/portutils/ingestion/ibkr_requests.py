@@ -37,9 +37,11 @@ request workflows.  That was the original intention behind keeping
 from __future__ import annotations
 
 import itertools
+import math
 import pathlib
 import threading
 import time
+from datetime import datetime  # stamp each emitted tick so on_tick consumers can bar-aggregate
 from threading import Thread  # connect_ib spins app.run() on a daemon reader thread
 
 import pandas as pd
@@ -150,8 +152,15 @@ def market_order(action, quantity):
     order.action = action.upper()
     order.orderType = 'MKT'
     order.totalQuantity = quantity
-    order.eTradeOnly = False
-    order.firmQuoteOnly = False
+    # eTradeOnly / firmQuoteOnly were REMOVED from the Order class in ibapi
+    # >=10.19. On older builds they default to True and block routing for retail;
+    # on newer builds setting them either raises AttributeError or makes TWS
+    # reject with "Error validating request" (321). Guard with hasattr so the
+    # same builder runs on both old and new ibapi.
+    if hasattr(order, "eTradeOnly"):
+        order.eTradeOnly = False
+    if hasattr(order, "firmQuoteOnly"):
+        order.firmQuoteOnly = False
     return order
 
 
@@ -167,6 +176,66 @@ def limit_order(action, quantity, limit_price):
     order = market_order(action, quantity)
     order.orderType = 'LMT'
     order.lmtPrice = float(limit_price)
+    return order
+
+
+def crypto_marketable_limit_order(action, quantity, ref_price, tick=0.50, buf_bps=10):
+    """Build a marketable IOC limit order for crypto (PAXOS).
+
+    PAXOS (IB's crypto venue) DOES NOT accept MKT orders. It only supports LMT
+    with tif="IOC" (immediate-or-cancel marketable limit). Submitting MKT is the
+    most common cause of silent crypto-order rejection (error 201 /
+    "Order rejected - reason:").
+
+    Strategy: build a "marketable" limit by crossing the spread by a small buffer
+    so the IOC fills against the resting opposite side. If the order doesn't fill
+    within the IOC window, TWS cancels it rather than resting it on the book.
+
+    Parameters
+    ----------
+    action : str       'BUY' or 'SELL'.
+    quantity           Order size (Decimal preferred for fractional crypto so it
+                       doesn't serialise as e.g. "0.0010000000000001").
+    ref_price : float  Reference price to cross from — the caller passes the ask
+                       for a BUY and the bid for a SELL (or last price as a
+                       fallback). The None-check stays in the caller, which has
+                       the UI context to surface an error; this builder assumes a
+                       valid ref_price.
+    tick : float       Min price increment for the symbol. PAXOS BTC/USD uses a
+                       coarse minTick (currently $0.50, sometimes higher at very
+                       high BTC prices). $0.50 is a conservative default that works
+                       for all current PAXOS crypto symbols; for a more robust impl
+                       query reqContractDetails and use details.minTick.
+    buf_bps : float    Spread-crossing buffer in basis points. 10 bps (0.1%) is
+                       tight enough to avoid bad fills, wide enough to clear normal
+                       PAXOS spread (~5-20 bps on BTC/USD).
+    """
+    order = Order()
+    order.action = action.upper()
+    order.orderType = 'LMT'
+    order.totalQuantity = quantity
+    # Cross the spread by buf_bps: BUY slightly above ref, SELL slightly below, so
+    # the marketable limit actually crosses and the IOC can fill immediately.
+    buf = (1.0 + buf_bps / 10000.0) if order.action == "BUY" else (1.0 - buf_bps / 10000.0)
+    raw_px = ref_price * buf
+    # Submitting a price off the tick grid triggers Error 110 "price does not
+    # conform to the minimum price variation". Snap to the next valid grid point
+    # in the SAFE direction: round UP for BUY (so the marketable limit still
+    # crosses), round DOWN for SELL.
+    if order.action == "BUY":
+        snapped = math.ceil(raw_px / tick) * tick
+    else:
+        snapped = math.floor(raw_px / tick) * tick
+    order.lmtPrice = round(snapped, 2)
+    order.tif = "IOC"
+    # PAXOS quotes 24/7; without this flag, off-hours orders (which is most of the
+    # time for crypto) get rejected as "outside RTH".
+    order.outsideRth = True
+    # Same eTradeOnly / firmQuoteOnly hasattr guard as market_order — see there.
+    if hasattr(order, "eTradeOnly"):
+        order.eTradeOnly = False
+    if hasattr(order, "firmQuoteOnly"):
+        order.firmQuoteOnly = False
     return order
 
 
@@ -357,9 +426,28 @@ class IBApp(EWrapper, EClient):
 
         # Market-data style state.
         self.managed_accounts = []
+        # Latest trade price, written by tickPrice() when tickType is LAST (4/68).
+        # note that tickPrice is the built-in EWrapper callback that IBKR fires 
+        # when a new price tick arrives, and it passes the price and tickType as arguments.
         self.last_price = None
+        # Latest top-of-book quote, written by tickPrice() for BID (1/66) /
+        # ASK (2/67). Used to synthesize a mid when LAST is stale (FX/CRYPTO).
         self.bid = None
         self.ask = None
+        # Active secType (set by the GUI right before reqMktData). Gates
+        # _maybe_emit_mid: FX/CRYPTO ("CASH"/"CRYPTO") keep emitting mids even
+        # after a LAST has been seen because their LAST stream is sparse/stale;
+        # equities (STK) suppress mids in favour of genuine LAST prints.
+        self.sectype = "STK"
+        # Dedup guard so identical consecutive synthesized mids don't spam on_tick.
+        self._last_emitted_mid = None
+        # Provenance tag set right before each on_tick call so the consumer/log can
+        # see where the price came from (a real LAST tick vs a synthesized mid).
+        self._last_tick_source = "?"
+        # Net liquidation value, written by accountSummary() on the NetLiquidation
+        # tag. A convenience for UIs that want a single account-value number
+        # without re-deriving it from account_summary_by_tag.
+        self.account_value = None
 
         # Historical bars keyed by reqId so multiple symbols can be in flight
         # without colliding in the same list.
@@ -545,19 +633,58 @@ class IBApp(EWrapper, EClient):
     # --- EWrapper callbacks: market data ----------------------------------
 
     def tickPrice(self, reqId, tickType, price, attrib):
-        # IBKR sends many tick types; here we keep only the common bid / ask /
-        # last fields that are most useful for a simple dashboard or UI.
+        # IB delivers different tickType IDs depending on the data tier:
+        #   LIVE  (entitlement / paid sub):  1=BID, 2=ASK, 4=LAST
+        #   DELAYED (free, ~15min lag):     66=BID, 67=ASK, 68=LAST
+        #   FROZEN/DELAYED-FROZEN: same IDs as their non-frozen counterparts.
+        # The tier is selected by reqMarketDataType(...) before reqMktData. If we
+        # only listened on 4 we would miss every delayed feed entirely (e.g. crypto
+        # on a Sunday arrives as type 68 — ignored, so on_tick never fires and any
+        # downstream model sits frozen).
         if price <= 0:
             return
-
-        if tickType == 4:
+        if tickType in (4, 68):          # LAST (live) or LAST (delayed)
             self.last_price = price
+            # Guard: on_tick may be None when IBApp is used without a consumer
+            # (historical-only pulls, REPL, account/position scripts). Calling
+            # None(...) would raise TypeError on the reader thread and can
+            # destabilise the EReader loop, so we skip rather than blow up.
             if self.on_tick:
-                self.on_tick(price)
-        elif tickType == 1:
+                self._last_tick_source = f"LAST({tickType})"
+                # Pass a timestamp so consumers can bar-aggregate. ts is optional
+                # in the signature for callers that don't need it.
+                self.on_tick(price, datetime.now())
+        elif tickType in (1, 66):        # BID (live) or BID (delayed)
             self.bid = price
-        elif tickType == 2:
+            # New bid — try to synthesize a mid if we also have an ask but LAST is
+            # stale/missing (common for FX/crypto).
+            self._maybe_emit_mid()
+        elif tickType in (2, 67):        # ASK (live) or ASK (delayed)
             self.ask = price
+            self._maybe_emit_mid()
+
+    def _maybe_emit_mid(self):
+        # FX (and frequently crypto on PAXOS) never sends LAST ticks — only
+        # BID/ASK. Without this, on_tick would never fire and any downstream model
+        # would freeze even though quotes are streaming. Synthesize a "last" from
+        # the mid of the most recent bid/ask pair and route it through on_tick.
+        # Equities (STK) prefer real LAST prints; if one has arrived, suppress mid
+        # synth so on_tick is driven by genuine trades. FX/CRYPTO have no
+        # meaningful LAST stream — bid/ask is the continuous signal there, so we
+        # keep emitting mids regardless of any stale LAST cached for a price label.
+        if self.last_price is not None and self.sectype not in ("CASH", "CRYPTO"):
+            return
+        if self.bid is None or self.ask is None or self.ask <= self.bid:
+            return
+        mid = 0.5 * (self.bid + self.ask)
+        # Skip duplicate emits when neither side moved.
+        if self._last_emitted_mid == mid:
+            return
+        self._last_emitted_mid = mid
+        # Same on_tick None-guard as tickPrice: IBApp may have no consumer wired in.
+        if self.on_tick:
+            self._last_tick_source = "MID"
+            self.on_tick(mid, datetime.now())
 
     # --- EWrapper callbacks: historical data ------------------------------
 
@@ -629,6 +756,14 @@ class IBApp(EWrapper, EClient):
         with self.lock:
             self.account_summary_rows.append(row)
             self.account_summary_by_tag[(account, tag)] = row
+            # Convenience: surface the single most-asked-for number (net
+            # liquidation) as a flat attribute so UIs can read app.account_value
+            # without re-scanning account_summary_by_tag. Best-effort float coerce.
+            if tag == "NetLiquidation":
+                try:
+                    self.account_value = float(value)
+                except (TypeError, ValueError):
+                    pass
 
     def accountSummaryEnd(self, reqId):
         """Signal that all requested account-summary rows have arrived."""
@@ -964,6 +1099,73 @@ def get_equity_data(
     finally:
         if owns_app:
             app.close()
+
+
+def get_historical_bars(
+    app,
+    contract_obj,
+    duration,
+    bar_size,
+    what_to_show='TRADES',
+    use_rth=1,
+    end='',
+    timeout=20,
+):
+    """Fetch historical OHLCV bars for ONE contract as a list of dicts.
+
+    This is the intraday-friendly sibling of get_equity_data(): it uses the same
+    per-reqId Event handshake, but it neither writes a CSV nor builds a DataFrame,
+    so a live UI can pull a short calibration window and feed the bars straight
+    into a model.
+
+    Requires an already-connected app (the caller owns the connection lifecycle).
+    Returns list[dict] with keys datetime/open/high/low/close/volume, oldest first
+    (the same shape historicalData() stores).
+    """
+    # Allocate a unique reqId from the shared counter so this pull cannot collide
+    # with a market-data subscription or any other in-flight request.
+    req_id = app.next_req_id()
+    event = threading.Event()
+    with app.lock:
+        app.historical_data[req_id] = []
+        app._hist_events[req_id] = event
+
+    # Default endDateTime to "now" (UTC) when not supplied.
+    end_time = end or time.strftime('%Y%m%d-%H:%M:%S', time.gmtime())
+    try:
+        # Fire the async request. historicalData() collects bars into
+        # app.historical_data[req_id]; historicalDataEnd() sets our event.
+        #   what_to_show: TRADES for equities; MIDPOINT/BID_ASK for FX/crypto
+        #     (which have no "trade" prints, so TRADES would return no bars).
+        #   use_rth: 1 = regular trading hours only; 0 = include 24h / extended
+        #     sessions (needed for crypto, FX, futures out of hours).
+        app.reqHistoricalData(
+            reqId=req_id,
+            contract=contract_obj,
+            endDateTime=end_time,
+            durationStr=duration,
+            barSizeSetting=bar_size,
+            whatToShow=what_to_show,
+            useRTH=use_rth,
+            formatDate=1,
+            keepUpToDate=0,            # one-shot, not a streaming subscription
+            chartOptions=[],
+        )
+        # Block until historicalDataEnd fires (or we time out) — see _wait_for.
+        _wait_for(event, timeout, 'historical bars')
+        with app.lock:
+            # list(...) copies before the finally clause clears the store.
+            return list(app.historical_data.get(req_id, []))
+    finally:
+        # Clean up this request's transient state whether or not it succeeded, so
+        # a later reuse of the same reqId can't see stale bars.
+        try:
+            app.cancelHistoricalData(req_id)
+        except Exception:
+            pass
+        with app.lock:
+            app._hist_events.pop(req_id, None)
+            app.historical_data.pop(req_id, None)
 
 
 # ═══════════════════════════════════════════════════════════════════════════

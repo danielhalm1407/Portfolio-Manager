@@ -28,6 +28,13 @@ After **both** merges the layering is:
 
 ## Current overlap (authoritative line references)
 
+> ⚠️ **Line-number caveat.** The `ibkr_requests.py` line refs below predate the
+> conn→requests merge and have drifted **~+85–95 lines** (the `connect_ib`/`disconnect_ib`
+> block, the merged docstring, and the expanded `IBApp.__init__` comments all sit above
+> them now). `kts.py` refs are unaffected. **Locate library symbols by name**
+> (`market_order`, `reserve_order_id`, `OrderApp.place_order`, …), not by the stale
+> line number, when executing.
+
 | Concern | `orders/kts.py` | `ibkr_requests.py` | Keep |
 |---|---|---|---|
 | Base class | `IBApp(EWrapper, EClient)` — kts.py:241 | `IBApp(IBKRApp)` → **`IBApp(EWrapper, EClient)`** after conn→requests merge | **library** |
@@ -125,14 +132,24 @@ def contract(self):
 construction, send. Split them.
 
 **3a. Order construction → library builders.**
-- STK/CASH market order: `market_order()` (ibkr_requests.py:59) already covers it.
+- STK/CASH market order: `market_order()` already covers it.
 - Crypto IOC marketable-limit + tick-snap logic (kts.py:1525–1566) is **missing** from
   the library. Add a pure builder:
 ```python
 def crypto_marketable_limit_order(action, qty, ref_price, tick=0.50, buf_bps=10):
     """IOC limit that crosses the spread by buf_bps and snaps to tick (PAXOS)."""
 ```
-  Holds kts.py:1545–1566. No Tk, fully unit-testable.
+  Holds the logic at kts.py:1545–1566. No Tk, fully unit-testable.
+- **Comment retention (critical here).** kts.py:1525–1566 carries the *only* written
+  explanation of the PAXOS order rules — why MKT is rejected, why IOC marketable-limit,
+  the 10 bps buffer rationale, the `minTick`/`$0.50` snap (ceil for BUY, floor for SELL),
+  and `outsideRth=True` for 24/7 crypto. **Relocate all of those comments verbatim into
+  the new builder.** They have no equivalent in the library today, so nothing is being
+  "combined" — they would simply be lost if not moved.
+- **The `ref_price` None-check stays in the GUI, not the builder.** The builder is pure
+  and assumes a valid `ref_price`. kts's "no top-of-book → fall back to last_price →
+  else `messagebox.showerror`" guard (kts.py:1538–1544) is Tk-coupled, so it remains in
+  `place_trade` *before* the builder is called.
 
 **3b. Order send → `OrderApp.place_order`** (ibkr_requests.py:1044). It calls
 `reserve_order_id()` (locked, :301) instead of kts's **un-locked**
@@ -156,8 +173,33 @@ self.order_app.place_order(contract_obj, order)
 # ...optimistic bookkeeping unchanged (kts.py:1593-1595)
 ```
 Build `self.order_app = OrderApp(self.ib)` once in `connect_ib` after the handshake
-(kts.py:899 block). `OrderApp.__init__` requires `app.connected` (ibkr_requests.py:1037)
-— true there.
+(kts.py:899 block). `OrderApp.__init__` requires `app.connected` — true there.
+
+**3e. `eTradeOnly` / `firmQuoteOnly` — fix the library builders (BLOCKER, easy to miss).**
+The library `market_order()` (and therefore `limit_order()`, which builds on it) set
+`order.eTradeOnly = False` and `order.firmQuoteOnly = False` **unconditionally**
+(ibkr_requests.py:153–154). Those attributes were **removed from the `Order` class in
+ibapi ≥10.19**; on newer builds assigning them raises `AttributeError` or makes TWS
+reject with error 321. kts already learned this and guards with `hasattr`
+(kts.py:1571–1579). → **Port the `hasattr` guard into the library builders** so the
+same code runs on old and new ibapi:
+```python
+if hasattr(order, "eTradeOnly"):
+    order.eTradeOnly = False
+if hasattr(order, "firmQuoteOnly"):
+    order.firmQuoteOnly = False
+```
+Bring kts's explanatory comment (kts.py:1571–1575) with it. Without this, the very
+first order placed through the merged path can fail on a modern ibapi install.
+
+**3f. Don't drop the CLOSE path.** §3d shows only the OPEN case. `place_trade(0)`
+(kts.py:1507–1517) flattens by sending the opposite-side order for `abs(self.position)`
+units, and for crypto must *still* go through `crypto_marketable_limit_order` (PAXOS
+rejects MKT on the close leg too). The refactor must route the close leg through the
+same builders: compute `action = "SELL" if position > 0 else "BUY"`,
+`qty = abs(position)`, then pick `market_order` vs `crypto_marketable_limit_order`
+exactly as the open leg does. Keep the "no position to close" guard + messagebox in the
+GUI.
 
 ---
 
@@ -168,11 +210,30 @@ Build `self.order_app = OrderApp(self.ib)` once in `connect_ib` after the handsh
    `CONN_REQUESTS_MERGE_PLAN.md`, the library `IBApp` inherits `EWrapper, EClient`
    **directly** — exactly the same base kts.py:241 already uses. So there is no longer
    a base-class mismatch to reconcile; kts simply imports the one library `IBApp`.
-   What remains is the *connection entry point*: kts `connect_ib` (kts.py:887) does its
-   own `connect` + daemon thread + 5 s poll; the library exposes
-   `app.start(host, port, client_id)` (ibkr_requests.py:254) which wraps the
-   now-co-located `connect_ib` and **retries client ids on error 326**.
-   → kts switches to `self.ib.start(...)` and deletes its private connect/thread code.
+   What remains is the *connection entry point*. kts's `KalmanTradingApp.connect_ib`
+   (kts.py:887–917) is two things glued together — split them:
+
+   **Part 1 — raw connection mechanics (kts.py:892–898): DELETE, replace with `start()`.**
+   `self.ib.connect(host, port, 98)` + daemon `Thread(target=self.ib.run)` + a
+   `50×0.1s` (5 s) poll on `self.ib.connected`. **None of this is unique** — the library
+   does all of it and more:
+   - module `connect_ib` = same connect + daemon thread + poll, **plus** a
+     `serverVersion() > 0` handshake guard kts lacks, and a `100×0.1s` (10 s) wait.
+   - `start()` wraps it and **auto-retries client_id on error 326** (123→124→125);
+     kts hardcodes `98` with no retry.
+   So the library is a strict superset. → Replace lines 892–898 with a single
+   `self.ib.start(host=self.host_var.get(), port=int(self.port_var.get()), client_id=…)`
+   inside a `try/except` that routes failure to `messagebox.showerror` (preserving kts's
+   existing error popup).
+
+   **Part 2 — GUI side-effects + post-connect seeding (kts.py:899–917): KEEP in the GUI.**
+   Setting the GUI `connected` flag, `self.order_id`, enabling/disabling the four
+   buttons, the status label, and the `reqAccountSummary(9001,…)` / `reqPositions()`
+   seeding are Tk-coupled and app-specific — they do **not** belong in the library and
+   stay in `KalmanTradingApp.connect_ib`. ⚠️ The seeding *reads* (`self.ib.positions[sym]`
+   keyed by bare symbol, kts.py:912; and `account_value`) **break against the library's
+   shapes** — fix per **Blocker #3** (positions keyed by `(account, conId or symbol)`;
+   no `account_value` attr unless added per §1b).
 
 2. **`on_tick` arity** — unify to `(price, ts=None)` (see 1c).
 
@@ -196,20 +257,41 @@ Build `self.order_app = OrderApp(self.ib)` once in `connect_ib` after the handsh
 5. **`dlog` coupling** — keep file logging in kts only; never import it into library
    (see 1e).
 
+6. **reqId collision: counter starts at 1, kts hardcodes `reqId=1` for the stream.**
+   The library hands out request IDs from `self._req_id_source = itertools.count(1)`
+   (ibkr_requests.py:346) via `next_req_id()` — so the **first** allocated id is `1`.
+   kts uses a **literal `reqId=1`** for the live market-data subscription
+   (`reqMktData(1, …)` / `cancelMktData(1)` — kts.py:1024, 980, 934) and a literal
+   `reqId=2` for historical (kts.py:1288). Once kts uses library helpers
+   (`get_historical_bars` → `next_req_id()`), the first historical pull draws id `1`
+   and **collides with the live market-data stream** — TWS will mis-route ticks/bars.
+   → Allocate the market-data stream id from the same source: store
+   `self._mkt_data_req_id = self.ib.next_req_id()` once when opening the stream and use
+   that variable for both `reqMktData` and `cancelMktData`, instead of the literal `1`.
+   (Alternatively reserve `1` and start the counter higher — but routing *everything*
+   through `next_req_id()` is the consistent fix.)
+
 ---
 
 ## Suggested execution sequence
 
 1. **[done in planning]** Read `ibkr_conn.py` — confirmed `IBKRApp` surface
    (`start`/`close` via `connect_ib`/`disconnect_ib`; old-style `error`).
-2. Port market-data logic into library `IBApp.tickPrice` + `__init__` (+ `_maybe_emit_mid`); widen `IBKRApp.error`.
-3. Add library `get_historical_bars()` and `crypto_marketable_limit_order()`.
-4. Rewrite `kts.py`: import library `IBApp`, `contract`, `market_order`, `OrderApp`,
-   new helpers; delete kts's private `IBApp` class (kts.py:241–468) and inline order build.
-5. Fix the 5 blockers (`start()`, `on_tick` arity, account/position accessors,
-   `error()`, `dlog`).
+2. Port market-data logic into library `IBApp.tickPrice` + `__init__` (+ `_maybe_emit_mid`).
+   (`error()` is already widened — done in the conn→requests merge.)
+3. Add library `get_historical_bars()` and `crypto_marketable_limit_order()`; **fix the
+   `eTradeOnly`/`firmQuoteOnly` guard in `market_order`/`limit_order`** (§3e).
+4. Rewrite `kts.py`: import library `IBApp`, `contract`, `market_order`,
+   `crypto_marketable_limit_order`, `OrderApp`, new helpers; delete kts's private
+   `IBApp` class (kts.py:241–468) and inline order build. Route the live market-data
+   subscription through `next_req_id()` (§Blocker #6). Keep the CLOSE path on the
+   builders (§3f).
+5. Fix the remaining blockers (`start()`, `on_tick` arity, account/position accessors,
+   `dlog`, reqId collision).
 6. **Test path:** historical pull → calibrate → stream ticks → manual order → auto
-   order, on both **STK** and **CRYPTO**.
+   order, on both **STK** and **CRYPTO**. Verify the first historical reqId does not
+   clash with the stream, and that an order places without an `eTradeOnly`
+   `AttributeError` on the installed ibapi version.
 
 ---
 

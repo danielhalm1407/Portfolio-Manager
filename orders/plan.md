@@ -182,17 +182,181 @@ AppScript / GAS is not relevant here — it's bound to Google Workspace and won'
 
 ---
 
+## 7. Implementation detail (priority-ordered): risk/return panel → plots → IBKR accounting
+
+This section makes §3 and §4 concrete: exact kts.py functions/attributes to add, where
+they hang off the existing `KalmanTradingApp`, and how they read from the library
+(`portutils.ingestion.ibkr_requests`). Ordered by the priority we agreed: **show the
+risk/return + recommended trade first**, *then* the graphic objects, *then* the order
+accounting/reconciliation underneath.
+
+### 7.1 — PRIORITY 1: risk/return + recommended-trade panel
+
+Goal: make the *decision* legible before any new plotting — expected return, worst case,
+best case, and the concrete recommended trade, all visible as text/colour.
+
+**Forecast → distribution object (the data the panel renders).**
+- Add a small dataclass `ForecastView` (module-level in kts.py, near `KalmanOU`):
+  fields `r_hat_h`, `q_low`, `q_high`, `central_price`, `mu_now`, plus the trade fields
+  `direction`, `qty`, `w_current`, `w_target`, `w_delta`, `value_current`,
+  `value_target`, `value_delta`, `binding_cap` (one of `"none"/"idio_floor"/"factor"/"portfolio"`).
+  This *is* the "per-asset forecast distribution object" §2 says must exist early.
+- `_forecast_quantiles(self, h, qs)` → dict `{q: price}`. v1 = Gaussian closed-form
+  (1d option 1): `price_q = central + z(q) * sigma * sqrt(1 - phi**(2h))`, `central`
+  from `self.kalman.forecast(h)[-1]`, `z` via `statistics.NormalDist().inv_cdf(q)` (no
+  scipy dep). Keep the signature so the bootstrap/MC variants (1d 2/3) drop in later.
+- `_compute_recommendation(self) -> ForecastView`: pulls `r_hat_h` from the forecast
+  price path (1c), `q_low`/`q_high` from `_forecast_quantiles`, maps `r_hat_h → w_target`
+  per §3a v1, applies the idiosyncratic `q_low` floor to set `binding_cap`, and derives
+  `qty`/`value_delta` from `w_delta * account_value`. **`account_value` comes from
+  `self.ib.account_value`** (now populated by the library `accountSummary`), falling back
+  to `self.cash`.
+
+**Widgets (extend `setup_ui`).**
+- New `ttk.LabelFrame` "Recommendation" beside the Trading frame. Store labels as
+  `self.rec_ret_lbl` (`r_hat_h`, neutral), `self.rec_best_lbl` (`q_high`, green),
+  `self.rec_worst_lbl` (`q_low`, red), `self.rec_trade_lbl` (direction + qty/notional),
+  `self.rec_cap_lbl` (binding cap). Mirror the §3c order-spec table as a compact grid.
+- `_update_recommendation_panel(self, fv: ForecastView)`: sets label text and scales the
+  green/red **intensity** by `abs(q_high)/abs(q_low)` magnitude (interpolate hex toward
+  brighter as upside/downside grows). Tk-thread only.
+
+**Wiring.** Call `_compute_recommendation()` + `_update_recommendation_panel()` from
+`on_tick`'s bar-close branch (right after the forecast is recomputed) so the panel and the
+chart cone always agree. The "recommended order" shown is exactly what auto-trade would
+dispatch — surface it in manual mode too, so the user sees the call before clicking.
+
+### 7.2 — PRIORITY 2: graphic objects (existing chart + new inventory/P&L plots)
+
+**Refactor the single axis into a stacked, shared-x figure.**
+- `setup_chart` today builds one `self.ax`. Change to a `GridSpec` (or
+  `fig.subplots(n, 1, sharex=True)`): `self.ax` (price, tallest), `self.ax_pnl`,
+  `self.ax_pos`, `self.ax_entry`. Keep the existing price drawing untouched — just move
+  it into a `_draw_price()` helper called from `redraw_chart`.
+- Split `redraw_chart` into `_draw_price()` / `_draw_pnl()` / `_draw_positions()` /
+  `_draw_entry_vs_market()`. `redraw_chart` calls whichever sub-axes are enabled. This
+  keeps the current behaviour behind defaults (only price on until replay/live state exists).
+- **Replace the ±1σ cone** (`show_forecast_bounds`) with quantile bands from
+  `_forecast_quantiles`: `fill_between(fc_x, q_low_path, q_high_path)`. Add inner/outer
+  bands later by stacking more `fill_between` calls at different alphas.
+
+**The three new plots (§4c) — exact objects + data source.**
+- `_draw_pnl()`: `self.ax_pnl.plot(idx, realised)`, `(idx, unrealised)`, `(idx, total)`
+  from `self.state_df`. Toggle via `self.show_realised_var` / `show_unrealised_var` /
+  `show_total_var` flipping `line.set_visible`.
+- `_draw_positions()`: `filled`, `unfilled` (= intended − filled), `intended` lines +
+  `scatter` markers for `closed_units`. Same toggle pattern.
+- `_draw_entry_vs_market()`: `avg_entry_price` and `last_price` on `self.ax_entry`;
+  long/short background via `axvspan` (blue when `position>0`, pink when `<0`, none flat) —
+  iterate contiguous sign runs in `state_df` and draw one span each.
+- `self.state_df` (pandas, indexed by bar timestamp) is the single source of truth for all
+  three; the top widget (position + P&L) is just a view of its last row (§4b).
+
+**How the plots get their numbers — LIVE vs REPLAY (interacts with `ibkr_requests`).**
+- **Replay:** `state_df` is filled by the simulated accounting engine (7.3) — no IBKR.
+- **Live:** the same `state_df` rows are *cross-checked / sourced* from the library on a
+  cadence (extend `refresh_timer`, currently 2 s):
+  - `get_positions_data(self.ib)` → DataFrame of `position`/`avgCost` per `(account, conId)`.
+  - `get_account_updates(self.ib, account)` → `updatePortfolio` rows giving
+    `marketValue`, `averageCost`, `unrealizedPnL`, `realizedPnL` — the authoritative P&L
+    decomposition to plot against ours.
+  - `get_pnl_single_data(self.ib, account, con_id)` → IBKR's contract-level
+    `dailyPnL`/`unrealizedPnL`/`realizedPnL` for a direct numeric check.
+  Plot OUR computed series solid and IBKR's as a faint reference overlay so divergence is
+  visible at a glance.
+
+**Chart UX (§5)** stays as-is in priority; navigation toolbar + range selector come after
+the plots exist.
+
+### 7.3 — PRIORITY 3: order accounting + IBKR reconciliation
+
+The accounting engine is backend-agnostic; only the *fill source* differs (live IBKR vs
+simulated replay). Design both to emit the SAME `Fill` shape so §4b rules and the 7.2 plots
+are identical in either mode.
+
+**Common types (module-level).**
+- `Fill(order_id, ts, side, qty, price, perm_id=None, source="sim"|"live")`.
+- `apply_fill(self, fill)`: implements the §4b accounting rules (VWAP on grow, realised on
+  reduce, split on flip) and appends/updates the current `state_df` row. This is the ONLY
+  function that mutates position/P&L — both backends funnel through it.
+
+**Execution backend split.**
+- `SimExecutionBackend` (replay): on a recommended trade, synthesize a `Fill` at the bar's
+  price (optionally a slippage model later) and call `apply_fill`. Fully simulated — no
+  network. Also stamps each fill/record with the forecast context (`r_hat`, `q_low`,
+  `q_high`, `binding_cap` at decision time) — our EXTRA fields beyond what IBKR returns.
+- `LiveExecutionBackend`: `order_id = self.order_app.place_order(contract, order)`; record
+  an intended order `{order_id, intended_qty, status:"PendingSubmit"}`. Then **verify
+  against IBKR** (below) and only call `apply_fill` from the *authoritative* execution
+  callbacks, not from the optimistic guess.
+
+**Live verification — "did IBKR actually take it, and is the P&L what IBKR says?"**
+Because we placed the order on this client, the fills come back automatically on the reader
+thread into the library `IBApp` state — no extra request needed:
+- `self.ib.order_status[order_id]` (from `orderStatus`) → `status`, `filled`, `remaining`,
+  `avgFillPrice`, `lastFillPrice`, `permId`. Watch `status` move
+  `PendingSubmit → Submitted → Filled`; that transition IS the confirmation the order went
+  through.
+- `self.ib.executions` (from `execDetails`) → the actual fills (`shares`, `price`, `side`,
+  `time`, `orderId`, `permId`). Build `Fill`s from THESE for `apply_fill` so our ledger
+  equals IBKR's prints.
+- `get_open_orders_data(self.ib)` already merges `open_orders` + `order_status` into one
+  DataFrame — use it for a periodic `_reconcile_orders()` (on the `refresh_timer`) that
+  flips our intended orders to filled/cancelled and reconciles `self.position` to the
+  IBKR-derived figure (authoritative over the optimistic update in `place_trade`).
+- For PnL truth: `get_pnl_single_data` / `get_account_updates` as in 7.2 — assert our
+  `unrealised`/`realised` track IBKR's `unrealizedPnL`/`realizedPnL`; show a small "✓ matches
+  IBKR / ⚠ drift Δ" badge.
+
+**1:1 field mapping (our ledger ⊇ IBKR).** Our `state_df` / order ledger must carry at
+least every field IBKR exposes, mapped directly, plus our additions:
+
+| Our field | IBKR source (callback / helper) |
+|---|---|
+| `position` | `position()` / `updatePortfolio.position` (get_positions_data / get_account_updates) |
+| `avg_entry_price` | `avgCost` (position) / `averageCost` (updatePortfolio) |
+| `mark_value` | `marketValue` (updatePortfolio) |
+| `unrealised_pnl` | `unrealizedPnL` (updatePortfolio / pnlSingle) |
+| `realised_pnl` | `realizedPnL` (updatePortfolio / pnlSingle) |
+| fill `qty`/`price`/`side`/`time` | `execDetails` → `shares`/`price`/`side`/`time` |
+| order `status`/`filled`/`avg_fill` | `orderStatus` → `status`/`filled`/`avgFillPrice` |
+| `order_id` / `perm_id` | `orderStatus`/`execDetails` → `orderId`/`permId` |
+| **`intended_qty` / `unfilled`** | *ours* — target not yet executed |
+| **`r_hat`/`q_low`/`q_high`/`binding_cap` at entry** | *ours* — forecast context |
+| **`source` (sim/live)** | *ours* — replay vs live provenance |
+
+**Small library additions this implies (in `ibkr_requests.py`).** The callbacks
+(`orderStatus`, `execDetails`, `updatePortfolio`, `pnlSingle`) and most getters already
+exist. Two gaps to fill when we get here:
+- `execDetailsEnd` callback + a `get_executions_data(app, ...)` helper (calls
+  `reqExecutions` with an `ExecutionFilter`, waits on the End event) — only needed to pull
+  fills from *other* sessions / historical; live same-session fills already arrive via
+  `execDetails`.
+- An optional `get_order_status(app, order_id)` thin convenience over
+  `app.order_status[order_id]` for the reconcile loop (or just read the dict directly).
+Keep these in the library (pure request workflows); the GUI only orchestrates.
+
+---
+
 ## Build order
 
+0. **(PRIORITY)** Risk/return + recommendation panel (§7.1): `ForecastView`,
+   `_forecast_quantiles` (Gaussian), `_compute_recommendation`, `_update_recommendation_panel`.
+   Pure display over the *existing* model — no new plots, no accounting yet.
 1. Drifting-mean OU with linear trend (1b Phase 1) + return readout (1c).
-2. Quantile bands via Gaussian closed-form (1d option 1).
-3. Recommendation panel showing `r_hat`, `q_low`, `q_high`, suggested `w_target`, with idiosyncratic floor only.
-4. Replay loader + state dataframe + P&L decomposition plot (§4).
-5. Replay plots 2 + 3 (position breakdown, entry vs market with long/short shading).
-6. Chart UX: navigation toolbar, date range selector (§5).
-7. Externally-supplied trend (1b Phase 2).
-8. Cyclical components (1b Phase 3) + bootstrap quantiles (1d option 2).
-9. Portfolio-level risk pipeline (section 2 stages 2–4) + Kelly sizing.
-10. (Parallel track) Static replay export → Plotly.js on GitHub Pages (§6 step 1).
+2. Quantile bands via Gaussian closed-form (1d option 1) — replaces the ±1σ cone (§7.2).
+3. Wire the panel from step 0 to the drifting-mean + quantile outputs and to auto-trade
+   dispatch (idiosyncratic floor only); the recommended order shown == what auto-trade sends.
+4. Stacked-axes chart refactor (§7.2) + accounting engine (`Fill`/`apply_fill`, §7.3) +
+   replay loader + `state_df` + P&L decomposition plot (§4b/§4c).
+5. Replay plots 2 + 3 (position breakdown, entry vs market with long/short shading, §7.2).
+6. Live order reconciliation against IBKR (§7.3): `_reconcile_orders` on the timer, P&L
+   match badge via `get_account_updates`/`get_pnl_single_data`; plus the small library
+   additions (`execDetailsEnd` + `get_executions_data`) if cross-session fills are needed.
+7. Chart UX: navigation toolbar, date range selector (§5).
+8. Externally-supplied trend (1b Phase 2).
+9. Cyclical components (1b Phase 3) + bootstrap quantiles (1d option 2).
+10. Portfolio-level risk pipeline (section 2 stages 2–4) + Kelly sizing.
+11. (Parallel track) Static replay export → Plotly.js on GitHub Pages (§6 step 1).
 
 Each step keeps the existing UI runnable; new controls additive, old behaviour preserved behind defaults.
