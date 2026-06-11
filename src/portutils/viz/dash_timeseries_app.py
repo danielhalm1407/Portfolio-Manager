@@ -743,7 +743,7 @@ def _build_level_figure(df, cfg: TimeSeriesAppConfig, time_range=None):
                         name=cfg.label_map.get(col, col),
                         legendgroup=col,         # link pos + neg traces in the legend so toggling one hides both
                         showlegend=show_legend_once,
-                        line=dict(width=1.0, color=cfg.colour_map.get(col)),
+                        line=dict(width=0, color=cfg.colour_map.get(col)),
                         opacity=cfg.opacity_map.get(col, cfg.default_opacity),
                     )
                 )
@@ -760,7 +760,7 @@ def _build_level_figure(df, cfg: TimeSeriesAppConfig, time_range=None):
                         name=cfg.label_map.get(col, col),
                         legendgroup=col,
                         showlegend=show_legend_once,
-                        line=dict(width=1.0, color=cfg.colour_map.get(col)),
+                        line=dict(width=0, color=cfg.colour_map.get(col)),
                         opacity=cfg.opacity_map.get(col, cfg.default_opacity),
                     )
                 )

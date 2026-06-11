@@ -1,0 +1,852 @@
+{
+  "1": {
+    "metadata": {
+      "order_id": 1,
+      "perm_id": null,
+      "client_id": null,
+      "parent_id": null,
+      "submitted_at": "2026-06-07T04:00:00",
+      "contract": {
+        "symbol": "BTC",
+        "sec_type": "CRYPTO",
+        "exchange": "PAXOS",
+        "currency": "USD",
+        "con_id": null
+      },
+      "action": "SELL",
+      "order_type": "MKT",
+      "total_qty": 0.08095772699664028,
+      "limit_price": null,
+      "tif": "DAY",
+      "market_price_at_submit": 62365.25,
+      "strategy_tag": "ou_mean_revert_v1",
+      "rationale": {
+        "expected_return_h": -0.002482218860636154,
+        "q_low_h": -0.004375825597852101,
+        "q_high_h": -0.0005886121234202069,
+        "previous_weight": 0.0,
+        "target_weight": -0.004964437721272308,
+        "capped_weight": -0.004964437721272308,
+        "recommended_weight": -0.004964437721272308,
+        "weight_change": -0.004964437721272308,
+        "min_turnover_weight": 0.0025,
+        "previous_value": 0.0,
+        "target_value": -5048.94888357722,
+        "reference_price": 62365.25,
+        "signed_qty": -0.08095772699664028
+      }
+    },
+    "state": {
+      "as_of": "2026-06-07T04:00:00",
+      "status": "Filled",
+      "qty_filled": 0.08095772699664028,
+      "qty_outstanding": 0.0,
+      "lifecycle": "SIM_FILLED",
+      "realised_cum": 0.0,
+      "unrealised": -0.0
+    },
+    "history": [
+      {
+        "ts": "2026-06-07T04:00:00",
+        "event": "ORDER_UPDATE",
+        "status": "Submitted",
+        "qty_filled": 0.0,
+        "qty_outstanding": 0.08095772699664028,
+        "avg_fill_price": null,
+        "fill": null,
+        "pnl": {
+          "realised_cum": 0.0,
+          "unrealised": 0.0,
+          "mark_price": null
+        }
+      },
+      {
+        "ts": "2026-06-07T04:00:00",
+        "event": "ORDER_UPDATE",
+        "status": "Filled",
+        "qty_filled": 0.08095772699664028,
+        "qty_outstanding": 0.0,
+        "avg_fill_price": 62365.25,
+        "fill": {
+          "exec_id": "sim-1",
+          "ts": "2026-06-07T04:00:00",
+          "qty": 0.08095772699664028,
+          "price": 62365.25,
+          "commission": 0.0,
+          "role": "OPEN",
+          "realised_total": 0.0
+        },
+        "pnl": {
+          "realised_cum": 0.0,
+          "unrealised": -0.0,
+          "mark_price": 62365.25
+        }
+      }
+    ]
+  },
+  "2": {
+    "metadata": {
+      "order_id": 2,
+      "perm_id": null,
+      "client_id": null,
+      "parent_id": null,
+      "submitted_at": "2026-06-07T04:23:00",
+      "contract": {
+        "symbol": "BTC",
+        "sec_type": "CRYPTO",
+        "exchange": "PAXOS",
+        "currency": "USD",
+        "con_id": null
+      },
+      "action": "SELL",
+      "order_type": "MKT",
+      "total_qty": 0.04146787015903276,
+      "limit_price": null,
+      "tif": "DAY",
+      "market_price_at_submit": 62457.25,
+      "strategy_tag": "ou_mean_revert_v1",
+      "rationale": {
+        "expected_return_h": -0.003759216750930494,
+        "q_low_h": -0.005650034191150066,
+        "q_high_h": -0.001868399310710811,
+        "previous_weight": -0.004971797573607758,
+        "target_weight": -0.007518433501860988,
+        "capped_weight": -0.007518433501860988,
+        "recommended_weight": -0.007518433501860988,
+        "weight_change": -0.0025466359282532306,
+        "min_turnover_weight": 0.0025,
+        "previous_value": -5056.396994460911,
+        "target_value": -7646.36612795116,
+        "reference_price": 62457.25,
+        "signed_qty": -0.04146787015903276
+      }
+    },
+    "state": {
+      "as_of": "2026-06-07T04:23:00",
+      "status": "Filled",
+      "qty_filled": 0.04146787015903276,
+      "qty_outstanding": 0.0,
+      "lifecycle": "SIM_FILLED",
+      "realised_cum": 0.0,
+      "unrealised": -7.448110883690768
+    },
+    "history": [
+      {
+        "ts": "2026-06-07T04:23:00",
+        "event": "ORDER_UPDATE",
+        "status": "Submitted",
+        "qty_filled": 0.0,
+        "qty_outstanding": 0.04146787015903276,
+        "avg_fill_price": null,
+        "fill": null,
+        "pnl": {
+          "realised_cum": 0.0,
+          "unrealised": 0.0,
+          "mark_price": null
+        }
+      },
+      {
+        "ts": "2026-06-07T04:23:00",
+        "event": "ORDER_UPDATE",
+        "status": "Filled",
+        "qty_filled": 0.04146787015903276,
+        "qty_outstanding": 0.0,
+        "avg_fill_price": 62457.25,
+        "fill": {
+          "exec_id": "sim-2",
+          "ts": "2026-06-07T04:23:00",
+          "qty": 0.04146787015903276,
+          "price": 62457.25,
+          "commission": 0.0,
+          "role": "OPEN",
+          "realised_total": 0.0
+        },
+        "pnl": {
+          "realised_cum": 0.0,
+          "unrealised": -7.448110883690768,
+          "mark_price": 62457.25
+        }
+      }
+    ]
+  },
+  "3": {
+    "metadata": {
+      "order_id": 3,
+      "perm_id": null,
+      "client_id": null,
+      "parent_id": null,
+      "submitted_at": "2026-06-07T08:13:00",
+      "contract": {
+        "symbol": "BTC",
+        "sec_type": "CRYPTO",
+        "exchange": "PAXOS",
+        "currency": "USD",
+        "con_id": null
+      },
+      "action": "BUY",
+      "order_type": "MKT",
+      "total_qty": 0.19351629723769462,
+      "limit_price": null,
+      "tif": "DAY",
+      "market_price_at_submit": 62079.25,
+      "strategy_tag": "ou_mean_revert_v1",
+      "rationale": {
+        "expected_return_h": 0.002169610476517425,
+        "q_low_h": 0.0002672798657552544,
+        "q_high_h": 0.004071941087279818,
+        "previous_weight": -0.007472590869871679,
+        "target_weight": 0.00433922095303485,
+        "capped_weight": 0.00433922095303485,
+        "recommended_weight": 0.00433922095303485,
+        "weight_change": 0.01181181182290653,
+        "min_turnover_weight": 0.0025,
+        "previous_value": -7600.089252226316,
+        "target_value": 4413.257343066837,
+        "reference_price": 62079.25,
+        "signed_qty": 0.19351629723769462
+      }
+    },
+    "state": {
+      "as_of": "2026-06-07T08:13:00",
+      "status": "Filled",
+      "qty_filled": 0.19351629723769462,
+      "qty_outstanding": 0.0,
+      "lifecycle": "SIM_FILLED",
+      "realised_cum": 38.82876484115364,
+      "unrealised": 0.0
+    },
+    "history": [
+      {
+        "ts": "2026-06-07T08:13:00",
+        "event": "ORDER_UPDATE",
+        "status": "Submitted",
+        "qty_filled": 0.0,
+        "qty_outstanding": 0.19351629723769462,
+        "avg_fill_price": null,
+        "fill": null,
+        "pnl": {
+          "realised_cum": 0.0,
+          "unrealised": 0.0,
+          "mark_price": null
+        }
+      },
+      {
+        "ts": "2026-06-07T08:13:00",
+        "event": "ORDER_UPDATE",
+        "status": "Filled",
+        "qty_filled": 0.19351629723769462,
+        "qty_outstanding": 0.0,
+        "avg_fill_price": 62079.25,
+        "fill": {
+          "exec_id": "sim-3",
+          "ts": "2026-06-07T08:13:00",
+          "qty": 0.19351629723769462,
+          "price": 62079.25,
+          "commission": 0.0,
+          "role": "CLOSE",
+          "realised_total": 38.82876484115364
+        },
+        "pnl": {
+          "realised_cum": 38.82876484115364,
+          "unrealised": 0.0,
+          "mark_price": 62079.25
+        }
+      }
+    ]
+  },
+  "4": {
+    "metadata": {
+      "order_id": 4,
+      "perm_id": null,
+      "client_id": null,
+      "parent_id": null,
+      "submitted_at": "2026-06-07T08:17:00",
+      "contract": {
+        "symbol": "BTC",
+        "sec_type": "CRYPTO",
+        "exchange": "PAXOS",
+        "currency": "USD",
+        "con_id": null
+      },
+      "action": "BUY",
+      "order_type": "MKT",
+      "total_qty": 0.05799641172302009,
+      "limit_price": null,
+      "tif": "DAY",
+      "market_price_at_submit": 61935.0,
+      "strategy_tag": "ou_mean_revert_v1",
+      "rationale": {
+        "expected_return_h": 0.003930482994997764,
+        "q_low_h": 0.0020237217522731665,
+        "q_high_h": 0.005837244237722583,
+        "previous_weight": 0.004329181803941465,
+        "target_weight": 0.007860965989995528,
+        "capped_weight": 0.007860965989995528,
+        "recommended_weight": 0.007860965989995528,
+        "weight_change": 0.0035317841860540624,
+        "min_turnover_weight": 0.0025,
+        "previous_value": 4403.0025095800065,
+        "target_value": 7995.010269645256,
+        "reference_price": 61935.0,
+        "signed_qty": 0.05799641172302009
+      }
+    },
+    "state": {
+      "as_of": "2026-06-07T08:17:00",
+      "status": "Filled",
+      "qty_filled": 0.05799641172302009,
+      "qty_outstanding": 0.0,
+      "lifecycle": "SIM_FILLED",
+      "realised_cum": 38.82876484115364,
+      "unrealised": -10.254833486831043
+    },
+    "history": [
+      {
+        "ts": "2026-06-07T08:17:00",
+        "event": "ORDER_UPDATE",
+        "status": "Submitted",
+        "qty_filled": 0.0,
+        "qty_outstanding": 0.05799641172302009,
+        "avg_fill_price": null,
+        "fill": null,
+        "pnl": {
+          "realised_cum": 38.82876484115364,
+          "unrealised": 0.0,
+          "mark_price": null
+        }
+      },
+      {
+        "ts": "2026-06-07T08:17:00",
+        "event": "ORDER_UPDATE",
+        "status": "Filled",
+        "qty_filled": 0.05799641172302009,
+        "qty_outstanding": 0.0,
+        "avg_fill_price": 61935.0,
+        "fill": {
+          "exec_id": "sim-4",
+          "ts": "2026-06-07T08:17:00",
+          "qty": 0.05799641172302009,
+          "price": 61935.0,
+          "commission": 0.0,
+          "role": "OPEN",
+          "realised_total": 0.0
+        },
+        "pnl": {
+          "realised_cum": 38.82876484115364,
+          "unrealised": -10.254833486831043,
+          "mark_price": 61935.0
+        }
+      }
+    ]
+  },
+  "5": {
+    "metadata": {
+      "order_id": 5,
+      "perm_id": null,
+      "client_id": null,
+      "parent_id": null,
+      "submitted_at": "2026-06-07T08:18:00",
+      "contract": {
+        "symbol": "BTC",
+        "sec_type": "CRYPTO",
+        "exchange": "PAXOS",
+        "currency": "USD",
+        "con_id": null
+      },
+      "action": "BUY",
+      "order_type": "MKT",
+      "total_qty": 1.4682649539869852e-17,
+      "limit_price": null,
+      "tif": "DAY",
+      "market_price_at_submit": 61943.5,
+      "strategy_tag": "ou_mean_revert_v1",
+      "rationale": {
+        "expected_return_h": 0.0036259290091640306,
+        "q_low_h": 0.0017194294156932521,
+        "q_high_h": 0.005532428602635031,
+        "previous_weight": 0.00786203635220933,
+        "target_weight": 0.007251858018328061,
+        "capped_weight": 0.007251858018328061,
+        "recommended_weight": 0.00786203635220933,
+        "weight_change": 0.0,
+        "min_turnover_weight": 0.0025,
+        "previous_value": 7996.1075100955995,
+        "target_value": 7996.1075100956,
+        "reference_price": 61943.5,
+        "signed_qty": 1.4682649539869852e-17
+      }
+    },
+    "state": {
+      "as_of": "2026-06-07T08:18:00",
+      "status": "Filled",
+      "qty_filled": 1.4682649539869852e-17,
+      "qty_outstanding": 0.0,
+      "lifecycle": "SIM_FILLED",
+      "realised_cum": 38.82876484115364,
+      "unrealised": -9.15759303648725
+    },
+    "history": [
+      {
+        "ts": "2026-06-07T08:18:00",
+        "event": "ORDER_UPDATE",
+        "status": "Submitted",
+        "qty_filled": 0.0,
+        "qty_outstanding": 1.4682649539869852e-17,
+        "avg_fill_price": null,
+        "fill": null,
+        "pnl": {
+          "realised_cum": 38.82876484115364,
+          "unrealised": 0.0,
+          "mark_price": null
+        }
+      },
+      {
+        "ts": "2026-06-07T08:18:00",
+        "event": "ORDER_UPDATE",
+        "status": "Filled",
+        "qty_filled": 1.4682649539869852e-17,
+        "qty_outstanding": 0.0,
+        "avg_fill_price": 61943.5,
+        "fill": {
+          "exec_id": "sim-5",
+          "ts": "2026-06-07T08:18:00",
+          "qty": 1.4682649539869852e-17,
+          "price": 61943.5,
+          "commission": 0.0,
+          "role": "OPEN",
+          "realised_total": 0.0
+        },
+        "pnl": {
+          "realised_cum": 38.82876484115364,
+          "unrealised": -9.15759303648725,
+          "mark_price": 61943.5
+        }
+      }
+    ]
+  },
+  "6": {
+    "metadata": {
+      "order_id": 6,
+      "perm_id": null,
+      "client_id": null,
+      "parent_id": null,
+      "submitted_at": "2026-06-07T08:32:00",
+      "contract": {
+        "symbol": "BTC",
+        "sec_type": "CRYPTO",
+        "exchange": "PAXOS",
+        "currency": "USD",
+        "con_id": null
+      },
+      "action": "BUY",
+      "order_type": "MKT",
+      "total_qty": 1.4700151556664254e-17,
+      "limit_price": null,
+      "tif": "DAY",
+      "market_price_at_submit": 61869.75,
+      "strategy_tag": "ou_mean_revert_v1",
+      "rationale": {
+        "expected_return_h": 0.004055846990975942,
+        "q_low_h": 0.0021470748112248916,
+        "q_high_h": 0.0059646191707269924,
+        "previous_weight": 0.007852749309029882,
+        "target_weight": 0.008111693981951884,
+        "capped_weight": 0.008111693981951884,
+        "recommended_weight": 0.007852749309029882,
+        "weight_change": 0.0,
+        "min_turnover_weight": 0.0025,
+        "previous_value": 7986.587335599979,
+        "target_value": 7986.58733559998,
+        "reference_price": 61869.75,
+        "signed_qty": 1.4700151556664254e-17
+      }
+    },
+    "state": {
+      "as_of": "2026-06-07T08:32:00",
+      "status": "Filled",
+      "qty_filled": 1.4700151556664254e-17,
+      "qty_outstanding": 0.0,
+      "lifecycle": "SIM_FILLED",
+      "realised_cum": 38.82876484115364,
+      "unrealised": -18.677767532108142
+    },
+    "history": [
+      {
+        "ts": "2026-06-07T08:32:00",
+        "event": "ORDER_UPDATE",
+        "status": "Submitted",
+        "qty_filled": 0.0,
+        "qty_outstanding": 1.4700151556664254e-17,
+        "avg_fill_price": null,
+        "fill": null,
+        "pnl": {
+          "realised_cum": 38.82876484115364,
+          "unrealised": 0.0,
+          "mark_price": null
+        }
+      },
+      {
+        "ts": "2026-06-07T08:32:00",
+        "event": "ORDER_UPDATE",
+        "status": "Filled",
+        "qty_filled": 1.4700151556664254e-17,
+        "qty_outstanding": 0.0,
+        "avg_fill_price": 61869.75,
+        "fill": {
+          "exec_id": "sim-6",
+          "ts": "2026-06-07T08:32:00",
+          "qty": 1.4700151556664254e-17,
+          "price": 61869.75,
+          "commission": 0.0,
+          "role": "OPEN",
+          "realised_total": 0.0
+        },
+        "pnl": {
+          "realised_cum": 38.82876484115364,
+          "unrealised": -18.677767532108142,
+          "mark_price": 61869.75
+        }
+      }
+    ]
+  },
+  "7": {
+    "metadata": {
+      "order_id": 7,
+      "perm_id": null,
+      "client_id": null,
+      "parent_id": null,
+      "submitted_at": "2026-06-07T10:31:00",
+      "contract": {
+        "symbol": "BTC",
+        "sec_type": "CRYPTO",
+        "exchange": "PAXOS",
+        "currency": "USD",
+        "con_id": null
+      },
+      "action": "SELL",
+      "order_type": "MKT",
+      "total_qty": 0.1877286711216608,
+      "limit_price": null,
+      "tif": "DAY",
+      "market_price_at_submit": 62271.0,
+      "strategy_tag": "ou_mean_revert_v1",
+      "rationale": {
+        "expected_return_h": -0.0017951457910907465,
+        "q_low_h": -0.00369161858851097,
+        "q_high_h": 0.00010132700632947689,
+        "previous_weight": 0.007903275020014984,
+        "target_weight": -0.003590291582181493,
+        "capped_weight": -0.003590291582181493,
+        "recommended_weight": -0.003590291582181493,
+        "weight_change": -0.011493566602196477,
+        "min_turnover_weight": 0.0025,
+        "previous_value": 8038.3835392117535,
+        "target_value": -3651.668540205187,
+        "reference_price": 62271.0,
+        "signed_qty": -0.1877286711216608
+      }
+    },
+    "state": {
+      "as_of": "2026-06-07T10:31:00",
+      "status": "Filled",
+      "qty_filled": 0.1877286711216608,
+      "qty_outstanding": 0.0,
+      "lifecycle": "SIM_FILLED",
+      "realised_cum": 71.94720092081849,
+      "unrealised": -0.0
+    },
+    "history": [
+      {
+        "ts": "2026-06-07T10:31:00",
+        "event": "ORDER_UPDATE",
+        "status": "Submitted",
+        "qty_filled": 0.0,
+        "qty_outstanding": 0.1877286711216608,
+        "avg_fill_price": null,
+        "fill": null,
+        "pnl": {
+          "realised_cum": 38.82876484115364,
+          "unrealised": 0.0,
+          "mark_price": null
+        }
+      },
+      {
+        "ts": "2026-06-07T10:31:00",
+        "event": "ORDER_UPDATE",
+        "status": "Filled",
+        "qty_filled": 0.1877286711216608,
+        "qty_outstanding": 0.0,
+        "avg_fill_price": 62271.0,
+        "fill": {
+          "exec_id": "sim-7",
+          "ts": "2026-06-07T10:31:00",
+          "qty": 0.1877286711216608,
+          "price": 62271.0,
+          "commission": 0.0,
+          "role": "CLOSE",
+          "realised_total": 33.118436079664846
+        },
+        "pnl": {
+          "realised_cum": 71.94720092081849,
+          "unrealised": -0.0,
+          "mark_price": 62271.0
+        }
+      }
+    ]
+  },
+  "8": {
+    "metadata": {
+      "order_id": 8,
+      "perm_id": null,
+      "client_id": null,
+      "parent_id": null,
+      "submitted_at": "2026-06-07T10:40:00",
+      "contract": {
+        "symbol": "BTC",
+        "sec_type": "CRYPTO",
+        "exchange": "PAXOS",
+        "currency": "USD",
+        "con_id": null
+      },
+      "action": "BUY",
+      "order_type": "MKT",
+      "total_qty": 0.13525068532031895,
+      "limit_price": null,
+      "tif": "DAY",
+      "market_price_at_submit": 62026.25,
+      "strategy_tag": "ou_mean_revert_v1",
+      "rationale": {
+        "expected_return_h": 0.0023359216923941606,
+        "q_low_h": 0.0004319655840019365,
+        "q_high_h": 0.004239877800786385,
+        "previous_weight": -0.0035761298328059184,
+        "target_weight": 0.004671843384788321,
+        "capped_weight": 0.004671843384788321,
+        "recommended_weight": 0.004671843384788321,
+        "weight_change": 0.00824797321759424,
+        "min_turnover_weight": 0.0025,
+        "previous_value": -3637.316018562444,
+        "target_value": 4751.776801786989,
+        "reference_price": 62026.25,
+        "signed_qty": 0.13525068532031895
+      }
+    },
+    "state": {
+      "as_of": "2026-06-07T10:40:00",
+      "status": "Filled",
+      "qty_filled": 0.13525068532031895,
+      "qty_outstanding": 0.0,
+      "lifecycle": "SIM_FILLED",
+      "realised_cum": 86.299722563561,
+      "unrealised": 0.0
+    },
+    "history": [
+      {
+        "ts": "2026-06-07T10:40:00",
+        "event": "ORDER_UPDATE",
+        "status": "Submitted",
+        "qty_filled": 0.0,
+        "qty_outstanding": 0.13525068532031895,
+        "avg_fill_price": null,
+        "fill": null,
+        "pnl": {
+          "realised_cum": 71.94720092081849,
+          "unrealised": 0.0,
+          "mark_price": null
+        }
+      },
+      {
+        "ts": "2026-06-07T10:40:00",
+        "event": "ORDER_UPDATE",
+        "status": "Filled",
+        "qty_filled": 0.13525068532031895,
+        "qty_outstanding": 0.0,
+        "avg_fill_price": 62026.25,
+        "fill": {
+          "exec_id": "sim-8",
+          "ts": "2026-06-07T10:40:00",
+          "qty": 0.13525068532031895,
+          "price": 62026.25,
+          "commission": 0.0,
+          "role": "CLOSE",
+          "realised_total": 14.352521642742516
+        },
+        "pnl": {
+          "realised_cum": 86.299722563561,
+          "unrealised": 0.0,
+          "mark_price": 62026.25
+        }
+      }
+    ]
+  },
+  "9": {
+    "metadata": {
+      "order_id": 9,
+      "perm_id": null,
+      "client_id": null,
+      "parent_id": null,
+      "submitted_at": "2026-06-07T10:42:00",
+      "contract": {
+        "symbol": "BTC",
+        "sec_type": "CRYPTO",
+        "exchange": "PAXOS",
+        "currency": "USD",
+        "con_id": null
+      },
+      "action": "BUY",
+      "order_type": "MKT",
+      "total_qty": 0.05046907620590717,
+      "limit_price": null,
+      "tif": "DAY",
+      "market_price_at_submit": 61914.25,
+      "strategy_tag": "ou_mean_revert_v1",
+      "rationale": {
+        "expected_return_h": 0.0038678318834366454,
+        "q_low_h": 0.0019604316069548045,
+        "q_high_h": 0.005775232159918264,
+        "previous_weight": 0.004663446837728789,
+        "target_weight": 0.007735663766873291,
+        "capped_weight": 0.007735663766873291,
+        "recommended_weight": 0.007735663766873291,
+        "weight_change": 0.003072216929144502,
+        "min_turnover_weight": 0.0025,
+        "previous_value": 4743.196579674575,
+        "target_value": 7867.951581156163,
+        "reference_price": 61914.25,
+        "signed_qty": 0.05046907620590717
+      }
+    },
+    "state": {
+      "as_of": "2026-06-07T10:42:00",
+      "status": "Filled",
+      "qty_filled": 0.05046907620590717,
+      "qty_outstanding": 0.0,
+      "lifecycle": "SIM_FILLED",
+      "realised_cum": 86.299722563561,
+      "unrealised": -8.580222112415134
+    },
+    "history": [
+      {
+        "ts": "2026-06-07T10:42:00",
+        "event": "ORDER_UPDATE",
+        "status": "Submitted",
+        "qty_filled": 0.0,
+        "qty_outstanding": 0.05046907620590717,
+        "avg_fill_price": null,
+        "fill": null,
+        "pnl": {
+          "realised_cum": 86.299722563561,
+          "unrealised": 0.0,
+          "mark_price": null
+        }
+      },
+      {
+        "ts": "2026-06-07T10:42:00",
+        "event": "ORDER_UPDATE",
+        "status": "Filled",
+        "qty_filled": 0.05046907620590717,
+        "qty_outstanding": 0.0,
+        "avg_fill_price": 61914.25,
+        "fill": {
+          "exec_id": "sim-9",
+          "ts": "2026-06-07T10:42:00",
+          "qty": 0.05046907620590717,
+          "price": 61914.25,
+          "commission": 0.0,
+          "role": "OPEN",
+          "realised_total": 0.0
+        },
+        "pnl": {
+          "realised_cum": 86.299722563561,
+          "unrealised": -8.580222112415134,
+          "mark_price": 61914.25
+        }
+      }
+    ]
+  },
+  "10": {
+    "metadata": {
+      "order_id": 10,
+      "perm_id": null,
+      "client_id": null,
+      "parent_id": null,
+      "submitted_at": "2026-06-07T10:46:00",
+      "contract": {
+        "symbol": "BTC",
+        "sec_type": "CRYPTO",
+        "exchange": "PAXOS",
+        "currency": "USD",
+        "con_id": null
+      },
+      "action": "BUY",
+      "order_type": "MKT",
+      "total_qty": 0.053415164994757375,
+      "limit_price": null,
+      "tif": "DAY",
+      "market_price_at_submit": 61791.75,
+      "strategy_tag": "ou_mean_revert_v1",
+      "rationale": {
+        "expected_return_h": 0.005482823929272351,
+        "q_low_h": 0.0035716422979354956,
+        "q_high_h": 0.007394005560609207,
+        "previous_weight": 0.007720476588758508,
+        "target_weight": 0.010965647858544703,
+        "capped_weight": 0.010965647858544703,
+        "recommended_weight": 0.010965647858544703,
+        "weight_change": 0.003245171269786195,
+        "min_turnover_weight": 0.0025,
+        "previous_value": 7852.384501385485,
+        "target_value": 11153.001022950284,
+        "reference_price": 61791.75,
+        "signed_qty": 0.053415164994757375
+      }
+    },
+    "state": {
+      "as_of": "2026-06-07T10:46:00",
+      "status": "Filled",
+      "qty_filled": 0.053415164994757375,
+      "qty_outstanding": 0.0,
+      "lifecycle": "SIM_FILLED",
+      "realised_cum": 86.299722563561,
+      "unrealised": -24.147301883090623
+    },
+    "history": [
+      {
+        "ts": "2026-06-07T10:46:00",
+        "event": "ORDER_UPDATE",
+        "status": "Submitted",
+        "qty_filled": 0.0,
+        "qty_outstanding": 0.053415164994757375,
+        "avg_fill_price": null,
+        "fill": null,
+        "pnl": {
+          "realised_cum": 86.299722563561,
+          "unrealised": 0.0,
+          "mark_price": null
+        }
+      },
+      {
+        "ts": "2026-06-07T10:46:00",
+        "event": "ORDER_UPDATE",
+        "status": "Filled",
+        "qty_filled": 0.053415164994757375,
+        "qty_outstanding": 0.0,
+        "avg_fill_price": 61791.75,
+        "fill": {
+          "exec_id": "sim-10",
+          "ts": "2026-06-07T10:46:00",
+          "qty": 0.053415164994757375,
+          "price": 61791.75,
+          "commission": 0.0,
+          "role": "OPEN",
+          "realised_total": 0.0
+        },
+        "pnl": {
+          "realised_cum": 86.299722563561,
+          "unrealised": -24.147301883090623,
+          "mark_price": 61791.75
+        }
+      }
+    ]
+  }
+}

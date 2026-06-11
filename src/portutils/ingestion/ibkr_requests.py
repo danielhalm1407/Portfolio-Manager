@@ -949,9 +949,11 @@ def get_equity_data(
     bar_size='1 day',
     end_date='',
     output_dir=None,
-    skip_existing=True,
+    skip_existing=False,
     client_id=123,
     app=None,
+    output_format='dict',
+    merged_filename='portfolio_prices.csv',
 ):
     """Fetch historical OHLCV data for one or more symbols.
 
@@ -966,18 +968,34 @@ def get_equity_data(
     end_date : str
         End date in 'YYYYMMDD HH:MM:SS' UTC format.  '' = now.
     output_dir : str or Path, optional
-        Directory in which to write ``stock_data_{sym}.csv`` files.
-        If None, files are written to the current working directory.
+        Directory in which to persist output files.  If None, nothing is
+        written to disk regardless of output_format.
     skip_existing : bool
         When True, skip any ticker whose CSV already exists in *output_dir*.
+        Ignored when output_dir is None (nothing to check against).
     app : IBApp, optional
         Existing connected app instance.  If omitted, this function will create
         its own temporary IBApp connection and close it on exit.
+    output_format : str
+        Controls the return type and what is saved to output_dir:
+          'dict'     (default) — return dict[str, DataFrame], one entry per
+                     symbol; if output_dir given, write stock_data_{sym}.csv
+                     for each symbol.
+          'combined' — merge all symbol close series into one wide DataFrame
+                     (columns: Date + one per symbol); if output_dir given,
+                     write a single merged_filename CSV instead of per-symbol
+                     files.
+    merged_filename : str
+        Filename for the combined CSV when output_format='combined'.
+        Ignored for output_format='dict'.  Default: 'portfolio_prices.csv'.
 
     Returns
     -------
-    dict[str, DataFrame]
+    dict[str, DataFrame] when output_format='dict'
         Mapping of symbol -> OHLCV DataFrame (with a 'return' column).
+    pd.DataFrame when output_format='combined'
+        Columns: 'Date' + one close-price column per fetched symbol.
+        Empty DataFrame if no data was returned.
     """
     # --- Normalise input ---------------------------------------------------
     if symbols is None:
@@ -985,12 +1003,16 @@ def get_equity_data(
     if isinstance(symbols, str):
         symbols = [symbols]  # accept a single ticker string
 
-    # --- Skip tickers that already have saved CSVs -------------------------
-    save_dir = pathlib.Path(output_dir) if output_dir is not None else pathlib.Path('.')
-    save_dir.mkdir(parents=True, exist_ok=True)
+    # --- Resolve save directory only when output_dir was given --------------
+    # When output_dir is None we never touch the filesystem — no mkdir, no CSV.
+    save_dir = pathlib.Path(output_dir) if output_dir is not None else None
+    if save_dir is not None:
+        save_dir.mkdir(parents=True, exist_ok=True)
 
-    # check if we already have a saved CSV for each ticker
-    if skip_existing:
+    # --- Skip tickers that already have saved CSVs -------------------------
+    # skip_existing only makes sense when we have a directory to check; skip
+    # the whole block when output_dir is None to avoid a spurious scan.
+    if skip_existing and save_dir is not None:
         needed = []
         for sym in symbols:
             prefixed = save_dir / f'stock_data_{sym}.csv'
@@ -1001,9 +1023,12 @@ def get_equity_data(
                 needed.append(sym)
         symbols = needed
 
+    # if we have no symbols left to fetch after the above skipping logic, we 
+    # can return early with an empty result, since there's nothing to fetch from IBKR.
     if not symbols:
         print("All tickers already have saved data — nothing to fetch.")
-        return {}
+        # Return the appropriate empty sentinel for the requested output type.
+        return {} if output_format == 'dict' else pd.DataFrame()
 
     # --- Ensure we have an app / connection -------------------------------
     # The important architecture point is that the request workflow lives here,
@@ -1086,7 +1111,21 @@ def get_equity_data(
             df['return'] = df['close'].pct_change()  # simple bar-on-bar return
             df = df.dropna(subset=['return'])        # drop first row (NaN)
             df = df['datetime,open,high,low,close,volume,return'.split(',')]
-            df.to_csv(save_dir / f'stock_data_{sym}.csv', index=False)
+
+            # Persist per-symbol CSV only in 'dict' mode and only when a save
+            # directory was supplied — 'combined' mode writes one merged file
+            # later, and output_dir=None means the caller wants no disk output.
+            if save_dir is not None and output_format == 'dict':
+                df.to_csv(save_dir / f'stock_data_{sym}.csv', index=False)
+
+            # Store the completed DataFrame in the results dict under the symbol key.
+            # results is a dict[str, DataFrame] — the same structure as `frames` in
+            # sandbox/ibkr_data.py, where `frames[symbol] = df` does the identical
+            # thing.  The difference is that ibkr_data.py collects into `frames`
+            # sequentially (one symbol at a time, resetting app.data between requests),
+            # whereas here all requests were fired first and we are now assembling
+            # results after all have returned, mapping back from req_id → sym via
+            # id_to_symbol.
             results[sym] = df
 
             # Clean up this request's temporary state now that we are done.
@@ -1094,11 +1133,57 @@ def get_equity_data(
             with app.lock:
                 app._hist_events.pop(req_id, None)
 
+        # ── Combined output path ───────────────────────────────────────────
+        # When output_format='combined' we merge all per-symbol close series
+        # into one wide DataFrame (one date column + one price column per
+        # symbol) — the same shape as portfolio_prices.csv.  This replicates
+        # merge_closes_by_date() from sandbox/ibkr_data.py but operates on
+        # the 'datetime' column that get_equity_data() produces (ibkr_data.py
+        # uses 'date').
+        if output_format == 'combined':
+            merged = None
+            for sym, df in results.items():
+                if df.empty:
+                    # Symbol returned no bars — skip so it doesn't corrupt merge.
+                    continue
+                # Keep only the timestamp and close columns; rename close → symbol
+                # so the merged frame has one unambiguous column per ticker.
+                piece = df[['datetime', 'close']].rename(columns={'close': sym})
+                # Outer join so all dates are retained even when symbols have
+                # different listing histories (new ETF will carry NaN earlier dates).
+                merged = piece if merged is None else merged.merge(piece, on='datetime', how='outer')
+
+            if merged is None:
+                # Every symbol was empty — return an empty frame so callers can check .empty.
+                return pd.DataFrame()
+
+            # Sort chronologically; rename 'datetime' → 'Date' to match the
+            # portfolio_prices.csv convention and PanelBuilder's expected index name.
+            merged = (
+                merged
+                .sort_values('datetime')
+                .rename(columns={'datetime': 'Date'})
+                .reset_index(drop=True)
+            )
+
+            # convert the datetime column to datetime and sort by date
+            merged['Date'] = pd.to_datetime(merged['Date'])
+            merged = merged.sort_values('Date').reset_index(drop=True)
+
+            # Persist the merged CSV only when a directory was provided.
+            if save_dir is not None:
+                out_path = save_dir / merged_filename
+                merged.to_csv(out_path, index=False)
+                print(f"Wrote merged price panel ({len(merged)} rows, {len(merged.columns)} cols) -> {out_path}")
+
+            return merged
+
         return results
 
     finally:
         if owns_app:
             app.close()
+
 
 
 def get_historical_bars(

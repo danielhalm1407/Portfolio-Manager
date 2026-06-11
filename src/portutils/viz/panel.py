@@ -291,7 +291,12 @@ class PanelBuilder:
         portfolio_prev = portfolio_series.shift(1).fillna(100)  # V_{t-1}
         sector_abs = pd.DataFrame(index=rets.index)
         for sector, tickers in sector_map.items():
+            # first, for each day's absolute portfolio change, calculate the amount that was contributed from each 
+            # individual asset. We do this by summing along axis = 1, which means for each row, summing along the columns
             sector_abs[sector] = portfolio_prev * contrib[tickers].sum(axis=1)
+        # then, we take the cumulative sum of these absolute contributions to get the cumulative contribution of each sector
+        # over time, which will sum to the total portfolio change over time; this is important for plotting the return attribution
+        # in a way that visually stacks up to the total portfolio return
         sector_cum = sector_abs.cumsum()
 
         return sector_contrib, portfolio_daily, sector_cum, portfolio_series_change, portfolio_series

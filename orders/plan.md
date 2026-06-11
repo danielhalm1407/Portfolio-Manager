@@ -4,6 +4,76 @@ Scope: extend `orders/kts.py`. Three layers — (1) richer forecasting model, (2
 
 ---
 
+## Status — implemented vs outstanding (as of 2026-06-05)
+
+What `kts.py` already has:
+- `ForecastView`, `_forecast_quantiles` (Gaussian closed-form), `_compute_recommendation`,
+  `_update_recommendation_panel` + the Recommendation panel (§7.1, build step 0).
+- Quantile bands replacing the ±1σ cone in `_draw_price` (§7.2 / build step 2).
+- Stacked-axes chart (`_build_axes`), accounting engine (`Fill` / `apply_fill`), `state_df`,
+  and all three replay plots: P&L decomposition, position breakdown, entry-vs-market
+  (§4b/§4c, build steps 4–5).
+- `SimExecutionBackend` + sim path in `place_trade`: clicking Long/Short/Close fills
+  locally and books through `apply_fill` with NO IBKR connection.
+
+What is still **NOT** built (the two gaps + the rest):
+
+### GAP A — order ledger distinct from fills (BUILT — see §7.5)
+Three separate artifacts, each with one job, so the heavy trade history never bloats the
+per-bar state frame:
+
+| Artifact | Holds | Granularity | Persisted as |
+|---|---|---|---|
+| `self.orders: dict[int, Order]` | orders == fills (100% immediate fill in sim) | per-trade | `replay_orders.json` (dummy_orders.json shape) |
+| `state_df` (augmented) | per-bar position → realised P&L **plus** the full recommendation block + portfolio value/P&L | per-bar | `replay_state.json` (one record per bar) |
+| (the top widgets) | latest `state_df` row only | now | — |
+
+Key decisions taken with the user:
+- The `Order` dataclass mirrors **exactly** the nested structure of
+  `orders/dummy_orders.json` — `metadata` (incl. `contract` + `rationale`), `state`,
+  `history[]` — via `Order.to_dict()`. In replay there is **one fill that fills the whole
+  order**, so `history` collapses to a `Submitted → Filled` pair at the same timestamp and
+  `qty_filled == total_qty`, `qty_outstanding == 0`. The lifecycle plumbing (an order that
+  *could* sit unfilled / partial) still exists for the live path to reuse unchanged.
+- **Trades are NOT stored in `state_df`** (the old plan's `trades` column is dropped — see
+  §4b). The trade/fill history lives only in the orders ledger / `replay_orders.json`.
+- `state_df` instead carries, per bar: the position/P&L block **and** every `ForecastView`
+  field (recommendation context at that bar) **and** `portfolio_value` + `portfolio_pnl`,
+  so the user can eyeball position value vs portfolio value (are the weights sane?) at any
+  scrubbed point. See §7.5 for the exact column list.
+- Both JSON files are written by `_build_replay` (and on demand via an **Export JSON**
+  button) so a replay run is inspectable offline / exportable for the static web view (§6).
+
+### GAP B — historical-replay scrubber / slider (BUILT — see §7.4)
+**Implemented as a precompute-once drag scrubber** (build step 7). `_fetch_replay_bars`
+loads a long history via `get_historical_bars`; `_build_replay` runs the full
+forecast + recommendation + accounting pipeline over it ONCE, snapshotting `state_df` +
+per-bar model frames; the `replay_slider` (`ttk.Scale`) drives `_replay_to(i)`, which
+reconstructs "the state as of bar `i`" by pure slicing (price history, P&L, position,
+recommendation) — dragging backward works because everything is precomputed. The
+band/forecast/direction decision was factored into a shared `_ou_signal_side` used by both
+live auto-trade and the replay builder. See §7.4 for the full design.
+
+Still outstanding within this area (deferred, not part of step 7):
+- **Play/pause/step/speed auto-advance.** The shipped UX is pure manual drag (what the user
+  asked for); a timer-driven auto-play was intentionally skipped.
+- **Cached parquet/CSV loader** under `data/raw/bars/` — replay currently always pulls
+  live-from-IBKR historical bars (needs a connection).
+- **Recommendation cadence vs execution schedule** (§4a): evaluate every bar but only
+  *execute* on a rebalance schedule (daily/weekly/monthly) — still to wire; the replay
+  currently fires the signal every bar.
+
+### Other outstanding (lower priority, unchanged from build order below)
+- Drifting-mean OU (`mu_t` linear trend) — still a scalar `mu` (build step 1, §1b).
+- Auto-trade still fires on band breach (`_check_auto_signal`), NOT on the recommendation's
+  `w_delta` + min-turnover gate — panel is display-only, not yet wired to dispatch (step 3).
+- Live IBKR reconciliation (`_reconcile_orders`, P&L match badge) — sim only (step 6, §7.3).
+- Chart UX: navigation toolbar + date-range selector (step 7, §5). Hover annotation exists.
+- Steps 8–11 (external trend, cyclical components, bootstrap quantiles, portfolio risk
+  pipeline, Kelly, static Plotly.js export) — not started.
+
+---
+
 ## 1. Forecasting model
 
 ### 1a. Keep OU core
@@ -127,7 +197,12 @@ Maintain a **state dataframe** indexed by bar timestamp. Columns per row:
 | `mark_value` | `last_price * position` (negative if short) |
 | `unrealised_pnl` | `(last_price - avg_entry_price) * position` |
 | `realised_pnl` | cumulative crystallised P&L from closed units |
-| `trades` | list/dict of fills at this bar (qty, price, side) |
+
+**Trades are deliberately NOT a column** (was `trades` here in the original draft). The full
+fill/trade history is too heavy to pack per-row; it lives in the **order ledger**
+(`self.orders` / `replay_orders.json`, §7.5), not in `state_df`. `state_df` instead gains
+the recommendation block + portfolio value/P&L columns (§7.5) so each row answers both
+"where am I now" and "what was the recommended trade / are my weights sane" at that bar.
 
 Open orders (sent but unfilled, or standing limit orders) kept in a **separate dict** keyed by order id, not as columns — avoids column explosion when many orders open.
 
@@ -156,6 +231,13 @@ Implementation note: matplotlib `axvspan` for the shaded long/short regions; che
 - **Series toggling**: per-series checkboxes (existing pattern works fine).
 - **Hover beyond axes**: matplotlib `Annotation` with `clip_on=False` and `xycoords='figure fraction'` can spill out of axes; resizing requires custom event handlers.
 - **Date/time range selector**: Tk Entry pair (start, end) wired to a callback that re-renders within the selected slice. Matches the dash/plotly pattern with native Tk callbacks.
+- **Historical-replay scrubber (IMPLEMENTED — build step 7).** Instead of a date-range
+  pair, the shipped UX is a single **drag slider** over a *precomputed* replay (the
+  Plotly-range-handle feel the user asked for). Workflow: set "Bars to load", click
+  **Build replay** (one heavy pass), then drag the slider to ANY bar — the chart, P&L,
+  position and recommendation instantly show the state "as if the replay had run up to
+  that bar." No play/pause/physical waiting; scrubbing backward works because the whole
+  run is precomputed and the slider only slices. See §7.4 for the concrete design.
 
 ---
 
@@ -338,25 +420,185 @@ Keep these in the library (pure request workflows); the GUI only orchestrates.
 
 ---
 
+### 7.4 — Historical-replay scrubber (build step 7, IMPLEMENTED)
+
+Design principle: **compute once, scrub freely.** All heavy work happens on one button
+click; dragging the slider afterwards is pure slicing + a redraw, so it feels instant even
+over thousands of bars.
+
+**UI (in `setup_ui`, new "Historical Replay" band at grid row 7; chart moved to row 8).**
+- `replay_bars_var` Entry — how many bars to pull.
+- `replay_build_btn` → `_build_replay`.
+- `replay_slider` (`ttk.Scale`, disabled until built) → `_on_replay_scrub`.
+- `replay_pos_lbl` — "bar i/N  <timestamp>" readout of the handle position.
+
+**Build (`_build_replay`, runs once).**
+1. `_fetch_replay_bars(num)` — pull + normalize the OHLC series from IBKR (mirrors
+   `refresh_30m`'s pull path; needs a connection; refuses while a live stream is running).
+2. Calibrate the initial OU/Kalman on the first `W` (= calib-window) bars.
+3. March bar-by-bar: advance the filter (honouring "recalibrate each bar"), compute the
+   recommendation, fire the band signal (shared `_ou_signal_side`) through
+   `SimExecutionBackend` with the position cap, then `_record_state_row`. One `state_df`
+   row **and** one model snapshot `{phi, mu, sigma, x}` per bar.
+4. Stash `_replay_bars`, `_replay_kalman_prices`, `_replay_state_df`, `_replay_frames`;
+   arm the slider over `[0, N-1]`; render the final bar.
+
+**Scrub (`_replay_to(i)`, runs on every drag).**
+- Restore the model snapshot `i` (rebuild a display `KalmanOU`, pin its mean `x`).
+- `ohlc_bars = deque(_replay_bars[:i+1])`, `current_bar = None` (bar `i` is closed).
+- `kalman_prices = _replay_kalman_prices[:i+1]`; `state_df = _replay_state_df.iloc[:i+1]`.
+- Restore the sim ledger (position/avg/realised) from row `i` so the top widgets and the
+  recommendation reflect the book held at `i`. `_replay_mark` = bar `i`'s close so
+  `_last_mark_price` evaluates everything at that point (never a stale live tick).
+- `_on_replay_scrub` throttles redraws (~40 ms, trailing flush) so a fast drag coalesces.
+
+**Shared decision logic.** The band/forecast/direction test was extracted from
+`_check_auto_signal` into a pure `_ou_signal_side(...)` so live auto-trade and the replay
+builder fire on identical logic (no duplication, no drift).
+
+**Performance.** `REPLAY_CANDLE_LIMIT` (300): above it `_draw_price` renders the close as a
+single line instead of one Rectangle per candle, keeping long-history scrubs smooth.
+
+**Known limitation.** Under "recalibrate each bar", the orange Kalman-history dots for
+*past* bars during a scrub reflect the final recalibration (one flat array is stored, not a
+per-bar copy, to keep memory `O(N)`). In the default frozen-params mode the dots are exact.
+
+`_exit_replay` (called from `clear_chart` and before a live stream starts) drops the mark
+override and disarms the slider so replay state can never leak into live marking.
+
+---
+
+### 7.5 — Order ledger + state_df enrichment (data model, IMPLEMENTED)
+
+Three artifacts, one job each (see GAP A table). The `Fill` stays the atomic execution
+print; the new `Order` sits **above** it and owns the dummy_orders.json-shaped record.
+
+**`Order` dataclass (module-level, next to `Fill`).** Holds the flat fields needed to
+rebuild the exact `dummy_orders.json` nesting and exposes `to_dict()`:
+- `metadata`: `order_id`, `perm_id`, `client_id`, `parent_id`, `submitted_at`,
+  `contract{symbol, sec_type, exchange, currency, con_id}`, `action`, `order_type`,
+  `total_qty`, `limit_price`, `tif`, `market_price_at_submit`, `strategy_tag`, and the
+  nested `rationale` block (the ForecastView fields, keyed exactly as dummy_orders.json:
+  `expected_return_h`, `q_low_h`, `q_high_h`, `previous_weight`, `target_weight`,
+  `capped_weight`, `recommended_weight`, `weight_change`, `min_turnover_weight`,
+  `previous_value`, `target_value`, `reference_price`, `signed_qty`).
+- `state`: `as_of`, `status`, `qty_filled`, `qty_outstanding`, `lifecycle`,
+  `realised_cum`, `unrealised`.
+- `history[]`: append-only event log. In sim: one `Submitted` then one `Filled` event at
+  the same ts, the `Filled` event carrying the single fill dict (`exec_id`, `ts`, `qty`,
+  `price`, `commission=0`, `role` = OPEN/CLOSE, `realised_total`). 100% immediate fill.
+
+**Where orders are minted.** `SimExecutionBackend.execute` is the single choke point for
+both the manual-click sim path (`place_trade`) and the replay builder (`_build_replay`), so
+the `Order` is constructed THERE: capture `sim_position`/`sim_realised` before `apply_fill`,
+funnel the `Fill` through `apply_fill` (still the sole P&L mutator), then build the `Order`
+from the post-fill book + the `ctx` ForecastView and register it in `app.orders[oid]`.
+
+**Weight naming (post-rename) + the turnover threshold.** `ForecastView` now distinguishes
+four weights cleanly: `w_target` = the RAW α·r̂ target BEFORE any cap/threshold (→ rationale
+`target_weight`); `w_capped` = the target AFTER risk caps but BEFORE the turnover gate (→
+rationale `capped_weight`); `w_rec` = the RECOMMENDED weight AFTER risk caps AND the
+min-turnover gate (→ rationale `recommended_weight`, and what `qty`/`value_delta`/`w_delta`/
+the panel are sized from); `w_current` = the held weight. The **min-turnover threshold**
+(`REC_MIN_TURNOVER`, default 1%) is a real gate in `_compute_recommendation` (§3a/§3c): if
+`|w_capped - w_current| < threshold` the recommendation suppresses the trade (`w_rec =
+w_current` → zero trade) so noise can't churn the book. The gate does NOT tag `binding_cap`:
+that field reports RISK caps only (`none`/`idio_floor`/`factor`/`portfolio`), and turnover
+suppression is read off `w_capped` vs `w_threshold` instead — the panel shows the transition
+`w_current→w_capped`, the change `Δ = w_capped−w_current` with a `≥/< min` operator, then the
+cap, so a zero trade beside `cap none` + `< min` reads as a turnover suppression. The applied
+threshold rides on `ForecastView.w_threshold` → rationale `min_turnover_weight` →
+`state_df.weight_threshold`. `account_value` also rides on the view (→
+`state_df.portfolio_value`) so nothing recomputes.
+
+**`state_df` new columns** (on top of the existing position/P&L set), all populated in
+`_record_state_row` from `self._last_forecast_view`:
+`central_price`, `mu_now`, `reference_price`, `direction`, `signed_qty`, `previous_weight`,
+`target_weight`, `capped_weight`, `recommended_weight`, `weight_change`, `weight_threshold`,
+`previous_value`, `target_value`, `value_delta`, `binding_cap`, `portfolio_value`,
+`portfolio_pnl`.
+(`r_hat`/`q_low`/`q_high`
+were already present.) `portfolio_value` = equity (cash + realised + unrealised);
+`portfolio_pnl` = realised + unrealised — both let the user check position value/P&L
+against the whole book and confirm the weights look normal at any scrubbed bar.
+
+**Serialization.** `export_orders_json()` dumps `{str(oid): order.to_dict()}` →
+`orders/replay_orders.json` (dummy_orders.json shape); `export_state_json()` dumps
+`state_df` → `orders/replay_state.json` (one record per bar). Both fire at the end of
+`_build_replay` and from an **Export JSON** button in the replay band. `_reset_accounting`
+clears `self.orders` alongside the ledger so a fresh run starts clean.
+
+---
+
 ## Build order
 
-0. **(PRIORITY)** Risk/return + recommendation panel (§7.1): `ForecastView`,
+0. **[DONE]** Risk/return + recommendation panel (§7.1): `ForecastView`,
    `_forecast_quantiles` (Gaussian), `_compute_recommendation`, `_update_recommendation_panel`.
    Pure display over the *existing* model — no new plots, no accounting yet.
-1. Drifting-mean OU with linear trend (1b Phase 1) + return readout (1c).
-2. Quantile bands via Gaussian closed-form (1d option 1) — replaces the ±1σ cone (§7.2).
-3. Wire the panel from step 0 to the drifting-mean + quantile outputs and to auto-trade
-   dispatch (idiosyncratic floor only); the recommended order shown == what auto-trade sends.
-4. Stacked-axes chart refactor (§7.2) + accounting engine (`Fill`/`apply_fill`, §7.3) +
-   replay loader + `state_df` + P&L decomposition plot (§4b/§4c).
-5. Replay plots 2 + 3 (position breakdown, entry vs market with long/short shading, §7.2).
-6. Live order reconciliation against IBKR (§7.3): `_reconcile_orders` on the timer, P&L
+1. **[TODO]** Drifting-mean OU with linear trend (1b Phase 1) + return readout (1c).
+   (Return readout E[r] is in the panel; the drifting `mu_t` itself is not — `mu` still scalar.)
+2. **[DONE]** Quantile bands via Gaussian closed-form (1d option 1) — replaces the ±1σ cone (§7.2).
+3. **[PARTIAL]** Wire the panel from step 0 to the drifting-mean + quantile outputs and to
+   auto-trade dispatch (idiosyncratic floor only); the recommended order shown == what
+   auto-trade sends. (Panel is wired to quantiles; auto-trade still fires on band breach,
+   NOT on the recommendation's `w_delta`/min-turnover gate.)
+4. **[PARTIAL]** Stacked-axes chart refactor (§7.2) + accounting engine (`Fill`/`apply_fill`,
+   §7.3) + replay loader + `state_df` + P&L decomposition plot (§4b/§4c). (Axes, accounting,
+   `state_df`, P&L plot DONE. **Replay loader NOT built — see GAP B.**)
+5. **[DONE]** Replay plots 2 + 3 (position breakdown, entry vs market with long/short shading, §7.2).
+6. **[TODO]** Live order reconciliation against IBKR (§7.3): `_reconcile_orders` on the timer, P&L
    match badge via `get_account_updates`/`get_pnl_single_data`; plus the small library
    additions (`execDetailsEnd` + `get_executions_data`) if cross-session fills are needed.
-7. Chart UX: navigation toolbar, date range selector (§5).
-8. Externally-supplied trend (1b Phase 2).
-9. Cyclical components (1b Phase 3) + bootstrap quantiles (1d option 2).
-10. Portfolio-level risk pipeline (section 2 stages 2–4) + Kelly sizing.
-11. (Parallel track) Static replay export → Plotly.js on GitHub Pages (§6 step 1).
+   (Depends on GAP A — the order ledger this reconciles against does not exist yet.)
+7. **[DONE]** Chart UX (§5). **Historical-replay scrubber** (§7.4: precompute-once drag
+   slider — `_build_replay` / `_replay_to` / `replay_slider`, shared `_ou_signal_side`,
+   `REPLAY_CANDLE_LIMIT` fast path). **Navigation toolbar** (`NavigationToolbar2Tk`, built in
+   `_mount_canvas`: box-zoom / pan / home, axes auto-rescale). **Chart UI overhaul** (§A–E):
+   dynamic axis layout with independent per-axis toggles (P&L / Units / Entry, `_build_axes`),
+   per-series toggles for every line (split `unfilled`/`closed`/`last`), resizable pop-out
+   window (`_mount_canvas` / `_toggle_popout` — one figure, canvas re-mounted), and per-axis
+   hover tooltips showing only enabled series, clamped inside the figure (`_on_hover` +
+   `_hover_text_price` / `_hover_text_analytics`, `_make_hover_annot`).
+   **Chart UX round 2:** (a) **1-based bar numbering everywhere** — x-axis tick labels
+   shifted +1 via a `FuncFormatter` in `_style_ax` (data stays 0-based), hover reads
+   "bar i+1", matching the scrubber. (b) **Jump-to-bar** box (`replay_jump_var` /
+   `_jump_to_bar`) scrubs to an exact 1-based bar. (c) **Price-pane per-series toggles**
+   (close / kalman hist / live mean / μ / markers / rationale) gated in `_draw_price`.
+   (d) **Trade markers** on the price plot (`_draw_trade_markers`: ▲ buy / ▼ sell, solid
+   blue, from `self.orders`) with a per-marker hover (`_trade_marker_at` / `_hover_text_trade`:
+   BOUGHT/SOLD coloured + bold, size @ price, then the toggleable recommendation rationale).
+   (e) **`next_intended`** line in the Units pane (`target_value / reference_price` = the
+   position the recommendation would hold after its trade, vs `intended`/`filled`).
+   **Risk-cap controls:** user-editable **Min turnover %** (default 0.25%) and **Max weight %**
+   (default 3%) entries + on/off checkboxes in the Trading & Portfolio panel
+   (`_min_turnover_frac` / `_max_weight_frac`, read live by `_compute_recommendation`);
+   sim/replay portfolio value now bases on today's IBKR NetLiq (`_sim_base_equity`).
+8. **[TODO]** Externally-supplied trend (1b Phase 2).
+9. **[TODO]** Cyclical components (1b Phase 3) + bootstrap quantiles (1d option 2).
+10. **[TODO]** Portfolio-level risk pipeline (section 2 stages 2–4) + Kelly sizing.
+11. **Plotly track** (matplotlib stays the live engine; Plotly added incrementally):
+    - **Step 1 — [DONE]** Render-once replay export (`_export_replay_plotly`, "⧉ Export
+      Plotly" button). ADDITIVE — does not touch the in-app matplotlib replay/scrubber.
+      Reads the per-bar `state_df` (prefers `_replay_state_df`), builds a `make_subplots`
+      figure (price candlesticks + P&L + Units + Entry, shared x, bottom range slider,
+      `Scattergl` for WebGL-sharp deep zoom, `hovermode="x unified"`), `write_html` to
+      `orders/replay_chart.html`, opens in the browser. Native zoom / pan / legend-toggle /
+      hover for free. Lazy `import plotly` so the app runs without it (`pip install plotly`).
+      Feeds the eventual static GitHub Pages view (§6 step 1).
+    - **Step 2 — [FUTURE]** Live chart in Plotly via webview. Embed a webview widget
+      (pywebview / tkinterweb) in the Tk window, port the `_draw_*` panes to Plotly traces,
+      and stream per-tick updates with `Plotly.react`/`extendData` over a Python↔JS bridge.
+      The cost is the per-tick streaming bridge, not Plotly itself (render-once is trivial,
+      see step 1). Only worth it if interactive zoom on the LIVE chart matters beyond what
+      the matplotlib nav toolbar already gives.
+    - **Step 3 — [FUTURE]** Full Dash/browser GUI. Replace Tkinter entirely with a Plotly
+      Dash app; everything Plotly-native (zoom / range-slider / legend / hover built in).
+      Largest rewrite — all controls, threading, and IBKR wiring re-architected for a
+      callback/browser model. Reserve for if the desktop app outgrows Tk.
+
+> Gaps called out at the top (Status section): **GAP A** — order ledger distinct from fills
+> (Order dataclass in dummy_orders.json shape, `self.orders`, enriched `state_df`, JSON
+> exports; sim fills 100% immediately but the lifecycle plumbing exists): **now built**
+> (§7.5). **GAP B** — the historical-replay scrubber/slider: **now built** (§7.4).
 
 Each step keeps the existing UI runnable; new controls additive, old behaviour preserved behind defaults.
