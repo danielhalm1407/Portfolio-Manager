@@ -143,7 +143,7 @@ asset_returns = pd.DataFrame(
         "DGRE": dgre_prices.pct_change(),
         "EQLT": eqlt_prices.pct_change(),
         "DVYE": dvye_prices.pct_change(),
-        "QDIV": qdiv_prices.pct_change(),
+        # "QDIV": qdiv_prices.pct_change(),
     }
 ).fillna(0.0)
 
@@ -157,14 +157,14 @@ ACWX_WEIGHT = 0.30
 # Semi growth satellite — equal weight to ACWX but higher-beta, higher-conviction tilt
 FTXL_WEIGHT = 0.30
 # Managed futures / trend-following — reduced to 10% to free room for new sleeves
-KMLM_WEIGHT = 0.10
+KMLM_WEIGHT = 0.50
 MNA_WEIGHT  = 0.20
 # RNR reduced to 10%; remaining 10% allocated to JPMorgan financials (same thematic sleeve)
 RNR_WEIGHT  = 0.10
 JPM_WEIGHT = 0.10
-# Metals sleeve — 20% gross split evenly between copper futures and aluminium
-CPER_WEIGHT = 0.10
-DBB_WEIGHT  = 0.10
+# Metals sleeve — 10% gross split evenly between copper futures and aluminium
+CPER_WEIGHT = 0.05
+DBB_WEIGHT  = 0.05
 # Quality / EM income sleeve — 20% gross split evenly across four tickers
 DGRE_WEIGHT = 0.05
 EQLT_WEIGHT = 0.05
@@ -201,6 +201,8 @@ prices_df = prices_df[prices_df.index >= '2026-01-01']
 
 # Instantiate PanelBuilder with the twelve strategy price series.
 # PanelBuilder._daily_returns calls pct_change() internally, so we pass prices not returns.
+# (That method is now a thin wrapper over portutils.analysis.returns.daily_returns — the
+# definition moved out of the plotting module, but the behaviour here is unchanged.)
 panel_hedge = PanelBuilder(df_all=prices_df)
 
 # Build a constant-weight DataFrame aligned to the daily-returns index.
@@ -329,5 +331,5 @@ fig = make_level_figure(
       close_hour=99,
   )
 fig.show()
-?
+
 # %%

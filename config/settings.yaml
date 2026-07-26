@@ -1,2 +1,52 @@
 # Project settings — non-secret, committed to git
 # Secrets go in .env (gitignored)
+
+# ═══════════════════════════════════════════════════════════════════════════
+# LIVE TRADING — read src/pipelines/rebalance_live.md before changing `enabled`
+# ═══════════════════════════════════════════════════════════════════════════
+# `enabled: true` makes LIVE the default for src/pipelines/rebalance_live.py, so every run
+# transmits real orders with no flag. That is standing authorization: nothing will ask for
+# confirmation. `--dry-run` on the command line still overrides it — that escape hatch is
+# deliberately not configurable away.
+live_trading:
+  enabled: false
+  account: "DUP102412"      # paper account
+  # Refuse any account id not starting with "DU" (IB's paper prefix). Trading a real account
+  # additionally requires --i-know-this-is-real on the command line.
+  require_paper: true
+  # Per-order notional ceiling, in the ACCOUNT'S BASE CURRENCY — not the currency the leg is
+  # quoted in. The rebalancer values every position from IBKR's base-currency `marketValue`,
+  # so a London line quoted in pence is compared against this ceiling after conversion, not
+  # before. A bad price tick that would otherwise size an enormous order gets rejected.
+  max_order_value: 50000
+  # Skip legs already within this weight of their target, so the book is not churned for
+  # fractions of a percent. Matches the min-turnover idea used in the studies.
+  #
+  # MUST BE SMALLER THAN THE TARGET WEIGHTS IT GATES. It is compared against the weight
+  # GAP, so a gate wider than a leg's whole target skips that leg permanently: at
+  # `live_book`'s 1.43% targets the old 0.02 was larger than the target itself and nothing
+  # could ever trade. 0.005 is ~1/3 of a target weight — small enough to let a real
+  # rebalance through, large enough to ignore drift of a few basis points.
+  min_turnover: 0.005
+  # Which named weight vector from config/asset_universe.yaml the live policy follows.
+  # `live_book` = the seven names actually held/wanted, equally weighted over 60% of NetLiq
+  # (40% cash). `spy_kmlm` is the two-ticker RESEARCH vector — pointing live trading at it
+  # would liquidate the whole account into SPY/KMLM, which is why it is not the default here.
+  portfolio: "live_book"
+  # Contract details for target symbols we do NOT already hold. A held position carries
+  # its own conId in the account snapshot and needs nothing here; a name being opened from
+  # flat has only its ticker, which goes to TWS on the STK/SMART/USD default. That default
+  # describes a US listing, so anything else must be spelled out or TWS either refuses to
+  # resolve it (error 200) or resolves it to a different instrument that shares the ticker.
+  # Used both to price the symbol (historical fetch) and to route the order, so the two can
+  # never disagree about which contract they mean.
+  contract_overrides:
+    CSPX:
+      # iShares Core S&P 500 UCITS ETF, London-listed, quoted in USD. SMART routing with
+      # the listing venue in primary_exchange — direct-routing to LSEETF is what triggered
+      # IB warning 10311 and the manual-Transmit hold on the first live run.
+      exchange: "SMART"
+      primary_exchange: "LSEETF"
+      currency: "USD"
+      sec_type: "STK"
+  client_id: 151

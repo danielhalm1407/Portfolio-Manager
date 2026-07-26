@@ -23,6 +23,10 @@ except ImportError:
 import plotly.graph_objects as go
 
 import matplotlib.colors as mcolors  # used to build linear colour gradients
+
+# The repo's single source of truth for colour. Import-light by design (no plotting deps), so
+# depending on it here costs nothing and every hex value has exactly one definition.
+from portutils.viz import theme
 import numpy as np
 import pandas as pd
 import subprocess  # used only by the port-management helpers at the bottom
@@ -91,36 +95,43 @@ class BaseFigureConfig:
     # Sizing & server
     fig_height: int = 800
     port: int = 8050
-    # Background / paper — defaults mimic plotly_dark template
-    paper_bgcolor: str = "rgb(17,17,17)"
-    plot_bgcolor: str = "rgb(17,17,17)"
+    # Background / paper — defaults mimic plotly_dark template.
+    # Values come from portutils.viz.theme, the repo's single source of truth for colour; this
+    # config is the RUNNING DASH APP path, which the dark palette covers. (The other path,
+    # make_level_figure's flat kwargs, deliberately keeps a transparent background so a figure
+    # shown in the VS Code interactive window inherits the editor's own theme.)
+    paper_bgcolor: str = theme.PAPER_BG
+    plot_bgcolor: str = theme.PLOT_BG
     # Dash page styling
-    page_bgcolor: str = "#111"
-    page_title_color: str = "white"
-    page_text_color: str = "white"
+    page_bgcolor: str = theme.PAGE_BG
+    page_title_color: str = theme.INK
+    page_text_color: str = theme.INK
     page_padding: str = "20px"
     # Page typography (used by LevelDashApp section headings + commentary)
     page_title_font_family: str = "Open Sans, Arial, sans-serif"
     page_title_font_size: str = "22px"
     page_title_margin_bottom: str = "4px"
     commentary_font_family: str = "Open Sans, Arial, sans-serif"
-    commentary_font_color: str = "white"
+    commentary_font_color: str = theme.INK
     commentary_font_size: str = "16px"
     commentary_line_height: str = "1.5"
     commentary_margin_bottom: str = "16px"
     commentary_max_width: str = "1100px"
     panel_margin_bottom: str = "32px"
-    # Fonts — plotly_dark uses light text on dark background
-    font_color: Optional[str] = "#f2f5fa"
-    title_font_color: Optional[str] = "white"
-    axis_title_font_color: Optional[str] = "white"
-    axis_tick_font_color: Optional[str] = "white"
-    legend_colour: Optional[str] = "white"
-    hover_label_font_color: Optional[str] = "black"
-    hover_label_bgcolor: Optional[str] = "white"
+    # Fonts — plotly_dark uses light text on dark background. All four roles share theme.INK
+    # (a soft off-white) rather than pure white: full-strength white on near-black glares.
+    font_color: Optional[str] = theme.INK
+    title_font_color: Optional[str] = theme.INK
+    axis_title_font_color: Optional[str] = theme.INK
+    axis_tick_font_color: Optional[str] = theme.INK
+    legend_colour: Optional[str] = theme.INK
+    # Hover tooltips invert — dark text on a light box, because a dark tooltip on a dark chart
+    # has no edge and disappears into the background.
+    hover_label_font_color: Optional[str] = theme.HOVER_FG
+    hover_label_bgcolor: Optional[str] = theme.HOVER_BG
     # Gridlines / axes — plotly_dark grid tones
-    gridcolor: Optional[str] = "#526070"
-    zerolinecolor: Optional[str] = "#526070"
+    gridcolor: Optional[str] = theme.GRID
+    zerolinecolor: Optional[str] = theme.ZEROLINE
     # Per-axis grid visibility — default to horizontal-only background grid
     xaxis_showgrid: bool = False
     yaxis_showgrid: bool = True

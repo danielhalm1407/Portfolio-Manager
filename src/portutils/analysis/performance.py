@@ -2,7 +2,7 @@
 
 
 # Import modules needed for the py file to work
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, NamedTuple, Optional
 import re
 import numpy as np
 import pandas as pd
@@ -278,7 +278,11 @@ class PerformanceSummary:
         if self.kind == "log":
             tr = np.exp(resampler.sum()) - 1
         else:
-            tr = (1 + resampler).prod() - 1
+            # Compound simple returns WITHIN each bin: prod(1+r) - 1, applied per column
+            # per bin. Note this cannot be written as `(1 + resampler).prod()` — `resampler`
+            # is a Resampler object, not a frame, and adding to it raises TypeError. The
+            # arithmetic has to be pushed inside the aggregation.
+            tr = resampler.agg(lambda s: (1 + s).prod() - 1)
 
         if not annualise:
             return tr
@@ -918,3 +922,282 @@ class ReturnsToLevels:
 
         self.levels = out
         return out
+
+# ============================================================================
+# WEIGHT-PATH SIMULATION
+#
+# Generates the weight path that ReturnAttribution consumes. It used to be a method on
+# PanelBuilder in portutils/viz/panel.py, where it reached for ``self._daily_returns()``
+# and so could not be used without constructing a plotting object. It takes a returns
+# frame directly here; panel.py keeps a wrapper that supplies that frame.
+# ============================================================================
+def simulate_weights(rets: pd.DataFrame, rebal_freq: str = "QE") -> pd.DataFrame:
+    """Simulate drifting equal-weights with periodic rebalancing.
+
+    Parameters
+    ----------
+    rets : pd.DataFrame
+        Wide T x N frame of period returns (e.g. ``analysis.returns.daily_returns(prices)``).
+    rebal_freq : str
+        Pandas offset alias for rebalance dates (e.g. 'QE' for quarter-end,
+        'ME' for month-end).  Weights are snapped back to 1/N on these dates.
+
+    Returns
+    -------
+    pd.DataFrame
+        Same shape as ``rets``, holding beginning-of-period weights.
+    """
+    n = len(rets.columns)
+
+    # start with equal weights by default
+    # equal_w is a numpy array of length n (number of assets) where each element is 1/n,
+    # which has dimensions: n x 1 (a column vector), and it represents the equal weight for each asset in the portfolio;
+    equal_w = np.ones(n) / n
+
+    # dates on which we rebalance back to equal weight
+    # Pandas < 2.2 uses 'Q'/'M'; >= 2.2 uses 'QE'/'ME' for offsets,
+    # but to_period() always needs the legacy short form.
+    period_freq = rebal_freq.replace('QE', 'Q').replace('ME', 'M')
+    # we convert the index of the returns DataFrame to a PeriodIndex with the specified frequency,
+    # and then we take the end_time of each period, normalize it to midnight, and
+    #  create a set of these rebalance dates for quick lookup; this way we can easily check if a
+    #  given date is a rebalance date during our iteration over the returns
+    rebal_dates = set(rets.index. # take the index of the returns DataFrame, which is a DatetimeIndex representing the dates of the returns
+                      to_period(period_freq). # convert it to a PeriodIndex with the specified frequency (e.g. quarterly or monthly), which groups the dates into periods based on that frequency
+                      end_time. # take the end time of each period, which gives us the last date of each quarter or month (depending on the frequency we specified); this is important because we want to rebalance at the end of each period
+                      normalize() # normalize the timestamps to midnight (00:00:00) to ensure that we are comparing dates without time components when we check for rebalance dates during our iteration; this is important because the original timestamps might have time components that could cause mismatches when we check if a date is in the rebal_dates set
+                      )
+
+    # initialize a DataFrame to hold the weights, with the same index and columns as the returns DataFrame
+    # and we use dtype=float to ensure that the weights are stored as floating-point numbers for calculation ease
+    weights = pd.DataFrame(index=rets.index, columns=rets.columns, dtype=float)
+    w = equal_w.copy()
+
+    for date in rets.index:
+        weights.loc[date] = w  # beginning-of-period weight (will carry through the drift from the previous period)
+        # drift weights by that day's return
+        # this multiplies the current weights of dimension n x 1 elementwise by (1 + daily return) for each asset,
+        #  which gives us the new weights (as a proportion of the starting value of that portfolio)
+        #   (if was matrix multiplication, we would need to use np.dot or the @ operator)
+        w = w * (1 + rets.loc[date].values)
+        w = w / w.sum()  # renormalise, since overall, will be some proportion of the starting value of the portfolio, 
+        # but we want to keep it as weights that sum to 1
+
+        # snap back to equal weight at period boundaries
+        if date.normalize() in rebal_dates:
+            w = equal_w.copy()
+
+    return weights
+
+
+# ============================================================================
+# RETURN ATTRIBUTION
+#
+# The single implementation of "which leg earned what". It replaces two divergent
+# copies: PanelBuilder.attribution (in the plotting module) and the maths that used to
+# be inlined in pipelines/rebalance_study.py's fig_attribution.
+#
+# The model is contrib_{i,t} = w_{i,t} * r_{i,t}: each leg's weight times the return it
+# earned. Everything else here is about making the cumulative version of that stack up
+# honestly against a portfolio's actual path.
+#
+# Two conventions the two old copies disagreed on, both now options:
+#
+#   * SCALING. Raw percentage contributions cannot be cumsummed and compared to a
+#     compounded return — the arithmetic sum of daily returns is not the compounded
+#     return. So each bar's contribution is scaled by V_{t-1}, the wealth index at the
+#     START of the bar, putting it in portfolio-value units. Cumsumming THOSE gives legs
+#     that sum exactly to the portfolio's change. (scale="raw" opts out, for a caller
+#     that genuinely wants unscaled percentages.)
+#
+#   * WHOSE WEIGHTS. Weights from an accounting frame are POST-trade for their bar, so
+#     they must be shifted forward one bar before meeting the return they earned, or the
+#     attribution looks ahead. Weights from a model (simulate_weights, a constant vector)
+#     are already beginning-of-period and must NOT be shifted. Hence shift_weights.
+#
+# And one thing neither copy had: for a real traded book, sum_i w_{i,t-1} r_{i,t} does
+# NOT equal the book's own return — slippage, uninvested cash and intra-bar trading live
+# outside the weights-times-returns identity. Pass the book's `equity` and a
+# `residual_label` and that gap becomes an explicit leg rather than a silent discrepancy
+# between the stack and the total.
+# ============================================================================
+
+
+class AttributionResult(NamedTuple):
+    """Output of :class:`ReturnAttribution`.
+
+    A NamedTuple rather than a bare tuple or a dict: callers can read by name
+    (``res.cum_col``) AND unpack positionally, which is what keeps the historical
+    ``sector_contrib, portfolio_daily, sector_cum, ... = panel.attribution(...)`` call
+    sites working untouched. The first five fields are that legacy 5-tuple, in order;
+    the per-column fields are appended so adding them cannot disturb a 5-way unpack.
+
+    Not one DataFrame: these carry three different shapes (T x G, T x N, T), and merging
+    them would mean prefixed column names or a MultiIndex just to split them apart again.
+    """
+    grouped_contrib: Optional[pd.DataFrame]  # per-GROUP per-bar contribution     (T x G)
+    portfolio_daily: pd.Series               # total per-bar contribution         (T,)
+    cum_grouped: Optional[pd.DataFrame]      # per-GROUP cumulative, value units  (T x G)
+    wealth_change: pd.Series                 # wealth index minus 100             (T,)
+    wealth: pd.Series                        # base-100 wealth index              (T,)
+    col_contrib: pd.DataFrame                # per-COLUMN per-bar contribution    (T x N)
+    cum_col: pd.DataFrame                    # per-COLUMN cumulative, value units (T x N)
+
+
+class ReturnAttribution:
+    """Attribute a portfolio's return to its legs, and optionally to groups of legs.
+
+    Usage:
+        res = ReturnAttribution(weights, rets).run()
+        res = ReturnAttribution(weights, rets, group_map=SECTOR_MAP).run()
+        res = ReturnAttribution(w, rets, shift_weights=True, equity=df["equity"],
+                                residual_label="cash / costs").run()
+    """
+
+    def __init__(
+        self,
+        weights: pd.DataFrame,
+        rets: pd.DataFrame,
+        *,
+        group_map: Optional[Dict[str, List[str]]] = None,
+        shift_weights: bool = False,
+        equity: Optional[pd.Series] = None,
+        residual_label: Optional[str] = None,
+        scale: str = "wealth",
+        base: float = 100.0,
+    ):
+        """
+        Parameters
+        ----------
+        weights : pd.DataFrame
+            Wide T x N weight path, one column per instrument. Constant weights are just
+            a frame whose columns never change — there is no separate code path for them.
+        rets : pd.DataFrame
+            Wide T x N period returns, e.g. ``analysis.returns.daily_returns(prices)``.
+            Aligned against `weights` on the intersection of both index and columns.
+        group_map : dict[str, list[str]], optional
+            Roll columns up into named groups (sectors, strategies, roles). When omitted,
+            only the per-column output is produced — a caller wanting one leg per ticker
+            does NOT need to pass a map of singleton lists.
+        shift_weights : bool
+            Shift weights forward one bar before multiplying. True for weights read out
+            of an accounting frame (post-trade); False for model weights.
+        equity : pd.Series, optional
+            The portfolio's own value path. When given, the wealth index is built from it
+            rather than from the contributions — which is what lets the residual below be
+            measured at all.
+        residual_label : str, optional
+            Name for the leg holding `portfolio return - sum of contributions`. Requires
+            `equity`; without an external truth there is nothing to take a residual against.
+        scale : {"wealth", "raw"}
+            "wealth" scales each bar by V_{t-1} into portfolio-value units before the
+            cumsum, so legs sum to the portfolio's change. "raw" cumsums percentages.
+        base : float
+            Base of the wealth index. 100 matches the rest of this module.
+        """
+        if scale not in ("wealth", "raw"):
+            raise ValueError("scale must be 'wealth' or 'raw'")
+        if residual_label is not None and equity is None:
+            # A residual is the gap between a book's REAL return and what the weights
+            # model explains. With no equity series there is no real return to compare
+            # against, so this combination is a caller mistake, not a defaultable case.
+            raise ValueError("residual_label requires equity")
+
+        self.weights = weights
+        self.rets = rets
+        self.group_map = group_map
+        self.shift_weights = bool(shift_weights)
+        self.equity = equity
+        self.residual_label = residual_label
+        self.scale = scale
+        self.base = float(base)
+
+    def run(self) -> AttributionResult:
+        # ---- 1. Align. -----------------------------------------------------------
+        # daily_returns drops the first bar, weight paths often carry it, and a book may
+        # hold instruments the price panel lacks. Reindexing both onto the intersection
+        # keeps a misalignment from silently becoming a NaN column later.
+        cols = [c for c in self.weights.columns if c in self.rets.columns]
+        rets = self.rets.loc[:, cols]
+        w = self.weights.reindex(index=rets.index, columns=cols).fillna(0.0)
+
+        # ---- 2. Timing. ----------------------------------------------------------
+        # Weight is beginning-of-bar, so shift it forward one bar before multiplying by
+        # the return it earned — using the same bar's (post-trade) weight would look ahead.
+        if self.shift_weights:
+            w = w.shift(1).fillna(0.0)
+
+        # ---- 3. Per-asset weighted contribution each bar. -------------------------
+        #   (elementwise multiplication of the weights DataFrame and the returns DataFrame)
+        col_contrib = w * rets
+
+        # ---- 4. Roll up to group level, if asked. --------------------------------
+        grouped_contrib = None
+        if self.group_map is not None:
+            grouped_contrib = pd.DataFrame(index=rets.index)
+            for group, members in self.group_map.items():
+                # first, for each bar, calculate the amount contributed by each individual
+                # asset in this group. We do this by summing along axis = 1, which means
+                # for each row, summing along the columns
+                present = [c for c in members if c in col_contrib.columns]
+                grouped_contrib[group] = col_contrib[present].sum(axis=1)
+
+        # Total per bar. Taken from the GROUPED frame when grouping is on, so a group_map
+        # that deliberately omits columns totals to what its groups actually cover — that
+        # is the historical PanelBuilder.attribution behaviour and callers depend on it.
+        source = grouped_contrib if grouped_contrib is not None else col_contrib
+        portfolio_daily = source.sum(axis=1)
+
+        # ---- 5. Wealth index. ----------------------------------------------------
+        if self.equity is not None:
+            # The book's OWN path, rebased. Any drag the weights model cannot see (costs,
+            # idle cash) is already inside this curve, which is what makes step 7 possible.
+            eq = self.equity.reindex(rets.index).astype(float)
+            wealth = eq / eq.iloc[0] * self.base
+        else:
+            # cumulative portfolio return -> wealth index (base 100)
+            wealth = (1 + portfolio_daily).cumprod() * self.base
+        wealth_change = wealth - self.base
+
+        # ---- 6. Scale into portfolio-value units, then accumulate. ----------------
+        if self.scale == "wealth":
+            # absolute contributions: scale each bar's percentage contribution by the
+            # portfolio value at the *start* of that bar, so the units are portfolio-value
+            # units (not percentages). This ensures the cumulative contributions sum
+            # exactly to wealth_change — an arithmetic cumsum of percentages does not.
+            prev = wealth.shift(1).fillna(self.base)  # V_{t-1}
+            # .mul(..., axis=0), not `*`: `prev` is indexed by DATE while col_contrib's
+            # columns are TICKERS. Plain `DataFrame * Series` aligns the Series against the
+            # COLUMNS, finds no overlap, and yields an all-NaN frame. axis=0 says "align on
+            # the index, broadcast across columns". (panel.py never needed this because it
+            # scaled a Series, one group at a time, where alignment is unambiguous.)
+            cum_col = col_contrib.mul(prev, axis=0).cumsum()
+            cum_grouped = (None if grouped_contrib is None
+                           else grouped_contrib.mul(prev, axis=0).cumsum())
+        else:
+            prev = None
+            cum_col = col_contrib.cumsum()
+            cum_grouped = None if grouped_contrib is None else grouped_contrib.cumsum()
+
+        # ---- 7. Residual leg: what the weights model cannot explain. --------------
+        if self.residual_label is not None:
+            # The book's own bar return, straight off its equity curve.
+            book_ret = (wealth / wealth.shift(1) - 1.0).fillna(0.0)
+            # Whatever that return has and the weighted legs do not: slippage, uninvested
+            # cash, intra-bar trading. Shown as its own leg so the stack still closes on
+            # the total instead of quietly disagreeing with it.
+            gap = book_ret - portfolio_daily
+            resid = gap.mul(prev) if prev is not None else gap
+            cum_col[self.residual_label] = resid.cumsum()
+            if cum_grouped is not None:
+                cum_grouped[self.residual_label] = resid.cumsum()
+
+        return AttributionResult(
+            grouped_contrib=grouped_contrib,
+            portfolio_daily=portfolio_daily,
+            cum_grouped=cum_grouped,
+            wealth_change=wealth_change,
+            wealth=wealth,
+            col_contrib=col_contrib,
+            cum_col=cum_col,
+        )

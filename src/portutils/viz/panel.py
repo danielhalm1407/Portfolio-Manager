@@ -17,6 +17,11 @@ import pandas as pd
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 
+# analysis primitives — the definitions of returns/normalisation and of attribution live
+# in portutils.analysis, NOT here. This module is the plotting layer and only calls them.
+from portutils.analysis import returns
+from portutils.analysis import performance
+
 # %%
 
 # ── 1. Module-level config constants ────────────────────────────────────────────
@@ -170,34 +175,47 @@ class PanelBuilder:
 
     # ── derived DataFrames ───────────────────────────────────────────────
 
+    # ============================================================================
+    # DERIVED-FRAME WRAPPERS.
+    # The maths lives in portutils.analysis.returns — panel.py PLOTS, it does not
+    # define what a return is. These four methods survive only to supply the
+    # ``df=None -> self.df_all`` default that every plotting method here relies on,
+    # and to keep the existing call sites (and hedge_sleeves.py, which names
+    # ``PanelBuilder._daily_returns`` in a comment) working unchanged.
+    # ============================================================================
+
     def _normalise(self, df = None, base=100):
-        """Wealth index: ``(price / first_price) * base``."""
+        """Wealth index: ``(price / first_price) * base``. See ``analysis.returns.normalise``."""
         # we allow an external df to be passed in, but if it's None,
         #  we default to using self.df_all; this way, we can reuse
-        #  this method for any DataFrame with the same structure 
+        #  this method for any DataFrame with the same structure
         # (e.g. returns) without having to duplicate the logic for normalizing it
         df = self.df_all if df is None else df
-        return (df / df.iloc[0]) * base
+        return returns.normalise(df, base)
 
     def _pct_returns(self, df=None):
-        """Cumulative percentage returns from first observation."""
+        """Cumulative percentage returns from first observation. See ``analysis.returns.pct_returns``."""
         df = self.df_all if df is None else df
-        return ((df / df.iloc[0]) - 1) * 100
+        return returns.pct_returns(df)
 
     def _daily_returns(self, df=None):
-        """Simple daily percentage returns (first row dropped)."""
+        """Simple daily percentage returns (first row dropped). See ``analysis.returns.daily_returns``."""
         df = self.df_all if df is None else df
-        return df.pct_change().dropna()
+        return returns.daily_returns(df)
 
     def _log_returns(self, df=None):
-        """Daily log returns (first row dropped)."""
+        """Daily log returns (first row dropped). See ``analysis.returns.log_returns``."""
         df = self.df_all if df is None else df
-        return np.log(df / df.shift(1)).dropna()
+        return returns.log_returns(df)
 
     # ── portfolio simulation ────────────────────────────────────────────
 
     def simulate_weights(self, rebal_freq='QE'):
         """Simulate drifting equal-weights with periodic rebalancing.
+
+        Thin wrapper: the implementation lives in
+        ``portutils.analysis.performance.simulate_weights``, which takes a returns frame
+        so it is usable without a PanelBuilder. This supplies that frame.
 
         Parameters
         ----------
@@ -210,51 +228,19 @@ class PanelBuilder:
         pd.DataFrame
             Same shape as ``daily_returns()``, holding beginning-of-period weights.
         """
-        rets = self._daily_returns()
-        n = len(rets.columns)
-
-        # start with equal weights by default
-        # equal_w is a numpy array of length n (number of assets) where each element is 1/n,
-        # which has dimensions: n x 1 (a column vector), and it represents the equal weight for each asset in the portfolio;
-        equal_w = np.ones(n) / n
-
-        # dates on which we rebalance back to equal weight
-        # Pandas < 2.2 uses 'Q'/'M'; >= 2.2 uses 'QE'/'ME' for offsets,
-        # but to_period() always needs the legacy short form.
-        period_freq = rebal_freq.replace('QE', 'Q').replace('ME', 'M')
-        # we convert the index of the returns DataFrame to a PeriodIndex with the specified frequency,
-        # and then we take the end_time of each period, normalize it to midnight, and
-        #  create a set of these rebalance dates for quick lookup; this way we can easily check if a
-        #  given date is a rebalance date during our iteration over the returns
-        rebal_dates = set(rets.index. # take the index of the returns DataFrame, which is a DatetimeIndex representing the dates of the returns
-                          to_period(period_freq). # convert it to a PeriodIndex with the specified frequency (e.g. quarterly or monthly), which groups the dates into periods based on that frequency
-                          end_time. # take the end time of each period, which gives us the last date of each quarter or month (depending on the frequency we specified); this is important because we want to rebalance at the end of each period
-                          normalize() # normalize the timestamps to midnight (00:00:00) to ensure that we are comparing dates without time components when we check for rebalance dates during our iteration; this is important because the original timestamps might have time components that could cause mismatches when we check if a date is in the rebal_dates set
-                          )
-
-        # initialize a DataFrame to hold the weights, with the same index and columns as the returns DataFrame
-        # and we use dtype=float to ensure that the weights are stored as floating-point numbers for calculation ease
-        weights = pd.DataFrame(index=rets.index, columns=rets.columns, dtype=float)
-        w = equal_w.copy()
-
-        for date in rets.index:
-            weights.loc[date] = w  # beginning-of-period weight (will carry through the drift from the previous period)
-            # drift weights by that day's return
-            # this multiplies the current weights of dimension n x 1 elementwise by (1 + daily return) for each asset,
-            #  which gives us the new weights (as a proportion of the starting value of that portfolio)
-            #   (if was matrix multiplication, we would need to use np.dot or the @ operator)
-            w = w * (1 + rets.loc[date].values)
-            w = w / w.sum()  # renormalise, since overall, will be some proportion of the starting value of the portfolio, 
-            # but we want to keep it as weights that sum to 1
-
-            # snap back to equal weight at period boundaries
-            if date.normalize() in rebal_dates:
-                w = equal_w.copy()
-
-        return weights
+        return performance.simulate_weights(self._daily_returns(), rebal_freq)
 
     def attribution(self, weights, sector_map):
         """Compute sector-level return attribution.
+
+        Thin shim. The implementation is
+        ``portutils.analysis.performance.ReturnAttribution``, which is where the
+        rationale for the V_{t-1} scaling now lives (and which additionally offers
+        per-column output, a weight shift, an external equity path and a residual leg —
+        none of which this signature exposes).
+
+        `weights` here are BEGINNING-of-period, so no shift is applied: they come from
+        ``simulate_weights`` or from a constant vector, not from an accounting frame.
 
         Parameters
         ----------
@@ -265,41 +251,25 @@ class PanelBuilder:
 
         Returns
         -------
-        sector_contrib : pd.DataFrame
-            Cumulative contribution per sector (wealth-index style, base 100).
-        portfolio_series : pd.Series
-            Total portfolio wealth index (base 100).
+        tuple
+            ``(sector_contrib, portfolio_daily, sector_cum, portfolio_series_change,
+            portfolio_series)`` — exactly the historical 5-tuple, so every existing
+            ``a, b, c, d, e = panel.attribution(...)`` call site keeps working.
+
+            Deliberately sliced down rather than returned whole: tuple unpacking in
+            Python requires EXACT arity, so handing back the full 7-field
+            ``AttributionResult`` would break all three existing call sites. Code that
+            wants the extra fields (per-column contributions, a residual leg, a weight
+            shift) should call ``performance.ReturnAttribution`` directly rather than
+            reaching for them through a plotting object.
         """
-        rets = self._daily_returns()
-        # per-asset weighted contribution each day
-        #   (elementwise multiplication of the weights DataFrame and the returns DataFrame)
-        contrib = weights * rets
-        # roll up to sector level
-        sector_contrib = pd.DataFrame(index=rets.index)
-        for sector, tickers in sector_map.items():
-            sector_contrib[sector] = contrib[tickers].sum(axis=1)
-
-        # cumulative portfolio return -> wealth index (base 100)
-        portfolio_daily = sector_contrib.sum(axis=1)
-        portfolio_series = (1 + portfolio_daily).cumprod() * 100
-        portfolio_series_change = portfolio_series - 100
-
-        # absolute sector contributions: scale each day's percentage contribution
-        # by the portfolio value at the *start* of that day, so the units are
-        # portfolio-value units (not percentages).  This ensures that the
-        # cumulative sector contributions sum exactly to portfolio_series_change.
-        portfolio_prev = portfolio_series.shift(1).fillna(100)  # V_{t-1}
-        sector_abs = pd.DataFrame(index=rets.index)
-        for sector, tickers in sector_map.items():
-            # first, for each day's absolute portfolio change, calculate the amount that was contributed from each 
-            # individual asset. We do this by summing along axis = 1, which means for each row, summing along the columns
-            sector_abs[sector] = portfolio_prev * contrib[tickers].sum(axis=1)
-        # then, we take the cumulative sum of these absolute contributions to get the cumulative contribution of each sector
-        # over time, which will sum to the total portfolio change over time; this is important for plotting the return attribution
-        # in a way that visually stacks up to the total portfolio return
-        sector_cum = sector_abs.cumsum()
-
-        return sector_contrib, portfolio_daily, sector_cum, portfolio_series_change, portfolio_series
+        res = performance.ReturnAttribution(
+            weights,
+            self._daily_returns(),
+            group_map=sector_map,
+        ).run()
+        return (res.grouped_contrib, res.portfolio_daily, res.cum_grouped,
+                res.wealth_change, res.wealth)
 
     # -- subplot panel construction ─────────────────────────────────────────────
 
