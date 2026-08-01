@@ -27,7 +27,7 @@ live_trading:
   # `live_book`'s 1.43% targets the old 0.02 was larger than the target itself and nothing
   # could ever trade. 0.005 is ~1/3 of a target weight — small enough to let a real
   # rebalance through, large enough to ignore drift of a few basis points.
-  min_turnover: 0.005
+  min_turnover: 0.0001
   # Which named weight vector from config/asset_universe.yaml the live policy follows.
   # `live_book` = the seven names actually held/wanted, equally weighted over 60% of NetLiq
   # (40% cash). `spy_kmlm` is the two-ticker RESEARCH vector — pointing live trading at it

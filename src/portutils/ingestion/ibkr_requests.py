@@ -554,6 +554,41 @@ class IBApp(EWrapper, EClient):
         # were reported as "never received".
         self.req_notices = {}
 
+        # ══════════════════════════════════════════════════════════════════════
+        # APPEND-ONLY MESSAGE LOGS — the two dicts above are only a SUMMARY.
+        # req_errors / req_notices hold ONE tuple per reqId, so a second message
+        # about the same order OVERWRITES the first. That is fine for a waiter
+        # asking "did this request die?", and useless for a trader asking "what
+        # did TWS say about order 15?" — an order can draw several messages (a
+        # 399 warning about the open, then a 201 refusal), and only the last of
+        # each kind survived.
+        #
+        # These three keep everything. Errors and notices are kept SEPARATELY
+        # because the question is usually asked one kind at a time ("was it
+        # refused?" vs "why is it held?"), and req_messages keeps both in
+        # ARRIVAL ORDER for the times when the sequence is the point.
+        #
+        # LIFETIME: they grow for the life of this IBApp instance. Nothing is
+        # pruned and there is no time window — which is exactly why a rejection
+        # is still readable long after the cell that submitted the order has
+        # finished (its print, made on the reader thread, is not). Tens of
+        # orders per session makes the unbounded growth academic.
+        # ══════════════════════════════════════════════════════════════════════
+        # reqId -> [(errorCode, errorString), ...], terminal messages only.
+        self.req_error_log = {}
+        # reqId -> [(errorCode, errorString), ...], advisory messages only.
+        self.req_notice_log = {}
+        # reqId -> [{'code', 'text', 'kind', 'ts'}, ...], both kinds interleaved.
+        #
+        # DELIBERATELY WITHOUT A CONSUMER, and kept anyway. Nothing reads 'code',
+        # 'text', 'kind' or 'ts'; the only production reader counts len() of it for
+        # the quiet-period exit in wait_for_order_ack, and could just as well add the
+        # two logs above. It exists as a RAW AUDIT TRAIL: the arrival order across
+        # both kinds, which the split logs flatten away, for the debugging session
+        # where the sequence of a warning and a refusal is the thing in question.
+        # Do not go looking for the reader — there isn't one, and that is the design.
+        self.req_messages = {}
+
         # Market-data style state.
         self.managed_accounts = []
         # Latest trade price, written by tickPrice() when tickType is LAST (4/68).
@@ -748,6 +783,8 @@ class IBApp(EWrapper, EClient):
         # newer builds (10.47+) pass an additional `errorTime` (epoch ms) and may
         # reorder/extend further. Accept *args and locate fields by type to stay
         # forward-compatible.
+        # note that this fires separately for each reqId, and for each error message
+        # corresponding to that reqId
         #
         # ══════════════════════════════════════════════════════════════════════
         # THE errorTime TRAP. On ibapi 10.47 the real signature is
@@ -814,7 +851,33 @@ class IBApp(EWrapper, EClient):
         # for a market order submitted while the venue is shut. Classifying that as
         # terminal made five PreSubmitted orders print as "REJECTED" while they sat
         # perfectly healthy in the book, queued for the open.
-        if errorCode >= 2100 or errorCode in _ADVISORY_ORDER_CODES:
+        #
+        # ONE classification, computed once and reused by both the append-only logs
+        # and the summary dicts below. Writing the same condition out twice is how
+        # the log and the summary drift apart, and a message filed as an error in
+        # one and a notice in the other is worse than either alone.
+        is_advisory = errorCode >= 2100 or errorCode in _ADVISORY_ORDER_CODES
+
+        # Append to the append-only logs FIRST, so nothing is lost even for the
+        # kinds the summary dicts are about to overwrite. See the block comment in
+        # __init__ for why a single-slot dict was not enough.
+        with self.lock:
+            self.req_messages.setdefault(reqId, []).append({
+                'code': errorCode,
+                'text': errorString,
+                'kind': 'notice' if is_advisory else 'error',
+                # Wall-clock arrival, so a frame can order messages that share a
+                # reqId and show how far after the submit a refusal came back.
+                'ts': time.time(),
+            })
+            log = self.req_notice_log if is_advisory else self.req_error_log
+            log.setdefault(reqId, []).append((errorCode, errorString))
+        # after we have covered the append-only logs, we can then move onto the
+        # summary dicts, which only hold the last message of each kind per reqId.
+        # these summary dicts are the built-in objects populated by IBKRs error() callback
+        # note that these only store one tuple per reqId, so a second message about the
+        #  same order OVERWRITES the first.
+        if is_advisory:
             with self.lock:
                 self.req_notices[reqId] = (errorCode, errorString)
             return
@@ -1826,6 +1889,7 @@ def submit_rebalance_orders(
         the old behaviour (defaults, with ``currency_col`` applied), so existing
         callers are unaffected.
     """
+    # Initialize a list to keep track of submitted orders for logging
     submitted = []
     # Normalise once so the row loop can .get() without a None check each time.
     contract_specs = contract_specs or {}
@@ -1889,11 +1953,11 @@ def submit_rebalance_orders(
         # - in turn, it calls market_order to OrderApp.place_order() which creates the specifications of that order,
         # under ibkr's 'order' object class, importantly specifying buy, market and of what quantity,
         # - in tuurn, it calls ou own OrderApp's place_order() method with the contract object and order object
-        # - in turn, the place_order() method calls calls ib_app.reserve_order_id()
+        # - in turn, the place_order() method calls calls ib_app.reserve_order_id()ci
         # - in turn, reserve_order_id() returns the next valid orderId and increments it so that
         # - the next time we send an order and do the same thing, we have a valid id to use
         # - in turn, once it has the valid id, it calls the IBAPi's built-in app.placeOrder() method,
-        # (or rather, Eclient.placeOrder(), sinc our app object will be an instance of ECLient)
+        # (or rather, Eclient.placeOrder(), since our app object will be an instance of ECLient)
         # which sends the order to IBKR with the contract, order specifications and orderId.
         # through the TWS gateway
         # this naturally returns an order_id that ibkr assigns to the order,
@@ -1962,6 +2026,19 @@ def wait_for_order_ack(app, order_ids, timeout=15, settle=1.0, poll=0.25):
         One row per order id: orderId, status, filled, remaining, avgFillPrice,
         whyHeld, error, acknowledged. Never raises on a missing acknowledgement —
         the caller is expected to report it, which is the entire point.
+
+        Plus the VERDICT columns, which answer the question a trader actually has
+        ("did it work, and if not why?") rather than the weaker one this function
+        started out answering ("did TWS mention it?"):
+          verdict    FILLED / WORKING / PENDING_OPEN / HELD / REJECTED / NO_ANSWER
+          reason     the message that drove the verdict, in full
+          n_errors   how many terminal messages this order drew
+          n_notices  how many advisory messages this order drew
+
+        And one column PER MESSAGE — error_1 … error_N, notice_1 … notice_N —
+        widened from the append-only logs. The column count is set by the busiest
+        order; a run in which nothing drew a message of a kind gains no columns of
+        that kind at all. See _message_columns.
     """
     ids = [int(i) for i in order_ids if i is not None and not pd.isna(i)]
     if not ids:
@@ -1971,13 +2048,46 @@ def wait_for_order_ack(app, order_ids, timeout=15, settle=1.0, poll=0.25):
     time.sleep(settle)
 
     deadline = time.time() + timeout
+    # ════════════════════════════════════════════════════════════════════════
+    # WHY THE LOOP DOES NOT STOP AT "EVERY ID SEEN".
+    # It used to. An order is normally mentioned within a second (PreSubmitted
+    # from orderStatus), so the loop exited at ~1s — and a rejection arriving at
+    # 1.4s was absent from the returned frame even though it had landed in the
+    # logs a moment later. The 15s timeout was a ceiling that was never reached.
+    #
+    # The exit condition is now "every id seen AND nothing new has arrived for
+    # two consecutive polls". TWS sends an order's messages in a burst, so a
+    # short quiet period is good evidence the burst is over. Typical return is
+    # ~1.5-2s; the timeout still caps the worst case.
+    #
+    # Note this is EVIDENCE, not a guarantee: IB never signals "that is all the
+    # messages for order 15", and reqOpenOrders does not replay error() messages.
+    # Anything arriving later is still recorded, and re-running this function
+    # picks it up — which is why the logs are append-only.
+    # ════════════════════════════════════════════════════════════════════════
+    quiet_polls = 0          # consecutive polls in which no new message arrived
+    last_total = -1          # message count at the previous poll; -1 forces a first compare
     while True:
         with app.lock:
+            # for each of the order ids we submitted, check if it has been seen in any of the relevant
+            #  dictionaries that track the state of orders in the IBApp instance.
+            # order_status: tracks the status of orders (e.g., filled, cancelled, etc.)
+            # open_orders: tracks orders that are currently open and not yet filled or cancelled
+            # req_errors: tracks any errors that occurred during order submission or processing
+            # req_notices: tracks any notices or warnings related to the orders
             seen = {i for i in ids
                     if i in app.order_status or i in app.open_orders
                     or i in app.req_errors or i in app.req_notices}
-        if len(seen) == len(ids) or time.time() >= deadline:
+            # Total messages logged against OUR ids only — a message about some
+            # unrelated request must not keep this loop awake.
+            messages = getattr(app, 'req_messages', {})
+            total = sum(len(messages.get(i, ())) for i in ids)
+        # A rising count means TWS is still talking; reset the quiet counter.
+        quiet_polls = quiet_polls + 1 if total == last_total else 0
+        last_total = total
+        if (len(seen) == len(ids) and quiet_polls >= 2) or time.time() >= deadline:
             break
+        # wait another small increment of time before an additional check
         time.sleep(poll)
 
     rows = []
@@ -2010,11 +2120,24 @@ def wait_for_order_ack(app, order_ids, timeout=15, settle=1.0, poll=0.25):
                 notice = notice or err
                 err = None
 
+            # The COMPLETE message sets, from the append-only logs. err/notice above
+            # are the last of each kind and drive the existing columns; these are
+            # everything, because an order that drew a warning AND a refusal has a
+            # story that neither message tells on its own.
+            all_errors = list(getattr(app, 'req_error_log', {}).get(order_id, ()))
+            all_notices = list(getattr(app, 'req_notice_log', {}).get(order_id, ()))
+
+            verdict, reason = _order_verdict(status, openo, err, notice, all_notices)
+
             rows.append({
                 'orderId': order_id,
                 'symbol': openo.get('symbol'),
                 'action': openo.get('action'),
                 'quantity': openo.get('totalQuantity'),
+                # The one-word answer, and the message behind it. Everything below
+                # this pair is the evidence it was derived from.
+                'verdict': verdict,
+                'reason': reason,
                 'status': status.get('status') or openo.get('status'),
                 'filled': status.get('filled'),
                 'remaining': status.get('remaining'),
@@ -2022,12 +2145,136 @@ def wait_for_order_ack(app, order_ids, timeout=15, settle=1.0, poll=0.25):
                 'whyHeld': status.get('whyHeld'),
                 'error': f"{err[0]} {err[1]}" if err else None,
                 'notice': f"{notice[0]} {notice[1]}" if notice else None,
+                # Counts, so "did this order draw anything?" is one comparison. The
+                # messages themselves arrive as error_1..error_N / notice_1..notice_N
+                # columns, appended after this loop — see _message_columns.
+                'n_errors': len(all_errors),
+                'n_notices': len(all_notices),
                 # The column that matters. False = TWS never said a word about this
                 # order, so assume it did not arrive. A notice counts: it is TWS
                 # talking about this order id, which silence is not.
                 'acknowledged': bool(status or openo or err or notice),
             })
-    return pd.DataFrame(rows)
+
+    ack = pd.DataFrame(rows)
+    # One column per message, rather than one cell holding all of them. A blob had to
+    # be parsed back apart to answer "what was the SECOND error?", which is a question
+    # the logs can answer directly.
+    with app.lock:
+        widened = [
+            ack,
+            _message_columns(getattr(app, 'req_error_log', {}), ids, 'error'),
+            _message_columns(getattr(app, 'req_notice_log', {}), ids, 'notice'),
+        ]
+    # concat on axis=1 glues columns side by side; every frame here was built from the
+    # same `ids` in the same order, so positional alignment is exact.
+    return pd.concat([f for f in widened if not f.empty], axis=1)
+
+
+def _message_columns(log, ids, prefix):
+    """Widen a per-order message log into prefix_1 … prefix_N columns.
+
+    # ========================================================================
+    # WHY THIS IS THE WHOLE IMPLEMENTATION.
+    # req_error_log / req_notice_log already hold, per order id, a LIST of
+    # (code, text) — which is exactly one row of the wide frame. Handing pandas
+    # a ragged list of lists NaN-pads the short rows for us, so there is no
+    # explode (that reshapes rows, not columns) and no json_normalize (that is
+    # for nested dicts, and these are flat tuples).
+    #
+    # WHY THE TWO SPLIT LOGS AND NOT req_messages. The wide layout needs, per
+    # order, a list of errors and a list of notices — the partition the two logs
+    # already are. req_messages interleaves both kinds, so it would have to be
+    # filtered by 'kind' to rebuild these same two lists, and its one distinctive
+    # feature (arrival order ACROSS kinds) is meaningless once each kind has its
+    # own columns. Do not "simplify" this to read the single log.
+    #
+    # Returns an EMPTY frame when no order drew a message of this kind, so a
+    # clean run gains no columns at all rather than a column of None.
+    #
+    # Pure: dict in, DataFrame out. The caller holds the lock.
+    # ========================================================================
+    """
+    cells = [[f"{code} {text}" for code, text in log.get(i, ())] for i in ids]
+    if not any(cells):
+        return pd.DataFrame(index=range(len(ids)))
+    wide = pd.DataFrame(cells)
+    # Columns come back as 0..N-1; name them 1-based, since "error_1" reads as the
+    # first error and "error_0" reads as a mistake.
+    wide.columns = [f"{prefix}_{n + 1}" for n in range(wide.shape[1])]
+    return wide
+
+
+# Text IB uses in its 399 "Order Message" when an order is accepted but parked until
+# the venue opens ("Warning: Your order will not be placed at the exchange until
+# 2026-07-31 09:00:00 MET."). Matched on the phrase rather than the code because 399
+# covers every kind of order message, only some of which mean "queued for the open".
+_PENDING_OPEN_MARKER = 'will not be placed at the exchange until'
+
+
+def _order_verdict(status, openo, err, notice, all_notices):
+    """Reduce one order's collected state to (verdict, reason).
+
+    # ========================================================================
+    # WHY A VERDICT EXISTS AT ALL.
+    # The frame already carried status, error and notice, and reading it still
+    # required knowing that 201 means refused, that 399 usually does not, and
+    # that a live status outranks both. One armed run produced a 201 KID refusal
+    # and five 399 "queued until 09:00" warnings side by side; they look alike in
+    # a dump and mean opposite things. This turns that reading into a column.
+    #
+    # ORDER OF EVIDENCE: status first, messages second. IB adds warning codes
+    # faster than anyone updates a constant, but an order's own status is
+    # authoritative and needs no maintenance — the same reasoning as the
+    # belt-and-braces demotion in wait_for_order_ack above.
+    #
+    # Pure: takes dicts, returns a tuple. No app, no lock, no I/O.
+    # ========================================================================
+    """
+    state = str(status.get('status') or openo.get('status') or '')
+
+    # Nothing at all. Not "fine" — this is the empty-TWS-panel failure the whole
+    # harness was written for, so it gets its own verdict rather than a blank.
+    if not state and not err and not notice:
+        return 'NO_ANSWER', None
+
+    # A terminal error with no live status is a refusal: the KID rejection, a
+    # margin refusal, an unknown contract. The reason is the message verbatim —
+    # truncating it would drop precisely the part that says what to fix.
+    # note that _LIVE_ORDER_STATES is a set of order states that are considered
+    #  "live" or "active" in the IBKR system. For reference, these are:
+    # {'PreSubmitted', 'PendingSubmit', 'Submitted', 'ApiCancelled', 
+    # 'Cancelled', 'Filled', 'Inactive'}
+    if err and state not in _LIVE_ORDER_STATES:
+        return 'REJECTED', f"{err[0]} {err[1]}"
+
+    if state == 'Filled':
+        return 'FILLED', None
+
+    if state in _LIVE_ORDER_STATES:
+        # Accepted but parked until the venue opens. Checked BEFORE whyHeld
+        # because such an order is perfectly healthy and must never be reported
+        # as a problem — five of them were, once.
+        for code, text in all_notices:
+            # we check if the notice text contains the _PENDING_OPEN_MARKER string,
+            # for reference, this string is defined as 'will not be placed at the
+            #  exchange until', 
+            if _PENDING_OPEN_MARKER in str(text):
+                return 'PENDING_OPEN', f"{code} {text}"
+        # Held by TWS and waiting on a human: whyHeld set, or the 10311
+        # direct-routing warning that puts a Transmit button on the order.
+        why = str(status.get('whyHeld') or '')
+        if why:
+            return 'HELD', why
+        for code, text in all_notices:
+            if code == 10311:
+                return 'HELD', f"{code} {text}"
+        return 'WORKING', None
+
+    # A terminal non-live state that is not a rejection: Cancelled, ApiCancelled,
+    # or an Inactive with no error recorded. Report the state itself rather than
+    # inventing a category for it.
+    return state.upper(), f"{notice[0]} {notice[1]}" if notice else None
 
 
 def _cancel_kwargs(func):
@@ -2186,10 +2433,23 @@ def get_open_orders_data(app, timeout=15, all_clients=False):
     # We clear only the open-order snapshot itself; order_status is left intact
     # because it is also useful as the rolling live status store.
     app.open_orders_event.clear()
+    # note that the above syntax clears the open_orders_event, which is 
+    # a threading.Event object that is used to signal when the open
+    #  orders data has been received from TWS, and before clearing, might
+    # have taken a value such as set() or clear(), and we want to reset it to 
+    # clear() so that we can wait for the new data to arrive. This is 
+    # important because if we don't clear it, we might end up waiting 
+    # for an event that has already been set
     with app.lock:
+        # recall, the app.lock is a threading.Lock object that is used to
+        # synchronize access to shared data, i.e., it ensures that only
+        #  one thread can access the open_orders dictionary at a time,
+        # i.e., one of the reader thread or the main thread, 
         app.open_orders = {}
 
     # --- Fire the request / wait for callbacks ----------------------------
+    # check if all_clients is True: if so, it means we want to request open orders
+    #  for all clients, not just the current one.
     if all_clients:
         app.reqAllOpenOrders()
     else:
@@ -2198,14 +2458,217 @@ def get_open_orders_data(app, timeout=15, all_clients=False):
     _wait_for(app.open_orders_event, timeout, 'open orders')
 
     # --- Merge order definitions with latest statuses ---------------------
+    # note that app.open_orders is a dictionary that stores the open orders
+    #  received from TWS, through the openOrder callback
     rows = []
     with app.lock:
         for order_id, order_row in app.open_orders.items():
+            # we initialise the first part of the completed row with the order_row
+            # that came from the openOrder callback, which contains
+            # the order definition
             merged = dict(order_row)
+            # we then update the merged dictionary with the latest status
+            # that came from the orderStatus callback, which contains
+            # the latest status of the order, such as filled, cancelled, etc.
             merged.update(app.order_status.get(order_id, {}))
             rows.append(merged)
 
     return pd.DataFrame(rows)
+
+
+def _pair_columns(df, suffix='_broker'):
+    """Reorder a merged frame so each column sits next to the other side's copy.
+
+    # ========================================================================
+    # WHY NOT JUST LEAVE THE MERGE ALONE.
+    # pd.merge appends the right frame's columns to the FAR RIGHT in their own
+    # order, so `status` ends up a dozen columns away from `status_broker` and
+    # the two values you actually want to compare cannot be seen at once. The
+    # whole point of joining the broker's view onto ours is to spot DISAGREEMENT
+    # — a status we recorded that the broker does not confirm — and a layout
+    # that hides disagreement defeats the join.
+    #
+    # WHY NOT ALPHABETICAL. Sorting would pair `status` with `status_broker`
+    # only by luck of spelling, and would scatter the reading order that matters
+    # (orderId, symbol, verdict, reason first). This keeps the ack frame's own
+    # order — which was chosen for reading — and slots each broker copy in right
+    # after its twin. Broker-only columns (conId, tif, lmtPrice …) follow at the
+    # end, since they have nothing to be compared against.
+    #
+    # Pure: takes a frame, returns a reindexed view. No I/O.
+    # ========================================================================
+    """
+    ordered = []
+    for col in df.columns:
+        if col.endswith(suffix):
+            continue                       # placed next to its twin, below
+        ordered.append(col)
+        twin = f"{col}{suffix}"
+        if twin in df.columns:
+            ordered.append(twin)
+    # Anything the loop did not place: broker columns with no counterpart on our
+    # side. Appended in their original order rather than dropped — the broker
+    # knowing something we do not is exactly the kind of thing worth seeing.
+    ordered += [c for c in df.columns if c not in ordered]
+    return df[ordered]
+
+
+def check_orders(app, order_ids, timeout=15, settle=1.0, poll=0.25,
+                 all_clients=False, show=True, sent=None):
+    """Run the whole post-submit sequence and return one merged frame.
+
+    ═══════════════════════════════════════════════════════════════════════════
+    THE ONE CALL TO MAKE AFTER SUBMITTING. It holds NO logic of its own — the
+    verdicts live in wait_for_order_ack, the broker snapshot in
+    get_open_orders_data. What it adds is (a) running them in the right order,
+    (b) saying out loud which stage is running, so a slow one is visibly slow
+    rather than an unexplained pause, and (c) joining the two views so a single
+    table answers both "what did TWS say" and "is it live".
+
+    THE ORDER IS MANDATORY, NOT STYLISTIC. get_open_orders_data CLEARS
+    app.open_orders before re-requesting, and wait_for_order_ack reads that dict
+    for symbol / action / quantity. Swap the two calls and those columns come
+    back empty for every row — with no error to explain why. Do not "tidy" this.
+
+    WHAT WE SENT IS THE SPINE (pass `sent`). symbol / action / quantity /
+    currency are INPUTS to placeOrder — TWS only ever echoes them back, through
+    the openOrder callback. It sends no openOrder for an order it REFUSES, so
+    that echo never arrives and app.open_orders never learns the symbol; then
+    get_open_orders_data clears that dict and refills it with only what is still
+    working, blanking the broker copy too. Order 18 came back REJECTED, carrying
+    the KID reason and no ticker, while the frame that named it sat unused in the
+    caller's namespace. Building outwards from our own record makes every row
+    named BY CONSTRUCTION rather than named when a callback happened to arrive.
+    ═══════════════════════════════════════════════════════════════════════════
+
+    Parameters
+    ----------
+    app : IBApp
+        The connected app the orders were placed through.
+    order_ids : iterable[int]
+        Order ids returned by submit_rebalance_orders / place_order.
+    sent : pd.DataFrame | None
+        What submit_rebalance_orders returned. When given it becomes the spine of
+        the result — one row per order sent, in submission order — and the ack's
+        own echoed symbol / action / quantity are DROPPED rather than suffixed,
+        so each identity column appears exactly twice: ours bare, IB's current
+        view as `*_broker`. When None the ack frame is the spine, which is the
+        older behaviour and leaves existing callers unaffected.
+    timeout, settle, poll : float
+        Passed straight to wait_for_order_ack.
+    all_clients : bool
+        Passed to get_open_orders_data — True also lists orders placed by other
+        client ids, which is what you want when something has gone wrong and you
+        are not sure what is out there.
+    show : bool
+        Print the stage banners and display each intermediate frame. Set False to
+        use this as a plain function inside a pipeline.
+
+    Returns
+    -------
+    pd.DataFrame
+        The acknowledgement frame (one row per requested id, verdicts included)
+        left-joined with the broker's open-order snapshot on orderId. Left, so an
+        id TWS never mentioned survives as a NO_ANSWER row instead of vanishing —
+        which is the single most important row the frame can carry.
+
+        Columns are INTERLEAVED, not appended: where both frames carry a name,
+        ``status`` sits immediately beside ``status_broker``. See _pair_columns.
+    """
+    # Lazy, optional import: display() renders frames properly in a notebook, but
+    # portutils must not depend on IPython being installed. Falling back to print
+    # keeps this usable from a plain script.
+    def _show(obj):
+        if not show:
+            return
+        try:
+            from IPython.display import display as _display
+            _display(obj)
+        except ImportError:
+            print(obj)
+
+    # THE STAGES ARE NUMBERED FOR THE READER, so a slow one is visibly slow rather
+    # than an unexplained pause. With `sent` there are four, because what we
+    # TRANSMITTED is a stage in its own right — the question the whole table answers
+    # is "what did we ask for, and what became of it", and that reads backwards if
+    # the first thing on screen is TWS's reply to an order you have not seen stated.
+    n = 4 if sent is not None and len(sent) else 3
+    step = 0
+
+    if n == 4:
+        step += 1
+        if show:
+            print(f"{step}/{n} what we sent (our own record — authoritative for "
+                  f"symbol / action / quantity):")
+        _show(sent)
+
+    step += 1
+    if show:
+        print(f"{step}/{n} waiting for order acknowledgement (TWS answers asynchronously)…")
+    ack = wait_for_order_ack(app, order_ids, timeout=timeout, settle=settle, poll=poll)
+    # Displayed only when it is the spine. Once `sent` is the spine, every column of
+    # this frame reappears in the combined table below, so showing it here is the same
+    # data twice — and the intermediate "was it acknowledged" step is not the question
+    # being asked. The banner stays, because the WAIT still happens and should be
+    # visible while it does.
+    if n == 3:
+        _show(ack)
+
+    step += 1
+    if show:
+        print(f"{step}/{n} the broker's own view (reqOpenOrders — independent of this session)…")
+    # MUST come after the ack: this call clears app.open_orders. See the header.
+    open_orders = get_open_orders_data(app, timeout=timeout, all_clients=all_clients)
+    _show(open_orders)
+
+    step += 1
+    if show:
+        print(f"{step}/{n} combined — what we sent, what became of it:")
+
+    # ── THE SPINE ────────────────────────────────────────────────────────────
+    # With `sent`, the table is built outwards from what WE transmitted: one row
+    # per order, in submission order, named whatever TWS did or did not say. The
+    # ack's echoed identity columns are dropped rather than suffixed — they hold
+    # the same values as the spine except on precisely the rows (rejections)
+    # where they are empty, so keeping them would add a third symbol column whose
+    # only distinction is being blank when it matters.
+    if sent is not None and len(sent) and 'orderId' in getattr(sent, 'columns', ()):
+        spine = sent.copy()
+        spine['orderId'] = spine['orderId'].astype('Int64')
+        # orderId first: it is the key every other frame joins on and the id you quote
+        # when cancelling, so it should not be buried mid-table by the sent frame's own
+        # column order.
+        spine = spine[['orderId'] + [c for c in spine.columns if c != 'orderId']]
+        if len(ack):
+            echoed = [c for c in ('symbol', 'action', 'quantity', 'currency')
+                      if c in ack.columns and c in spine.columns]
+            ack_side = ack.drop(columns=echoed)
+            ack_side['orderId'] = ack_side['orderId'].astype('Int64')
+            spine = spine.merge(ack_side, on='orderId', how='left', suffixes=('', '_ack'))
+        ack = spine
+
+    if len(ack) and len(open_orders) and 'orderId' in open_orders.columns:
+        # suffixes: keep the ack column names bare so existing readers are
+        # unaffected, and mark the broker's copy of a colliding name explicitly.
+        # typically, the reason why the broker's view would disagree with the
+        #  ack is that the order was initially submitted, probably came up for a few
+        # moments in TWS, and then was rejected, so the ack's status is the one that matters.
+        # Normalise the join key on both sides: the spine may carry Int64 (nullable,
+        # because a dry-run row has no id) while the broker frame carries plain int64,
+        # and pandas will not join those without complaint.
+        broker = open_orders.copy()
+        broker['orderId'] = broker['orderId'].astype('Int64')
+        combined = ack.assign(orderId=ack['orderId'].astype('Int64')).merge(
+            broker, on='orderId', how='left', suffixes=('', '_broker'))
+        # …then put each pair side by side, so a disagreement between our record
+        # and the broker's is visible without scrolling.
+        combined = _pair_columns(combined)
+    else:
+        # Nothing to join against — an empty open-orders frame is normal once every
+        # order has filled or been rejected, and must not blank the ack frame.
+        combined = ack
+    _show(combined)
+    return combined
 
 
 def get_pnl_data(app, account, model_code='', timeout=10, keep_subscription=False):

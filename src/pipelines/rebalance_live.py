@@ -102,7 +102,7 @@ def live_settings():
     s.setdefault("account", "DUP102412")
     s.setdefault("require_paper", True)
     s.setdefault("max_order_value", 50_000)
-    s.setdefault("min_turnover", 0.02)
+    s.setdefault("min_turnover", 0.0001)
     s.setdefault("portfolio", "spy_kmlm")
     s.setdefault("client_id", 151)
     # Contract details for target symbols we do NOT hold. A held position carries its own
@@ -334,9 +334,14 @@ def build_orders(book, marks, weights, net_liq, settings, detail=None, pending=N
         if px is None or not np.isfinite(px) or px <= 0:
             # No mark means no order. Filling against an invented price is how a rebalancer
             # turns a data outage into a real loss.
+            # target_value is still stated: "we wanted 40,000 of this and could not price
+            # it" is a more useful line than a row of blanks. current_value is None
+            # rather than 0.0 — we do not know what the position is worth, and writing
+            # zero would understate the book by exactly the amount we cannot see.
             rows.append({"symbol": symbol, "target_weight": target_w,
-                         "current_qty": book.position(symbol).qty, "units": 0,
-                         "status": "SKIP no mark"})
+                         "current_qty": book.position(symbol).qty,
+                         "current_value": None, "target_value": target_w * net_liq,
+                         "units": 0, "status": "SKIP no mark"})
             continue
 
         current_qty = book.position(symbol).qty
@@ -387,16 +392,144 @@ def build_orders(book, marks, weights, net_liq, settings, detail=None, pending=N
             "exchange": (d["exchange"] if d is not None else "SMART"),
             "currency": (d["currency"] if d is not None else "USD"),
             "quote_price": (d["quote_price"] if d is not None else px),
-            "base_price": px,
             "fx_ratio": (d["fx_ratio"] if d is not None else 1.0),
+            # MONEY FIRST, THEN WEIGHTS. A weight tells you the shape of the book; only
+            # the value tells you whether a 0.4pp gap is worth four hundred or forty
+            # thousand, which is the number that decides whether the trade is worth the
+            # spread. Both are base currency, on the same basis as current_weight.
             "current_qty": current_qty,
+            # base_price = quote_price * fx_ratio, so it belongs to the conversion block
+            # above by derivation — but it is read as "the price this row is valued at",
+            # so it sits with the quantity and value it multiplies out to.
+            "base_price": px,
+            "current_value": current_qty * px,
+            # What the target weight is WORTH — so target_value - current_value is the
+            # trade in money, directly comparable with notional_base below.
+            "target_value": target_w * net_liq,
             "current_weight": current_w, "target_weight": target_w,
+            # Kept immediately after the pair it is the difference of.
             "weight_diff": target_w - current_w,
             "raw_delta_units": raw_delta, "units": units,
             "action": "BUY" if units > 0 else ("SELL" if units < 0 else ""),
             "notional_base": units * px, "status": status,
         })
     return pd.DataFrame(rows)
+
+
+def print_order_table(orders, net_liq, base_ccy="", weights=None, title="intended orders"):
+    """Print the portfolio totals, then the order table, then the weights sanity line.
+
+    # ========================================================================
+    # ONE PRINTER, TWO CALLERS. main() below and cell 8 of
+    # orders/rebalance_live_debug.py show the same frame, and until now each
+    # formatted it its own way. A harness that presents the pipeline's numbers
+    # differently from the pipeline teaches the wrong thing about the pipeline,
+    # and the two had already drifted.
+    #
+    # THE TOTALS GO ABOVE THE TABLE, not below it: they are what every weight in
+    # the table is measured against, so reading the table without them first is
+    # reading percentages of an unknown number.
+    #
+    # Side-effecting by design (it prints) — which is why it lives in pipelines/
+    # next to build_orders rather than in portutils/.
+    # ========================================================================
+    """
+    # Sum of every row we could price. A symbol with no mark contributes nothing,
+    # so the count of those is printed too — a total that is quietly short by one
+    # position is worse than one that says how much it is missing.
+    # to_numeric first: a table in which EVERY row is unpriced gives an all-None column of
+    # object dtype, and .fillna(0) on that is deprecated (and would sum strings if a status
+    # ever leaked in). errors="coerce" turns anything unparseable into NaN, which is the
+    # honest reading of "we could not value this".
+    values = (pd.to_numeric(orders["current_value"], errors="coerce")
+              if "current_value" in orders else pd.Series(dtype=float))
+    non_cash = float(values.sum())      # Series.sum() skips NaN by default
+    unpriced = int(values.isna().sum())
+    # Residual, NOT a balance IB reported — hence "implied". It is also the fastest
+    # tell for a currency bug: an unconverted leg drives this negative or absurd.
+    cash = net_liq - non_cash
+
+    pct = (lambda v: f"{v / net_liq:6.1%}" if net_liq else "     -")
+    print(f"\ntotal portfolio value  {net_liq:>16,.2f} {base_ccy}   (NetLiquidation)")
+    print(f"total non-cash value   {non_cash:>16,.2f} {base_ccy}   ({pct(non_cash)} invested)")
+    print(f"implied cash           {cash:>16,.2f} {base_ccy}   ({pct(cash)})")
+    if unpriced:
+        print(f"*** {unpriced} position(s) had no base price and are EXCLUDED from the "
+              f"non-cash total — it is understated by however much they are worth. ***")
+
+    print(f"\n{title}:")
+    print(orders.round(4).to_string(index=False))
+
+    # Sanity line the reader can check against the config in one glance.
+    if weights:
+        invested = orders["current_weight"].fillna(0).sum() if "current_weight" in orders else 0.0
+        print(f"\ntarget weights sum to {sum(weights.values()):.4f} "
+              f"(the remainder is cash by design); current invested weight "
+              f"{invested:.4f}")
+
+
+def print_order_outcomes(ack):
+    """Say what happened to each order and what to DO about it.
+
+    # ========================================================================
+    # DRIVEN BY `verdict`, NOT RE-DERIVED HERE. This used to test status strings
+    # ("PreSubmitted"/"PendingSubmit") and search notice text for "10311", which
+    # is the same classification the library already performs — kept in two
+    # places, drifting apart, and wrong in the pipeline first because that is the
+    # path nobody watches run. check_orders computes the verdict once, from
+    # status AND messages; this function only chooses which paragraph to print.
+    #
+    # Extracted from main() so it can be tested without a TWS connection: these
+    # paragraphs are the operator's instructions after a live submit, and an
+    # untested instruction is a guess.
+    # ========================================================================
+    """
+    if not len(ack):
+        return
+    verdicts = ack["verdict"] if "verdict" in ack else pd.Series(dtype=object)
+    missing = ack.loc[verdicts == "NO_ANSWER", "orderId"].tolist()
+    if missing:
+        print(f"\n*** {len(missing)} of {len(ack)} ORDERS WERE NEVER "
+              f"ACKNOWLEDGED BY TWS (orderIds {missing}). They were most "
+              f"likely NOT received. Check the TWS Orders panel before "
+              f"re-running — do not assume they are working. ***")
+    else:
+        print(f"\nall {len(ack)} orders acknowledged by TWS:")
+    print(ack.to_string(index=False))
+    # A rejection arrives through the error callback, not orderStatus, so it
+    # would otherwise be invisible in the status column alone. The symbol is
+    # printed alongside because "orderId 18 was refused" is not actionable
+    # until you know 18 was the SPY leg.
+    for _, r in ack.iterrows():
+        if str(r.get("verdict")) == "REJECTED":
+            print(f"  orderId {r['orderId']} {r.get('symbol') or ''} "
+                  f"REJECTED: {r.get('reason')}")
+        elif r.get("notice"):
+            print(f"  orderId {r['orderId']} {r.get('symbol') or ''} "
+                  f"note: {r['notice']}")
+    # Warning 10311 means TWS ACCEPTED the order but is holding it for manual
+    # confirmation — it shows in the Pending panel with a Transmit button and
+    # will never fill on its own. Neither working nor lost, and the only
+    # outcome that needs a human to finish it.
+    # Orders accepted and waiting for the venue to open. Not a problem — but
+    # the reader should know nothing will fill until then, rather than
+    # discovering it tomorrow.
+    queued = [int(r["orderId"]) for _, r in ack.iterrows()
+              if str(r.get("verdict")) == "PENDING_OPEN"]
+    if queued:
+        print(f"\norderIds {queued} are ACCEPTED and QUEUED — they sit at IB "
+              f"until their venue opens, then go to the exchange. Nothing "
+              f"fills before that. Cancel with: "
+              f"python src/pipelines/cancel_orders.py --cancel")
+
+    held = [r["orderId"] for _, r in ack.iterrows()
+            if str(r.get("verdict")) == "HELD"]
+    if held:
+        print(f"\n*** orderIds {held} are HELD BY TWS pending manual Transmit "
+              f"(precautionary setting for directly-routed orders). They are "
+              f"NOT working. Either click Transmit in TWS, cancel them, or "
+              f"enable 'Bypass Order Precautions for API Orders' in "
+              f"Global Configuration > API > Precautions. ***")
 
 
 def main():
@@ -581,13 +714,7 @@ def main():
 
         orders = build_orders(book, marks, weights, net_liq, settings, detail=detail,
                               pending=pending)
-        print("\nintended orders:")
-        print(orders.round(4).to_string(index=False))
-        # Sanity line the reader can check against the config in one glance.
-        invested = orders["current_weight"].fillna(0).sum()
-        print(f"\ntarget weights sum to {sum(weights.values()):.4f} "
-              f"(the remainder is cash by design); current invested weight "
-              f"{invested:.4f}")
+        print_order_table(orders, net_liq, base_ccy=base_ccy, weights=weights)
 
         tradeable = orders[orders["units"].fillna(0) != 0] if "units" in orders else orders.iloc[0:0]
         if len(tradeable) == 0:
@@ -629,47 +756,17 @@ def main():
         # ══════════════════════════════════════════════════════════════════════════════
         ack = pd.DataFrame()
         if not dry_run:
-            ack = ib.wait_for_order_ack(app, submitted["orderId"].tolist())
-            if len(ack):
-                missing = ack.loc[~ack["acknowledged"], "orderId"].tolist()
-                if missing:
-                    print(f"\n*** {len(missing)} of {len(ack)} ORDERS WERE NEVER "
-                          f"ACKNOWLEDGED BY TWS (orderIds {missing}). They were most "
-                          f"likely NOT received. Check the TWS Orders panel before "
-                          f"re-running — do not assume they are working. ***")
-                else:
-                    print(f"\nall {len(ack)} orders acknowledged by TWS:")
-                print(ack.to_string(index=False))
-                # A rejection arrives through the error callback, not orderStatus, so it
-                # would otherwise be invisible in the status column alone.
-                for _, r in ack.iterrows():
-                    if r["error"]:
-                        print(f"  orderId {r['orderId']} REJECTED: {r['error']}")
-                    if r["notice"]:
-                        print(f"  orderId {r['orderId']} note: {r['notice']}")
-                # Warning 10311 means TWS ACCEPTED the order but is holding it for manual
-                # confirmation — it shows in the Pending panel with a Transmit button and
-                # will never fill on its own. Neither working nor lost, and the only
-                # outcome that needs a human to finish it.
-                # Orders accepted and waiting for the venue to open. Not a problem — but
-                # the reader should know nothing will fill until then, rather than
-                # discovering it tomorrow.
-                queued = [int(r["orderId"]) for _, r in ack.iterrows()
-                          if str(r["status"]) in ("PreSubmitted", "PendingSubmit")]
-                if queued:
-                    print(f"\norderIds {queued} are ACCEPTED and QUEUED — they sit at IB "
-                          f"until their venue opens, then go to the exchange. Nothing "
-                          f"fills before that. Cancel with: "
-                          f"python src/pipelines/cancel_orders.py --cancel")
-
-                held = [r["orderId"] for _, r in ack.iterrows()
-                        if r["notice"] and "10311" in str(r["notice"])]
-                if held:
-                    print(f"\n*** orderIds {held} are HELD BY TWS pending manual Transmit "
-                          f"(precautionary setting for directly-routed orders). They are "
-                          f"NOT working. Either click Transmit in TWS, cancel them, or "
-                          f"enable 'Bypass Order Precautions for API Orders' in "
-                          f"Global Configuration > API > Precautions. ***")
+            # ONE call, same infrastructure the debug harness uses: acknowledgement with
+            # verdicts, then the broker's own view, then the two joined. show=False
+            # because this file does its own printing below — which says what to DO
+            # about each outcome, where the harness narration says what is running.
+            #
+            # sent=submitted makes OUR record the spine, so a REJECTED leg still has a
+            # symbol. TWS sends no openOrder for an order it refuses, so without this the
+            # rejected rows come back nameless — exactly the leg you most need to identify.
+            ack = ib.check_orders(app, submitted["orderId"].tolist(),
+                                  sent=submitted, show=False)
+            print_order_outcomes(ack)
 
         # Audit trail, written for dry runs too so the intent is on record either way.
         OUT_DIR.mkdir(parents=True, exist_ok=True)
@@ -680,16 +777,21 @@ def main():
         out["mode_reason"] = why
         # Record what TWS SAID, not what was hoped. An audit trail claiming seven orders
         # were placed when TWS never saw them is worse than no audit trail.
-        if len(ack) == len(out):
-            # Positional join: submit_rebalance_orders and wait_for_order_ack both walk
-            # the same rows in the same order, so row i of one is row i of the other.
-            # Guarded on equal length rather than assumed — a mismatch would silently
-            # attach the wrong status to the wrong symbol, which is worse than no column.
-            for col in ("orderId", "status", "acknowledged", "error"):
-                out[col] = ack[col].values
-        elif len(ack):
-            print(f"WARNING: {len(ack)} acknowledgements for {len(out)} order rows — "
-                  f"not joining them; see the printed table above.")
+        if len(ack):
+            # JOIN ON orderId, NOT ON POSITION. This used to copy columns across by row
+            # index, guarded on the two frames being the same length — which meant that
+            # the moment a leg was rejected and the frames diverged, the guard fired and
+            # the audit trail silently lost every status column. That is precisely the
+            # run whose record matters most. A key join cannot mis-attach a status to the
+            # wrong symbol, so the guard is no longer needed.
+            keys = ["orderId", "verdict", "reason", "status", "acknowledged",
+                    "n_errors", "n_notices", "error_1", "notice_1"]
+            # submitted carries symbol -> orderId; tradeable (out) is keyed by symbol.
+            id_map = submitted[["symbol", "orderId"]] if "orderId" in submitted else None
+            if id_map is not None:
+                out = out.merge(id_map, on="symbol", how="left")
+                out = out.merge(ack[[c for c in keys if c in ack.columns]],
+                                on="orderId", how="left", suffixes=("", "_ack"))
         out.to_csv(path, index=False)
         print(f"\nwrote {path}")
     finally:

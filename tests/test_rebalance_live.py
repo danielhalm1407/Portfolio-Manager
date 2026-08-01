@@ -112,6 +112,91 @@ def test_orders_move_weights_toward_target():
     assert o.loc["KMLM", "current_qty"] + o.loc["KMLM", "units"] == pytest.approx(13_333, abs=1)
 
 
+def test_order_table_states_value_not_only_weight():
+    """A 0.4pp gap could be £400 or £40,000 — the weight alone does not say which.
+
+    The values are COLUMNS rather than something the printer computes, because the same
+    frame is written to the audit CSV: a number that only exists in a print cannot be
+    checked afterwards against what was actually traded.
+    """
+    net_liq = 1_000_000.0
+    df = portfolio_frame([("SPY", 1000.0, 700.0, 600.0), ("KMLM", 10_000.0, 30.0, 25.0)])
+    book = book_from_portfolio(df, base_equity=net_liq)
+    orders = build_orders(book, {"SPY": 700.0, "KMLM": 30.0}, {"SPY": 0.6, "KMLM": 0.4},
+                          net_liq, settings(max_order_value=500_000)).set_index("symbol")
+
+    assert orders.loc["SPY", "current_value"] == pytest.approx(700_000.0)
+    assert orders.loc["KMLM", "current_value"] == pytest.approx(300_000.0)
+    assert orders.loc["SPY", "target_value"] == pytest.approx(600_000.0)
+    # The two must agree by construction — current_weight IS current_value / net_liq.
+    for sym in ("SPY", "KMLM"):
+        assert (orders.loc[sym, "current_weight"] * net_liq
+                == pytest.approx(orders.loc[sym, "current_value"]))
+        # And the money gap is the trade, comparable with notional_base.
+        gap = orders.loc[sym, "target_value"] - orders.loc[sym, "current_value"]
+        assert orders.loc[sym, "notional_base"] == pytest.approx(gap, abs=1_000)
+
+
+def test_order_table_reads_money_then_weights():
+    """Column order is part of the deliverable: qty, price, the two values, the two
+    weights, then the difference of the pair immediately after it."""
+    net_liq = 1_000_000.0
+    df = portfolio_frame([("SPY", 1000.0, 700.0, 600.0)])
+    book = book_from_portfolio(df, base_equity=net_liq)
+    cols = list(build_orders(book, {"SPY": 700.0}, {"SPY": 0.6}, net_liq, settings()).columns)
+    want = ["current_qty", "base_price", "current_value", "target_value",
+            "current_weight", "target_weight", "weight_diff"]
+    start = cols.index("current_qty")
+    assert cols[start:start + len(want)] == want
+    # base_price must not ALSO remain in the currency block — one column, one place.
+    assert cols.count("base_price") == 1
+
+
+def test_unpriced_leg_states_its_target_but_not_a_zero_value():
+    """No mark means we cannot value the position. Writing 0.0 would understate the book
+    by exactly the amount we cannot see; the target is still worth stating."""
+    net_liq = 1_000_000.0
+    df = portfolio_frame([("SPY", 1000.0, 700.0, 600.0)])
+    book = book_from_portfolio(df, base_equity=net_liq)
+    orders = build_orders(book, {}, {"SPY": 0.6}, net_liq, settings()).set_index("symbol")
+    assert orders.loc["SPY", "status"] == "SKIP no mark"
+    assert pd.isna(orders.loc["SPY", "current_value"])
+    assert orders.loc["SPY", "target_value"] == pytest.approx(600_000.0)
+
+
+def test_print_order_table_totals(capsys):
+    """Totals go ABOVE the table: they are what every weight in it is measured against."""
+    from pipelines.rebalance_live import print_order_table
+
+    net_liq = 1_000_000.0
+    df = portfolio_frame([("SPY", 1000.0, 700.0, 600.0), ("KMLM", 10_000.0, 30.0, 25.0)])
+    book = book_from_portfolio(df, base_equity=net_liq)
+    orders = build_orders(book, {"SPY": 700.0, "KMLM": 30.0}, {"SPY": 0.6, "KMLM": 0.4},
+                          net_liq, settings(max_order_value=500_000))
+    print_order_table(orders, net_liq, base_ccy="GBP", weights={"SPY": 0.6, "KMLM": 0.4})
+    out = capsys.readouterr().out
+
+    assert "total portfolio value" in out and "1,000,000.00 GBP" in out
+    assert "total non-cash value" in out and "1,000,000.00 GBP" in out
+    # Fully invested here, so the residual is zero — and it is labelled IMPLIED, because
+    # it is a residual and not a balance IB reported.
+    assert "implied cash" in out and "0.00 GBP" in out
+    assert "target weights sum to 1.0000" in out
+
+
+def test_print_order_table_says_when_the_total_is_short(capsys):
+    """A total quietly missing a position is worse than one that says how much it misses."""
+    from pipelines.rebalance_live import print_order_table
+
+    net_liq = 1_000_000.0
+    df = portfolio_frame([("SPY", 1000.0, 700.0, 600.0)])
+    book = book_from_portfolio(df, base_equity=net_liq)
+    orders = build_orders(book, {}, {"SPY": 0.6}, net_liq, settings())   # no marks at all
+    print_order_table(orders, net_liq, base_ccy="GBP")
+    out = capsys.readouterr().out
+    assert "1 position(s) had no base price" in out and "EXCLUDED" in out
+
+
 def test_min_turnover_skips_legs_already_on_target():
     # Already at 60/40 — trading here would pay the spread to correct nothing.
     net_liq = 1_000_000.0
@@ -510,13 +595,22 @@ class StubApp:
     """Minimal stand-in for IBApp's post-submit state. No socket, no threads."""
 
     def __init__(self, order_status=None, open_orders=None, req_errors=None,
-                 req_notices=None):
+                 req_notices=None, req_error_log=None, req_notice_log=None,
+                 req_messages=None):
         import threading
         self.lock = threading.RLock()
         self.order_status = order_status or {}
         self.open_orders = open_orders or {}
         self.req_errors = req_errors or {}
         self.req_notices = req_notices or {}
+        # The append-only logs. Default to whatever the single-slot dicts carry, so a
+        # test that only sets req_errors still gets a consistent app: the summary and
+        # the log disagreeing is a state the real error() can never produce.
+        self.req_error_log = req_error_log if req_error_log is not None else {
+            k: [v] for k, v in self.req_errors.items()}
+        self.req_notice_log = req_notice_log if req_notice_log is not None else {
+            k: [v] for k, v in self.req_notices.items()}
+        self.req_messages = req_messages if req_messages is not None else {}
 
 
 def test_unacknowledged_orders_are_reported_not_assumed_successful():
@@ -567,6 +661,382 @@ def test_rejection_surfaces_through_req_errors():
 def test_wait_for_order_ack_handles_no_orders():
     from portutils.ingestion.ibkr_requests import wait_for_order_ack
     assert wait_for_order_ack(StubApp(), [], timeout=0.1, settle=0.0).empty
+
+
+# ---------------------------------------------------------------------------
+# EVERY MESSAGE PER ORDER — the single-slot dicts were losing all but the last
+# ---------------------------------------------------------------------------
+# The real strings from the armed run that prompted this. An order refused for a
+# regulatory reason and an order merely queued for the open look alike in a dump and
+# mean opposite things, so the verdict tests below are driven by these verbatim.
+KID_REJECTION = ("Order rejected - reason:No Trading Permission, Customer Ineligible; "
+                 "Ineligibility reasons:<br>This product does not have a KID in English "
+                 "or in a language approved for your country.")
+QUEUED_FOR_OPEN = ("Order Message:\nSELL 6 5MVL IBIS2\nWarning: Your order will not be "
+                   "placed at the exchange until 2026-07-31 09:00:00 MET.")
+
+
+def test_every_message_is_logged_not_just_the_last():
+    """Three errors and four notices on ONE order id must all survive.
+
+    req_errors/req_notices hold one tuple per id, so the second message about an order
+    overwrote the first. That is fine for a waiter asking "did this request die?" and
+    useless for a trader asking "what did TWS say about order 15?".
+    """
+    app = make_app()
+    for code in (201, 202, 203):
+        app.error(15, 1785091519186, code, f"terminal {code}")
+    for code in (399, 2109, 10311, 2137):
+        app.error(15, 1785091519186, code, f"advisory {code}")
+
+    assert [c for c, _ in app.req_error_log[15]] == [201, 202, 203]
+    assert [c for c, _ in app.req_notice_log[15]] == [399, 2109, 10311, 2137]
+    # Both kinds, in arrival order, for when the sequence is the point.
+    assert [m["code"] for m in app.req_messages[15]] == [201, 202, 203, 399, 2109, 10311, 2137]
+    assert [m["kind"] for m in app.req_messages[15]][:3] == ["error"] * 3
+
+    # BACK-COMPAT, PINNED: the summary dicts still hold the LAST of each kind, because
+    # get_equity_data unpacks them as err[0]/err[1] and must not start seeing a list.
+    assert app.req_errors[15] == (203, "terminal 203")
+    assert app.req_notices[15] == (2137, "advisory 2137")
+
+
+def test_pings_and_connection_level_messages_are_not_logged():
+    app = make_app()
+    app.error(-1, 1785091519186, 2104, "Market data farm connection is OK")
+    app.error(-1, 1785091519186, 1100, "Connectivity between IB and TWS has been lost")
+    assert app.req_messages == {}
+    assert app.req_error_log == {} and app.req_notice_log == {}
+
+
+# ---------------------------------------------------------------------------
+# VERDICTS — one word for what happened, and the reason behind it
+# ---------------------------------------------------------------------------
+def verdict_for(**kwargs):
+    """Run wait_for_order_ack over a single stubbed order and return its row."""
+    from portutils.ingestion.ibkr_requests import wait_for_order_ack
+    app = StubApp(**kwargs)
+    ack = wait_for_order_ack(app, [5], timeout=0.5, settle=0.0, poll=0.02)
+    return ack.set_index("orderId").loc[5]
+
+
+def test_verdict_rejected_carries_the_reason_verbatim():
+    """The case that started this: a SPY order refused for want of an English KID.
+
+    It reached TWS, so acknowledged is True — reporting it as unacknowledged would
+    point at the opposite fix. What was missing was WHY, in the frame rather than in a
+    print that had nowhere to land.
+    """
+    row = verdict_for(req_errors={5: (201, KID_REJECTION)})
+    assert row["verdict"] == "REJECTED"
+    assert "KID in English" in row["reason"]
+    assert row["n_errors"] == 1 and bool(row["acknowledged"])
+
+
+def test_verdict_pending_open_is_not_a_failure():
+    """A 399 'will not be placed until 09:00' order is HEALTHY and queued.
+
+    Five of these once read as failures. The order is live at IB; only the venue is shut.
+    """
+    row = verdict_for(order_status={5: {"orderId": 5, "status": "PreSubmitted"}},
+                      req_notices={5: (399, QUEUED_FOR_OPEN)})
+    assert row["verdict"] == "PENDING_OPEN"
+    assert "09:00:00 MET" in row["reason"]
+
+
+def test_verdict_held_for_direct_routing():
+    row = verdict_for(order_status={5: {"orderId": 5, "status": "PreSubmitted"}},
+                      req_notices={5: (10311, "This order will be directly routed to LSE.")})
+    assert row["verdict"] == "HELD"
+
+
+def test_verdict_held_when_tws_says_why():
+    row = verdict_for(order_status={5: {"orderId": 5, "status": "Submitted",
+                                        "whyHeld": "locate"}})
+    assert row["verdict"] == "HELD" and row["reason"] == "locate"
+
+
+def test_verdict_working_and_filled():
+    assert verdict_for(order_status={5: {"orderId": 5, "status": "Submitted"}})["verdict"] \
+        == "WORKING"
+    assert verdict_for(order_status={5: {"orderId": 5, "status": "Filled", "filled": 10}})[
+        "verdict"] == "FILLED"
+
+
+def test_verdict_no_answer_is_its_own_category():
+    """Silence is the empty-TWS-panel failure this harness exists for."""
+    row = verdict_for()
+    assert row["verdict"] == "NO_ANSWER"
+    assert not row["acknowledged"] and row["n_errors"] == 0
+
+
+def test_verdict_rejected_before_any_status_ever_arrived():
+    """Refused so fast it never reached PreSubmitted — no status to fall back on."""
+    row = verdict_for(req_errors={5: (201, KID_REJECTION)},
+                      req_error_log={5: [(201, KID_REJECTION)]})
+    assert row["verdict"] == "REJECTED"
+    assert row["status"] is None
+    assert row["error_1"].startswith("201 ")
+
+
+def test_live_status_still_outranks_a_recorded_error():
+    """Belt and braces, unchanged: an order IB reports as live was not rejected."""
+    row = verdict_for(order_status={5: {"orderId": 5, "status": "PreSubmitted"}},
+                      req_errors={5: (12345, "some future warning nobody has listed")})
+    assert row["verdict"] == "WORKING"
+    assert row["error"] is None          # demoted, exactly as before
+
+
+# ---------------------------------------------------------------------------
+# THE POLL LOOP — it used to stop at the first mention, before the refusal landed
+# ---------------------------------------------------------------------------
+class GrowingMessages(dict):
+    """A message log that gains an entry every time it is read — TWS still talking."""
+
+    def get(self, key, default=None):
+        self.setdefault(key, []).append({"code": 399, "text": "chatter",
+                                         "kind": "notice", "ts": 0.0})
+        return dict.get(self, key, default)
+
+
+def test_poll_keeps_going_while_messages_are_still_arriving():
+    """Exit on a QUIET PERIOD, not on first mention.
+
+    A PreSubmitted lands at ~1s and a rejection can follow at 1.4s. Breaking as soon as
+    every id was mentioned returned a frame that omitted the refusal, while the 15s
+    timeout sat unused.
+    """
+    import time as _time
+    from portutils.ingestion.ibkr_requests import wait_for_order_ack
+
+    app = StubApp(order_status={5: {"orderId": 5, "status": "Submitted"}},
+                  req_messages=GrowingMessages())
+    started = _time.time()
+    ack = wait_for_order_ack(app, [5], timeout=0.4, settle=0.0, poll=0.05)
+    elapsed = _time.time() - started
+
+    # Never went quiet, so it ran to the timeout — and STOPPED there, no overrun.
+    assert 0.35 <= elapsed < 1.5
+    assert ack.loc[0, "verdict"] == "WORKING"
+
+
+def test_poll_returns_early_once_things_go_quiet():
+    import time as _time
+    from portutils.ingestion.ibkr_requests import wait_for_order_ack
+
+    app = StubApp(order_status={5: {"orderId": 5, "status": "Submitted"}})
+    started = _time.time()
+    wait_for_order_ack(app, [5], timeout=5.0, settle=0.0, poll=0.02)
+    assert _time.time() - started < 1.0, "a quiet app must not burn the whole timeout"
+
+
+# ---------------------------------------------------------------------------
+# check_orders — sequence, narration, merge. No logic of its own.
+# ---------------------------------------------------------------------------
+def test_check_orders_acknowledges_before_asking_the_broker(monkeypatch):
+    """ORDER IS MANDATORY. get_open_orders_data CLEARS app.open_orders, which
+    wait_for_order_ack reads for symbol/action/quantity. Reversed, those columns come
+    back empty with no error to explain it.
+    """
+    from portutils.ingestion import ibkr_requests as ib
+
+    calls = []
+    monkeypatch.setattr(ib, "wait_for_order_ack",
+                        lambda *a, **k: calls.append("ack") or pd.DataFrame(
+                            [{"orderId": 5, "verdict": "WORKING", "symbol": "SPY"}]))
+    monkeypatch.setattr(ib, "get_open_orders_data",
+                        lambda *a, **k: calls.append("open") or pd.DataFrame(
+                            [{"orderId": 5, "status": "Submitted"}]))
+
+    out = ib.check_orders(StubApp(), [5], show=False)
+    assert calls == ["ack", "open"]
+    # Left join on orderId: the ack row keeps its columns, the broker's are added.
+    assert out.loc[0, "symbol"] == "SPY" and out.loc[0, "status"] == "Submitted"
+
+
+def test_one_column_per_message_not_one_blob():
+    """error_1..error_N instead of every message newline-joined into one cell.
+
+    A blob had to be parsed back apart to answer "what was the SECOND error?" — a
+    question the logs can answer directly, since they already hold a list per order.
+    """
+    from portutils.ingestion.ibkr_requests import wait_for_order_ack
+
+    app = StubApp(
+        req_error_log={15: [(201, KID_REJECTION), (202, "margin"), (203, "size")],
+                       16: [(201, KID_REJECTION)]},
+        req_notice_log={15: [(399, QUEUED_FOR_OPEN)]},
+        req_errors={15: (203, "size"), 16: (201, KID_REJECTION)},
+        req_notices={15: (399, QUEUED_FOR_OPEN)},
+    )
+    ack = wait_for_order_ack(app, [15, 16, 17], timeout=0.4, settle=0.0,
+                             poll=0.02).set_index("orderId")
+
+    # Column count is set by the busiest order.
+    assert "KID in English" in ack.loc[15, "error_1"]
+    assert ack.loc[15, "error_2"].startswith("202 ")
+    assert ack.loc[15, "error_3"].startswith("203 ")
+    assert "09:00:00 MET" in ack.loc[15, "notice_1"]
+    # Fewer messages -> padded, not truncated or shifted.
+    assert ack.loc[16, "error_1"].startswith("201 ") and ack.loc[16, "error_2"] is None
+    # An id TWS never mentioned keeps its row, with nothing in any message column.
+    assert ack.loc[17, "error_1"] is None and ack.loc[17, "verdict"] == "NO_ANSWER"
+    # The counts still agree with the columns.
+    assert ack.loc[15, "n_errors"] == 3 and ack.loc[16, "n_errors"] == 1
+    # And the blobs are gone.
+    assert "errors" not in ack.columns and "notices" not in ack.columns
+
+
+def test_a_clean_run_gains_no_message_columns():
+    """No order drew a message -> no error_* or notice_* columns at all.
+
+    A column of None per order would make every healthy rebalance look like it had
+    something to say.
+    """
+    from portutils.ingestion.ibkr_requests import wait_for_order_ack
+
+    app = StubApp(order_status={i: {"orderId": i, "status": "Submitted"} for i in (1, 2)})
+    ack = wait_for_order_ack(app, [1, 2], timeout=0.4, settle=0.0, poll=0.02)
+    assert not [c for c in ack.columns if c.startswith(("error_", "notice_"))]
+    assert list(ack["verdict"]) == ["WORKING", "WORKING"]
+
+
+def test_check_orders_puts_each_column_next_to_the_brokers_copy(monkeypatch):
+    """A plain merge appends the broker's columns to the far right, which hides the
+    one thing the join exists to reveal: our record and the broker's disagreeing.
+    """
+    from portutils.ingestion import ibkr_requests as ib
+
+    monkeypatch.setattr(ib, "wait_for_order_ack", lambda *a, **k: pd.DataFrame(
+        [{"orderId": 5, "symbol": "SPY", "verdict": "WORKING", "status": "Submitted",
+          "n_errors": 0}]))
+    monkeypatch.setattr(ib, "get_open_orders_data", lambda *a, **k: pd.DataFrame(
+        [{"orderId": 5, "symbol": "SPY", "status": "PreSubmitted", "tif": "DAY"}]))
+
+    cols = list(ib.check_orders(StubApp(), [5], show=False).columns)
+    assert cols.index("symbol_broker") == cols.index("symbol") + 1
+    assert cols.index("status_broker") == cols.index("status") + 1
+    # Reading order kept (not alphabetical), broker-only columns last, nothing dropped.
+    assert cols[0] == "orderId" and cols[-1] == "tif"
+    assert "n_errors" in cols
+
+
+def test_sent_frame_is_the_spine_so_a_rejected_order_keeps_its_symbol(monkeypatch):
+    """THE regression this exists for. symbol/action/quantity are INPUTS to placeOrder;
+    TWS only echoes them back through openOrder — and it sends no openOrder for an order
+    it refuses. Order 18 came back REJECTED carrying the KID reason and no ticker, while
+    the frame that named it sat unused in the caller's namespace.
+    """
+    from portutils.ingestion import ibkr_requests as ib
+
+    # The broker snapshot lists only order 16: a refused order is not an OPEN order, which
+    # is the second reason 18 had no symbol.
+    monkeypatch.setattr(ib, "get_open_orders_data", lambda *a, **k: pd.DataFrame(
+        [{"orderId": 16, "symbol": "BARC", "status": "PreSubmitted"}]))
+    app = StubApp(order_status={16: {"orderId": 16, "status": "Submitted"}},
+                  open_orders={16: {"symbol": "BARC", "action": "SELL",
+                                    "totalQuantity": 137, "status": "Submitted"}},
+                  req_errors={18: (201, KID_REJECTION)})
+    sent = pd.DataFrame([{"orderId": 16, "symbol": "BARC", "action": "SELL",
+                          "quantity": 137, "currency": "GBP"},
+                         {"orderId": 18, "symbol": "SPY", "action": "BUY",
+                          "quantity": 1, "currency": "USD"}])
+    out = ib.check_orders(app, [16, 18], sent=sent, show=False,
+                          timeout=0.3, settle=0.0, poll=0.02).set_index("orderId")
+
+    assert out.loc[18, "verdict"] == "REJECTED"
+    assert out.loc[18, "symbol"] == "SPY"            # named despite no openOrder callback
+    assert out.loc[18, "action"] == "BUY" and out.loc[18, "quantity"] == 1
+    assert "KID in English" in out.loc[18, "reason"]
+    assert out.loc[16, "symbol"] == "BARC"
+
+
+def test_spine_keeps_two_identity_columns_not_three(monkeypatch):
+    """Ours bare, IB's suffixed. The ack's echoed copy is dropped — it holds the same
+    values except on precisely the rows where it is blank."""
+    from portutils.ingestion import ibkr_requests as ib
+
+    monkeypatch.setattr(ib, "get_open_orders_data", lambda *a, **k: pd.DataFrame(
+        [{"orderId": 16, "symbol": "BARC", "status": "PreSubmitted", "tif": "DAY"}]))
+    app = StubApp(order_status={16: {"orderId": 16, "status": "Submitted"}},
+                  open_orders={16: {"symbol": "BARC", "action": "SELL",
+                                    "totalQuantity": 137}})
+    sent = pd.DataFrame([{"orderId": 16, "symbol": "BARC", "action": "SELL", "quantity": 137}])
+    cols = list(ib.check_orders(app, [16], sent=sent, show=False,
+                                timeout=0.3, settle=0.0, poll=0.02).columns)
+
+    assert [c for c in cols if "symbol" in c] == ["symbol", "symbol_broker"]
+    assert cols.index("symbol_broker") == cols.index("symbol") + 1
+    assert cols[0] == "orderId", "the join key and the id you quote when cancelling"
+    assert "tif" in cols, "broker-only columns are still carried"
+
+
+def test_pipeline_reports_a_rejection_with_its_symbol_and_reason(capsys):
+    """The scheduled run must be no worse instrumented than the debug harness."""
+    from pipelines.rebalance_live import print_order_outcomes
+
+    print_order_outcomes(pd.DataFrame([
+        {"orderId": 18, "symbol": "SPY", "verdict": "REJECTED",
+         "reason": f"201 {KID_REJECTION}", "notice": None},
+    ]))
+    out = capsys.readouterr().out
+    assert "orderId 18 SPY REJECTED" in out
+    assert "KID in English" in out
+
+
+def test_pipeline_treats_queued_orders_as_healthy(capsys):
+    """PENDING_OPEN is an accepted order waiting for its venue. Five of these once read
+    as failures; reporting them as such sends the operator hunting a problem that is
+    only a closed exchange."""
+    from pipelines.rebalance_live import print_order_outcomes
+
+    print_order_outcomes(pd.DataFrame([
+        {"orderId": 10, "symbol": "5MVL", "verdict": "PENDING_OPEN",
+         "reason": f"399 {QUEUED_FOR_OPEN}", "notice": f"399 {QUEUED_FOR_OPEN}"},
+    ]))
+    out = capsys.readouterr().out
+    assert "ACCEPTED and QUEUED" in out
+    assert "NEVER ACKNOWLEDGED" not in out and "REJECTED" not in out
+
+
+def test_pipeline_flags_held_and_unacknowledged_orders(capsys):
+    from pipelines.rebalance_live import print_order_outcomes
+
+    print_order_outcomes(pd.DataFrame([
+        {"orderId": 11, "symbol": "BARC", "verdict": "HELD",
+         "reason": "10311 directly routed", "notice": "10311 directly routed"},
+        {"orderId": 12, "symbol": "HSBA", "verdict": "NO_ANSWER",
+         "reason": None, "notice": None},
+    ]))
+    out = capsys.readouterr().out
+    assert "HELD BY TWS pending manual Transmit" in out
+    assert "NEVER ACKNOWLEDGED BY TWS (orderIds [12])" in out
+
+
+def test_check_orders_without_sent_is_unchanged(monkeypatch):
+    """Existing callers must not shift under them."""
+    from portutils.ingestion import ibkr_requests as ib
+
+    monkeypatch.setattr(ib, "get_open_orders_data", lambda *a, **k: pd.DataFrame())
+    app = StubApp(order_status={16: {"orderId": 16, "status": "Submitted"}},
+                  open_orders={16: {"symbol": "BARC", "action": "SELL",
+                                    "totalQuantity": 137}})
+    out = ib.check_orders(app, [16], show=False, timeout=0.3, settle=0.0, poll=0.02)
+    assert list(out["orderId"]) == [16] and out.loc[0, "symbol"] == "BARC"
+
+
+def test_check_orders_keeps_unmentioned_orders_in_the_merge(monkeypatch):
+    """A NO_ANSWER id is the most important row on the frame — a left join keeps it."""
+    from portutils.ingestion import ibkr_requests as ib
+
+    monkeypatch.setattr(ib, "wait_for_order_ack", lambda *a, **k: pd.DataFrame(
+        [{"orderId": 5, "verdict": "NO_ANSWER"}, {"orderId": 6, "verdict": "WORKING"}]))
+    monkeypatch.setattr(ib, "get_open_orders_data", lambda *a, **k: pd.DataFrame(
+        [{"orderId": 6, "status": "Submitted"}]))
+
+    out = ib.check_orders(StubApp(), [5, 6], show=False)
+    assert list(out["orderId"]) == [5, 6]
+    assert pd.isna(out.set_index("orderId").loc[5, "status"])
 
 
 # ---------------------------------------------------------------------------
