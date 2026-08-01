@@ -19,6 +19,34 @@ A thematic-fundamental research engine that converts qualitative market narrativ
   - This might involve only editing a specific method within a given py file or class that I wish for you to edit. E.g., In <file> lines <start>-<end>, look at the <function>       │
 │ function.  
 
+## Plans
+- Plan files live in `.claude/plans/` **in this repo**, never in the home-directory `~/.claude/plans/`.
+  One file per piece of work, kebab-case (`pnl-accounting-extraction.md`, `rebalance-realisation.md`).
+- Each plan is a **living document**: a Progress Log table and a Decisions log at the bottom,
+  updated as steps land — not written once and abandoned.
+- **Markdown links must be relative to the plan file's own directory**, i.e. `../../src/portutils/...`
+  from `.claude/plans/`. Repo-root-relative links (`src/portutils/...`) silently break in every viewer.
+  Line anchors use the `#L281` / `#L2920-L2960` form.
+- Verify every link resolves before calling a plan done:
+  ```bash
+  cd .claude/plans && grep -o '](\([^)]*\))' *.md | sed 's/.*](//; s/)$//; s/#L.*//' \
+    | grep -E '^[A-Za-z0-9._/-]+$' | sort -u \
+    | while read p; do [ -e "$p" ] || echo "MISS $p"; done
+  ```
+  (The `grep -E` filter keeps the check from matching this command where a plan file
+  documents it, and skips `file:///` and `http` targets, which are not local paths.)
+- Claude Code's plan mode pins its approval banner to a file under `~/.claude/plans/`; that path
+  cannot be redirected — there is **no settings.json key** for it. Write the home copy with
+  **absolute `file:///C:/...` links** (uppercase drive; lowercase does not resolve) and a pointer to
+  the repo copy, and treat the repo copy as canonical.
+- **The mirror is automatic.** `.claude/hooks/scripts/mirror-plan.py` runs as a `PostToolUse` hook
+  on `Edit|Write` (wired in `.claude/settings.json`). Whenever a `.md` under `~/.claude/plans/` is
+  written it is copied into `.claude/plans/` with `file:///<repo>/` link targets rewritten to
+  `../../`. It ignores every other file and never fails a build.
+  Caveat: it mirrors under the **home file's basename**, which plan mode auto-generates and which
+  is usually not the kebab-case name this repo wants. Renaming the repo copy to a descriptive name
+  (and deleting the auto-named one) is still a manual step.
+
 ## Agent roles
 - **Research agent** — theme extraction from market commentary
 - **Modelling agent** — structural fundamental analysis

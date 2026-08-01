@@ -41,13 +41,14 @@ import math
 import pathlib
 import threading
 import time
-from datetime import datetime  # stamp each emitted tick so on_tick consumers can bar-aggregate
+from datetime import datetime, timedelta  # timedelta builds the executions lookback window
 from threading import Thread  # connect_ib spins app.run() on a daemon reader thread
 
 import pandas as pd
 from ibapi.client import EClient    # outgoing request side of the IB API
 from ibapi.wrapper import EWrapper  # incoming callback side of the IB API
 from ibapi.contract import Contract
+from ibapi.execution import ExecutionFilter  # narrows reqExecutions by time / symbol / side
 from ibapi.order import Order
 
 
@@ -127,6 +128,7 @@ def contract(
     currency='USD',
     primary_exchange=None,
     last_trade_date_or_contract_month=None,
+    con_id=None,
 ):
     """Build a Contract object for the requested instrument."""
     c = Contract()
@@ -135,12 +137,96 @@ def contract(
     c.exchange = exchange
     c.currency = currency
 
+    # conId is IBKR's own primary key for a specific listing — it pins the exact
+    # venue and currency line, which symbol+SMART+USD cannot.  A London-listed
+    # ETF and a US ETF can share a ticker; asking TWS to re-resolve the bare
+    # symbol gets "No security definition has been found" (error 200), whereas
+    # the conId the broker already handed us in the position/portfolio snapshot
+    # resolves first time.  Symbol is still set so logs stay readable.
+    if con_id:
+        c.conId = int(con_id)
     if primary_exchange:
         c.primaryExchange = primary_exchange
     if last_trade_date_or_contract_month:
         c.lastTradeDateOrContractMonth = last_trade_date_or_contract_month
 
     return c
+
+
+def contract_specs_from_portfolio(portfolio_df, symbol_col='symbol'):
+    """Build per-symbol contract kwargs from an account snapshot.
+
+    # ========================================================================
+    # WHY THIS EXISTS — the broker already knows the contract.
+    # get_account_updates() / get_positions_data() return conId, secType,
+    # exchange and currency for every holding, because updatePortfolio() and
+    # position() copy them off the Contract object IBKR sends.  Historical-data
+    # helpers then threw all of that away and rebuilt a bare STK/SMART/USD
+    # contract from the ticker alone, which fails for every non-US listing in
+    # the account.  This maps the snapshot back into kwargs for contract(), so
+    # a pull covers exactly the lines that are actually held.
+    #
+    # Pure: no connection, no I/O.  Feed it a DataFrame, get a dict.
+    # ========================================================================
+
+    Parameters
+    ----------
+    portfolio_df : pd.DataFrame
+        Output of get_account_updates() (or get_positions_data()) — needs a
+        symbol column plus any of conId / secType / exchange / currency.
+    symbol_col : str
+        Name of the ticker column.  Default 'symbol'.
+
+    Returns
+    -------
+    dict[str, dict]
+        Mapping symbol -> kwargs suitable for ``contract(sym, **kwargs)``.
+        Empty dict when the frame is empty or has no symbol column.
+    """
+    if portfolio_df is None or len(portfolio_df) == 0 or symbol_col not in portfolio_df.columns:
+        return {}
+
+    specs = {}
+    for _, row in portfolio_df.iterrows():
+        sym = row.get(symbol_col)
+        # Guard against blank/NaN tickers — a spec keyed on NaN can never match
+        # a requested symbol and would silently do nothing.
+        if not sym or (isinstance(sym, float) and pd.isna(sym)):
+            continue
+
+        spec = {}
+        con_id = row.get('conId')
+        if con_id and not pd.isna(con_id):
+            spec['con_id'] = int(con_id)
+        sec_type = row.get('secType')
+        if sec_type and not pd.isna(sec_type):
+            spec['sec_type'] = str(sec_type)
+        currency = row.get('currency')
+        if currency and not pd.isna(currency):
+            spec['currency'] = str(currency)
+        # ══════════════════════════════════════════════════════════════════════
+        # THE ROW'S `exchange` IS THE LISTING VENUE, NOT A ROUTING INSTRUCTION.
+        # Copying it into Contract.exchange (IBIS2 / LSEETF / LSE / NYSE) means
+        # DIRECT ROUTING, which trips IB's precautionary warning 10311 —
+        #   "This order will be directly routed to LSE. Direct routed orders may
+        #    result in higher trade fees."
+        # — and TWS then HOLDS the order for manual confirmation. Every foreign
+        # leg of a live rebalance arrived in the Pending panel with a Transmit
+        # button instead of working, which looks identical to a lost order.
+        #
+        # The listing venue belongs in primaryExchange, whose whole job is to
+        # disambiguate a ticker WITHOUT dictating a route. With conId +
+        # primaryExchange the contract is already unambiguous, so exchange is free
+        # to be SMART and let IB pick the venue — no warning, no hold.
+        # ══════════════════════════════════════════════════════════════════════
+        spec['exchange'] = 'SMART'
+        exchange = row.get('exchange')
+        if exchange and not pd.isna(exchange) and str(exchange).upper() != 'SMART':
+            spec['primary_exchange'] = str(exchange)
+
+        specs[str(sym)] = spec
+
+    return specs
 
 
 def market_order(action, quantity):
@@ -152,6 +238,15 @@ def market_order(action, quantity):
     order.action = action.upper()
     order.orderType = 'MKT'
     order.totalQuantity = quantity
+    # TIME IN FORCE IS NOT OPTIONAL. ibapi's Order() leaves `tif` as the empty string,
+    # and TWS refuses the order outright with "Invalid time in force:Empty" — every
+    # order in a batch, with no partial success and nothing appearing in the Orders
+    # panel. DAY is the right default for a rebalance: the decision was made from
+    # today's weights and today's marks, so an unfilled remainder should expire with
+    # them rather than sit on the book overnight and fill against tomorrow's prices.
+    # (crypto_marketable_limit_order sets "IOC" for its own reasons — that path always
+    # worked, which is exactly why this gap went unnoticed.)
+    order.tif = 'DAY'
     # eTradeOnly / firmQuoteOnly were REMOVED from the Order class in ibapi
     # >=10.19. On older builds they default to True and block routing for retail;
     # on newer builds setting them either raises AttributeError or makes TWS
@@ -331,6 +426,24 @@ _TERMINAL_ORDER_STATES = {
     'Inactive',
 }
 
+# Order states meaning "this order is alive at IB". An order in one of these was NOT
+# rejected, whatever advisory message arrived alongside it — see wait_for_order_ack,
+# where a live status demotes a recorded error to a notice.
+_LIVE_ORDER_STATES = {
+    'PendingSubmit',
+    'PreSubmitted',
+    'Submitted',
+    'ApiPending',
+    'PartiallyFilled',
+    'Filled',
+}
+
+# Sub-2100 codes that are WARNINGS about an accepted order rather than failures.
+# 399 is IB's "Order Message", e.g. "Warning: Your order will not be placed at the
+# exchange until 2026-07-27 09:00" for a market order sent while the venue is shut.
+# The 2100+ band is advisory by convention; these are the exceptions below it.
+_ADVISORY_ORDER_CODES = {399}
+
 
 # ═══════════════════════════════════════════════════════════════════════════
 # Shared IB app class
@@ -424,6 +537,58 @@ class IBApp(EWrapper, EClient):
         self._account_events = {}
         self._pnl_events = {}
 
+        # Terminal request errors, keyed by reqId -> (errorCode, errorString),
+        # written by error().  TWS answers a REJECTED request with an error and
+        # then nothing else — no historicalDataEnd, no accountSummaryEnd — so the
+        # error callback is the ONLY place a waiter can learn the request died.
+        # Callers read this after their event unblocks to distinguish "the data
+        # arrived" from "the request was refused" (see get_equity_data).
+        self.req_errors = {}
+
+        # NON-terminal messages, keyed the same way. TWS says plenty that does not
+        # end a request but does explain its behaviour — warning 10311 ("directly
+        # routed", which makes TWS hold the order for manual confirmation) being the
+        # case that matters most here. Recording it separately keeps the terminal
+        # test honest while preserving the only evidence that an order was seen at
+        # all: without this, five orders sitting visibly in the TWS Pending panel
+        # were reported as "never received".
+        self.req_notices = {}
+
+        # ══════════════════════════════════════════════════════════════════════
+        # APPEND-ONLY MESSAGE LOGS — the two dicts above are only a SUMMARY.
+        # req_errors / req_notices hold ONE tuple per reqId, so a second message
+        # about the same order OVERWRITES the first. That is fine for a waiter
+        # asking "did this request die?", and useless for a trader asking "what
+        # did TWS say about order 15?" — an order can draw several messages (a
+        # 399 warning about the open, then a 201 refusal), and only the last of
+        # each kind survived.
+        #
+        # These three keep everything. Errors and notices are kept SEPARATELY
+        # because the question is usually asked one kind at a time ("was it
+        # refused?" vs "why is it held?"), and req_messages keeps both in
+        # ARRIVAL ORDER for the times when the sequence is the point.
+        #
+        # LIFETIME: they grow for the life of this IBApp instance. Nothing is
+        # pruned and there is no time window — which is exactly why a rejection
+        # is still readable long after the cell that submitted the order has
+        # finished (its print, made on the reader thread, is not). Tens of
+        # orders per session makes the unbounded growth academic.
+        # ══════════════════════════════════════════════════════════════════════
+        # reqId -> [(errorCode, errorString), ...], terminal messages only.
+        self.req_error_log = {}
+        # reqId -> [(errorCode, errorString), ...], advisory messages only.
+        self.req_notice_log = {}
+        # reqId -> [{'code', 'text', 'kind', 'ts'}, ...], both kinds interleaved.
+        #
+        # DELIBERATELY WITHOUT A CONSUMER, and kept anyway. Nothing reads 'code',
+        # 'text', 'kind' or 'ts'; the only production reader counts len() of it for
+        # the quiet-period exit in wait_for_order_ack, and could just as well add the
+        # two logs above. It exists as a RAW AUDIT TRAIL: the arrival order across
+        # both kinds, which the split logs flatten away, for the debugging session
+        # where the sequence of a warning and a refusal is the thing in question.
+        # Do not go looking for the reader — there isn't one, and that is the design.
+        self.req_messages = {}
+
         # Market-data style state.
         self.managed_accounts = []
         # Latest trade price, written by tickPrice() when tickType is LAST (4/68).
@@ -465,6 +630,11 @@ class IBApp(EWrapper, EClient):
         self.open_orders = {}
         self.order_status = {}
         self.executions = []
+        # Commissions arrive on their OWN callback (commissionReport), separately from the
+        # fill itself and possibly after it, keyed by execId. Kept in a dict so
+        # get_executions_data can join them back onto the executions once both have landed —
+        # without this every fill looks free and any cost analysis is silently wrong.
+        self.commissions = {}
         self.account_pnl = {}
         self.contract_pnl = {}
 
@@ -473,6 +643,7 @@ class IBApp(EWrapper, EClient):
         self.positions_event = threading.Event()
         self.open_orders_event = threading.Event()
         self.account_updates_event = threading.Event()
+        self.executions_event = threading.Event()
 
     # --- Connection lifecycle ---------------------------------------------
 
@@ -612,11 +783,34 @@ class IBApp(EWrapper, EClient):
         # newer builds (10.47+) pass an additional `errorTime` (epoch ms) and may
         # reorder/extend further. Accept *args and locate fields by type to stay
         # forward-compatible.
+        # note that this fires separately for each reqId, and for each error message
+        # corresponding to that reqId
+        #
+        # ══════════════════════════════════════════════════════════════════════
+        # THE errorTime TRAP. On ibapi 10.47 the real signature is
+        #     error(reqId, errorTime, errorCode, errorString, advancedOrderRejectJson)
+        # so errorTime comes FIRST and is also an int. Taking "the first int" as the
+        # error code therefore reads an epoch-millisecond timestamp as the code, and
+        # everything downstream that switches on the code silently stops working:
+        # the routine 2104/2106/2158/2176 farm-status pings were printed as errors
+        # (`IB Error -1: 1785082784783 - Market data farm connection is OK`), and the
+        # terminal-error handling below never fired because an epoch value is always
+        # >= 2100 — so a rejected order was recorded as "no answer from TWS" when TWS
+        # had in fact answered plainly.
+        #
+        # An epoch-ms timestamp is ~1.7e12; no IB error code is above five digits, so
+        # magnitude separates them unambiguously and keeps working if the argument
+        # order changes again.
+        # ══════════════════════════════════════════════════════════════════════
+        errorTime = None
         errorCode = None
         errorString = ""
         for a in args:
-            if isinstance(a, int) and errorCode is None:
-                errorCode = a
+            if isinstance(a, int) and not isinstance(a, bool):
+                if a > 10 ** 11:          # epoch milliseconds, not an error code
+                    errorTime = a
+                elif errorCode is None:
+                    errorCode = a
             elif isinstance(a, str) and not errorString:
                 errorString = a
         # Codes 2104 ("Market data farm connection is OK"), 2106 ("HMDS data farm
@@ -626,6 +820,76 @@ class IBApp(EWrapper, EClient):
         if errorCode in (2104, 2106, 2158, 2176):
             return
         print(f"IB Error {reqId}: {errorCode} - {errorString}")
+
+        # --- Unblock whoever is waiting on this request ----------------------
+        # TWS sends NO terminating callback for a request it refused: a rejected
+        # reqHistoricalData never produces historicalDataEnd, so the Event that
+        # _wait_for() is blocked on would stay unset until the timeout expires
+        # and then raise.  That turns a 1-second "no such contract" into a 30s
+        # stall that aborts an entire multi-symbol pull.  Record the failure and
+        # set the event here so the waiter returns immediately and can report
+        # WHY rather than guessing "timed out".
+        #
+        # Which codes are terminal: reqId < 0 means the message is connection-level
+        # (data-farm status, TWS notices) and belongs to no request at all.  Codes
+        # >= 2100 are the advisory band — delayed-data substitutions, farm
+        # connect/disconnect churn — which arrive alongside a request that is still
+        # very much alive.  Everything below 2100 with a real reqId (200 "no
+        # security definition", 162 "historical data request failed", 321 "error
+        # validating request", ...) genuinely ends that request.
+        #
+        # Note the 10000+ band (10311 "directly routed", and its neighbours) is also
+        # advisory: the order lives on, though TWS may hold it for confirmation. So it
+        # is recorded as a NOTICE rather than dropped — "not terminal" and "not worth
+        # keeping" are different claims, and treating them as one made held orders
+        # indistinguishable from lost ones.
+        if reqId is None or reqId < 0 or errorCode is None:
+            return
+        # Not every sub-2100 code is a failure. 399 is IB's "Order Message" — a warning
+        # attached to an order that was ACCEPTED, e.g.
+        #   "Warning: Your order will not be placed at the exchange until 2026-07-27 09:00"
+        # for a market order submitted while the venue is shut. Classifying that as
+        # terminal made five PreSubmitted orders print as "REJECTED" while they sat
+        # perfectly healthy in the book, queued for the open.
+        #
+        # ONE classification, computed once and reused by both the append-only logs
+        # and the summary dicts below. Writing the same condition out twice is how
+        # the log and the summary drift apart, and a message filed as an error in
+        # one and a notice in the other is worse than either alone.
+        is_advisory = errorCode >= 2100 or errorCode in _ADVISORY_ORDER_CODES
+
+        # Append to the append-only logs FIRST, so nothing is lost even for the
+        # kinds the summary dicts are about to overwrite. See the block comment in
+        # __init__ for why a single-slot dict was not enough.
+        with self.lock:
+            self.req_messages.setdefault(reqId, []).append({
+                'code': errorCode,
+                'text': errorString,
+                'kind': 'notice' if is_advisory else 'error',
+                # Wall-clock arrival, so a frame can order messages that share a
+                # reqId and show how far after the submit a refusal came back.
+                'ts': time.time(),
+            })
+            log = self.req_notice_log if is_advisory else self.req_error_log
+            log.setdefault(reqId, []).append((errorCode, errorString))
+        # after we have covered the append-only logs, we can then move onto the
+        # summary dicts, which only hold the last message of each kind per reqId.
+        # these summary dicts are the built-in objects populated by IBKRs error() callback
+        # note that these only store one tuple per reqId, so a second message about the
+        #  same order OVERWRITES the first.
+        if is_advisory:
+            with self.lock:
+                self.req_notices[reqId] = (errorCode, errorString)
+            return
+        with self.lock:
+            self.req_errors[reqId] = (errorCode, errorString)
+        # The reqId space is shared across request types, so at most one of these
+        # dicts holds the id; setting all three that match is safe and saves the
+        # caller from having to tell error() which kind of request it issued.
+        for pending in (self._hist_events, self._account_events, self._pnl_events):
+            event = pending.get(reqId)
+            if event:
+                event.set()
 
     def managedAccounts(self, accountsList):
         self.managed_accounts = [acct for acct in accountsList.split(',') if acct]
@@ -894,15 +1158,54 @@ class IBApp(EWrapper, EClient):
         with self.lock:
             self.executions.append({
                 'reqId': reqId,
+                # execId is the join key for commissionReport, which arrives separately.
+                # Without it a fill can never be matched to what it cost.
+                'execId': execution.execId,
                 'symbol': contract_obj.symbol,
                 'conId': contract_obj.conId,
+                # secType/currency are needed to rebuild the Contract for any follow-up
+                # request, and to know whether a multiplier applies to the price.
+                'secType': contract_obj.secType,
+                'currency': contract_obj.currency,
                 'side': execution.side,
                 'shares': execution.shares,
                 'price': execution.price,
+                # cumQty/avgPrice describe the PARENT order's progress at this fill, which
+                # is how a partially-filled order is distinguished from a complete one.
+                'cumQty': execution.cumQty,
+                'avgPrice': execution.avgPrice,
                 'time': execution.time,
                 'orderId': execution.orderId,
                 'permId': execution.permId,
             })
+
+    def execDetailsEnd(self, reqId):
+        """Signal that reqExecutions() has delivered every matching fill.
+
+        Without this the caller has no completion signal and would have to guess at a
+        sleep duration — the same pattern positionEnd / accountDownloadEnd already use.
+        """
+        self.executions_event.set()
+
+    def commissionReport(self, commissionReport):
+        """Collect per-execution commission/realised figures.
+
+        IB sends this on a SEPARATE callback from execDetails and does not guarantee
+        ordering between the two, so it is stored by execId and joined later rather than
+        being attached to a fill in flight.
+
+        Note `realizedPNL` here is IB's OWN average-cost calculation for the closing
+        portion of the fill. We keep it for comparison but never treat it as authoritative:
+        our realised P&L comes from Position.apply_fill, so the two can be reconciled
+        against each other instead of one silently overwriting the other.
+        """
+        with self.lock:
+            self.commissions[commissionReport.execId] = {
+                'execId': commissionReport.execId,
+                'commission': commissionReport.commission,
+                'currency': commissionReport.currency,
+                'realizedPNL': commissionReport.realizedPNL,
+            }
 
     # --- EWrapper callbacks: PnL ------------------------------------------
 
@@ -954,6 +1257,8 @@ def get_equity_data(
     app=None,
     output_format='dict',
     merged_filename='portfolio_prices.csv',
+    contract_specs=None,
+    what_to_show='TRADES',
 ):
     """Fetch historical OHLCV data for one or more symbols.
 
@@ -988,6 +1293,17 @@ def get_equity_data(
     merged_filename : str
         Filename for the combined CSV when output_format='combined'.
         Ignored for output_format='dict'.  Default: 'portfolio_prices.csv'.
+    contract_specs : dict[str, dict], optional
+        Per-symbol keyword overrides passed to contract() — e.g.
+        {'5MVL': {'con_id': 123456, 'exchange': 'LSE', 'currency': 'GBP'}}.
+        Symbols absent from the mapping keep contract()'s STK/SMART/USD
+        defaults, so existing US-only callers are unaffected.  Build one
+        straight from an account snapshot with contract_specs_from_portfolio().
+    what_to_show : str
+        Price basis for reqHistoricalData ('TRADES', 'MIDPOINT', 'BID', ...).
+        Some non-US listings carry no trade-data entitlement and return nothing
+        for 'TRADES' while 'MIDPOINT' works.  Deliberately NOT auto-retried:
+        a silent basis switch would change what the numbers mean.
 
     Returns
     -------
@@ -1048,6 +1364,10 @@ def get_equity_data(
         id_to_symbol = {}
         events = {}
 
+        # Normalise the per-symbol contract overrides once so the request loop
+        # can do a plain .get() without a None check on every iteration.
+        contract_specs = contract_specs or {}
+
         # --- Fire one request per symbol ----------------------------------
         # Each symbol gets its own reqId and completion Event.  IBKR will
         # respond asynchronously via historicalData() / historicalDataEnd().
@@ -1059,9 +1379,15 @@ def get_equity_data(
             with app.lock:
                 app.historical_data[req_id] = []
                 app._hist_events[req_id] = events[req_id]
+                # Drop any stale failure recorded against a recycled reqId, so a
+                # previous run's rejection cannot be misread as this one's.
+                app.req_errors.pop(req_id, None)
 
             # Build a Contract object — IBKR's way of specifying an instrument.
-            req_contract = contract(sym)
+            # contract_specs lets the caller pin the exact listing (conId /
+            # exchange / currency) for symbols that are not US-SMART lines;
+            # anything not listed keeps the STK/SMART/USD defaults.
+            req_contract = contract(sym, **contract_specs.get(sym, {}))
 
             # Send the request.  The app's callback methods do the collection;
             # this outer function just coordinates the workflow and assembles
@@ -1072,7 +1398,7 @@ def get_equity_data(
                 endDateTime=end_time,      # end of the window
                 durationStr=duration,      # how far back from endDateTime
                 barSizeSetting=bar_size,   # bar granularity
-                whatToShow='TRADES',       # price basis
+                whatToShow=what_to_show,   # price basis (see the kwarg's docstring)
                 useRTH=1,                  # 1 = regular trading hours only
                 formatDate=1,              # 1 = human-readable dates
                 keepUpToDate=0,            # 0 = one-shot, no streaming
@@ -1086,9 +1412,34 @@ def get_equity_data(
         # --- Wait for all symbols to finish -------------------------------
         # We wait per request rather than using one global flag, which makes
         # the logic cleaner when several symbols are in flight at once.
+        #
+        # A failed symbol is a WARNING, not an abort.  One unresolvable ticker
+        # used to raise TimeoutError out of this loop and throw away the bars of
+        # every other symbol that had already arrived; that is the opposite of
+        # useful when the pull covers a whole account.  Collect the failures, name
+        # them at the end, and let the caller decide.
         timeout_per_symbol = 30
+        failed = {}
         for req_id, event in events.items():
-            _wait_for(event, timeout_per_symbol, f'historical data for {id_to_symbol[req_id]}')
+            sym = id_to_symbol[req_id]
+            try:
+                _wait_for(event, timeout_per_symbol, f'historical data for {sym}')
+            except TimeoutError:
+                # Nothing at all came back within the window — TWS is unhealthy,
+                # throttling us, or the request silently vanished.
+                failed[sym] = 'timed out'
+                print(f"Skipped {sym}: timed out after {timeout_per_symbol}s.")
+                continue
+
+            # The event can be set by EITHER historicalDataEnd (success) or by
+            # error() recording a terminal rejection.  req_errors is what tells
+            # the two apart — without this check a refused symbol looks like a
+            # symbol that legitimately has no bars.
+            with app.lock:
+                err = app.req_errors.get(req_id)
+            if err:
+                failed[sym] = f'{err[0]} {err[1]}'
+                print(f"Skipped {sym}: IB error {err[0]} - {err[1]}")
 
         # --- Build one DataFrame per symbol -------------------------------
         results = {}
@@ -1103,8 +1454,18 @@ def get_equity_data(
                 bars = list(app.historical_data.get(req_id, []))
 
             if not bars:
-                print(f"Warning: no data returned for {sym}")
+                # Already-reported failures don't need a second, vaguer line —
+                # "Skipped X: IB error 200" above says strictly more than this.
+                if sym not in failed:
+                    print(f"Warning: no data returned for {sym}")
+                    failed[sym] = 'no bars returned'
                 results[sym] = pd.DataFrame()
+                # Still drop the pending event: the request is over either way,
+                # and a leftover entry would let a recycled reqId be set by a
+                # stale callback.  No cancelHistoricalData — TWS already ended
+                # (or refused) this request, so cancelling it invents an error.
+                with app.lock:
+                    app._hist_events.pop(req_id, None)
                 continue
 
             df = pd.DataFrame(bars)
@@ -1129,9 +1490,26 @@ def get_equity_data(
             results[sym] = df
 
             # Clean up this request's temporary state now that we are done.
-            app.cancelHistoricalData(req_id)
+            #
+            # NO cancelHistoricalData HERE. We only reach this line because
+            # historicalDataEnd already fired, i.e. the request is FINISHED —
+            # and cancelling a finished request makes TWS answer
+            # "No historical data query found for ticker id:N" through the error
+            # callback. Harmless, but it prints an alarming-looking IB Error in the
+            # middle of an order printout, which is the last place to be crying wolf.
+            # (Cancel is only correct for a request still streaming, e.g. one opened
+            # with keepUpToDate=1.)
             with app.lock:
                 app._hist_events.pop(req_id, None)
+
+        # --- Say plainly what we got ---------------------------------------
+        # Partial data that looks complete is the dangerous outcome: a backcast
+        # or a weight calc silently drops the missing names and still prints a
+        # confident number.  One summary line makes the gap impossible to miss.
+        fetched = len(symbols) - len(failed)
+        print(f"Fetched {fetched}/{len(symbols)} symbols.")
+        if failed:
+            print("Missing: " + ", ".join(f"{s} ({why})" for s, why in failed.items()))
 
         # ── Combined output path ───────────────────────────────────────────
         # When output_format='combined' we merge all per-symbol close series
@@ -1347,6 +1725,55 @@ def get_account_data(
             app.close()
 
 
+def get_exchange_rates(app, group='All'):
+    """FX rates from every currency the account holds into its BASE currency.
+
+    ═══════════════════════════════════════════════════════════════════════════
+    WHY THIS IS NEEDED — updatePortfolio DOES NOT CONVERT.
+    `marketPrice`, `marketValue`, `averageCost` and `unrealizedPnL` on a portfolio
+    row are all in the POSITION'S OWN currency. Only NetLiquidation from the
+    account summary is in the base currency. So a book holding EUR, GBP and USD
+    lines cannot have its weights computed by dividing position values by NetLiq
+    — that silently adds euros to pounds. Every non-base position must be
+    converted first, and this is where the rate comes from.
+
+    The rate is IBKR'S OWN, taken from the account ledger, so the converted
+    values agree with the NetLiquidation they will be divided by. An FX rate
+    pulled from a market-data request would be a second opinion on a number the
+    broker has already decided.
+    ═══════════════════════════════════════════════════════════════════════════
+
+    Implementation note: `$LEDGER:ALL` is a special account-summary "tag" that
+    makes TWS return one block per currency instead of one row per tag, including
+    an `ExchangeRate` row per currency. The base currency itself appears under
+    the pseudo-currency `BASE` with a rate of 1.
+
+    Returns
+    -------
+    dict[str, float] — currency code -> multiplier into the base currency, so
+    ``value_in_base = value_in_ccy * rates[ccy]``. Empty if TWS returned no
+    ledger (callers must treat that as "cannot convert", never as "rate 1").
+    """
+    # Reuses the ordinary account-summary path — same reqId handshake, same
+    # accountSummary callbacks — with the ledger pseudo-tag instead of a tag list.
+    ledger = get_account_data(app=app, tags='$LEDGER:ALL', group=group)
+    if ledger is None or len(ledger) == 0 or 'tag' not in ledger.columns:
+        return {}
+
+    rates = {}
+    for _, row in ledger.iterrows():
+        if str(row.get('tag')) != 'ExchangeRate':
+            continue
+        ccy = str(row.get('currency') or '').upper()
+        try:
+            rate = float(row.get('value'))
+        except (TypeError, ValueError):
+            continue
+        if ccy and math.isfinite(rate) and rate > 0:
+            rates[ccy] = rate
+    return rates
+
+
 def get_positions_data(app, timeout=15):
     """Fetch current positions using an existing connected IBApp."""
     # --- Reset the destination store --------------------------------------
@@ -1394,16 +1821,635 @@ def get_account_updates(app, account = "DUP102412", timeout=15):
         return pd.DataFrame(list(app.portfolio.values()))
 
 
+def submit_rebalance_orders(
+    order_app,
+    target_positions_df,
+    *,
+    symbol_col='symbol',
+    currency_col='currency',
+    units_col='units_diff',
+    dry_run=True,
+    contract_specs=None,
+):
+    """Submit a batch of market orders implied by a rebalance table.
+
+    Lives here, in the library, rather than in a runnable script. It was originally defined
+    in ``orders/rebalance_port.py`` (now ``rebalance_port_basic.py``) — but that file is a
+    CELL SCRIPT with module-level side effects: importing it opens an IBKR connection and
+    executes its bottom cells, which include a live ``dry_run=False`` rebalance and a stray
+    market order. Any pipeline that imported the function from there would have transmitted
+    those orders as an import side effect, before a single one of its own safety checks ran.
+    That is precisely the failure the repo rule about import-clean library code exists to
+    prevent, and it is why this function now has a home that can be imported safely.
+
+    How order IDs are handled
+    -------------------------
+    You do NOT need to manually increment order IDs.
+
+    Each call to `order_app.submit_market_order(...)` funnels into
+    `OrderApp.place_order(...)`, which calls `ib_app.reserve_order_id()`.
+    That method returns the next available orderId (from the last `nextValidId`
+    callback) and increments it under a lock.
+
+    Parameters
+    ----------
+    order_app : OrderApp
+        An instance of `portutils.ingestion.ibkr_requests.OrderApp` that wraps
+        a connected `IBApp`. This is the object that actually sends orders via
+        `order_app.submit_market_order(...)`.
+    target_positions_df : pd.DataFrame
+        The rebalance table (typically the output of `calculate_target_positions`).
+        Must contain at least:
+        - a symbol column (default `symbol`)
+        - a currency column (default `currency`, optional)
+        - a units delta column (default `units_diff`), where:
+            * positive = BUY that many units
+            * negative = SELL that many units
+            * zero     = no trade
+    symbol_col : str
+        Column name in `target_positions_df` containing the ticker/symbol.
+    currency_col : str
+        Column name in `target_positions_df` containing the currency. If
+        missing/NaN for a row, we default to 'USD'.
+    units_col : str
+        Column name in `target_positions_df` containing the unit difference
+        (signed). This is typically computed as value_diff / marketPrice.
+    dry_run : bool
+        When True, prints the intended orders but does not send them.
+        This is a safety switch while iterating on the rebalance logic.
+    contract_specs : dict[str, dict] | None
+        Per-symbol contract overrides, same shape as ``get_equity_data`` takes:
+        ``{'BARC': {'con_id': 123456, 'exchange': 'LSE', 'currency': 'GBP'}}``.
+        Build one from an account snapshot with ``contract_specs_from_portfolio``.
+
+        WHY THIS EXISTS. Without it every order is a bare symbol on STK/SMART/USD,
+        because that is what ``submit_market_order`` defaults to. For a US ETF that
+        is correct; for a London line it is a different instrument in a different
+        currency, or an outright rejection. A symbol absent from the mapping keeps
+        the old behaviour (defaults, with ``currency_col`` applied), so existing
+        callers are unaffected.
+    """
+    # Initialize a list to keep track of submitted orders for logging
+    submitted = []
+    # Normalise once so the row loop can .get() without a None check each time.
+    contract_specs = contract_specs or {}
+
+    # Iterate row-by-row so the action and quantity can be derived from the
+    # signed `units_diff`. This keeps the logic explicit and debuggable.
+    # an itterows object is two values, the index and the row, we can ignore
+    # the index with _ and just use the row
+    for _, row in target_positions_df.iterrows():
+        symbol = row.get(symbol_col)
+        currency = row.get(currency_col, 'USD')
+        units = row.get(units_col)
+
+        # Guard against missing/NaN rows.
+        # - If the rebalance logic produced NaNs (e.g., missing marketPrice)
+        #   then we simply skip those lines here rather than submitting
+        #   incorrect orders.
+        if pd.isna(symbol) or pd.isna(units):
+            continue
+
+        # `units_diff` often comes out as numpy scalars (e.g., np.float64) or
+        # as a float because of division/rounding earlier. We normalize to an
+        # int so order quantities are valid.
+        units_int = int(units)
+        if units_int == 0:
+            # Nothing to do for this symbol.
+            continue
+
+        # Convert the signed delta into (action, quantity).
+        # - Positive means we need to increase the position => BUY
+        # - Negative means we need to reduce the position   => SELL
+        action = 'BUY' if units_int > 0 else 'SELL'
+        quantity = abs(units_int)
+
+        # Resolve the contract for this leg. The spec wins over currency_col where both
+        # speak about currency: the spec came from the broker's own record of the position,
+        # the column is whatever the caller's table happened to carry.
+        spec = dict(contract_specs.get(symbol, {}))
+        spec.setdefault('currency', currency if not pd.isna(currency) else 'USD')
+        # A one-line human description of what is actually being sent. This string is the
+        # whole point of the dry run: the old version printed only symbol + currency, which
+        # is exactly the pair that looked right while the contract underneath was wrong.
+        detail = (f"{spec.get('sec_type', 'STK')} {spec.get('exchange', 'SMART')} "
+                  f"{spec['currency']}"
+                  + (f" conId={spec['con_id']}" if spec.get('con_id') else " conId=- (by symbol)"))
+
+        if dry_run:
+            # Print exactly what would be sent. Keeping this as a single line
+            # makes it easy to scan the proposed rebalance in the console.
+            print(f"DRY RUN: {action} {quantity} {symbol} [{detail}]")
+            submitted.append({'symbol': symbol, 'currency': spec['currency'],
+                              'exchange': spec.get('exchange', 'SMART'),
+                              'con_id': spec.get('con_id'), 'action': action,
+                              'quantity': quantity, 'orderId': None})
+            continue
+
+        # This call reserves and increments `orderId` internally.
+        # Internally:
+        # - submit_market_order() creates a contract object with the specifications of the asset we are buying/selling
+        # e.g. symbol, currency, exchange, etc., and then calls place_order() with that contract object
+        # - in turn, it calls market_order to OrderApp.place_order() which creates the specifications of that order,
+        # under ibkr's 'order' object class, importantly specifying buy, market and of what quantity,
+        # - in tuurn, it calls ou own OrderApp's place_order() method with the contract object and order object
+        # - in turn, the place_order() method calls calls ib_app.reserve_order_id()ci
+        # - in turn, reserve_order_id() returns the next valid orderId and increments it so that
+        # - the next time we send an order and do the same thing, we have a valid id to use
+        # - in turn, once it has the valid id, it calls the IBAPi's built-in app.placeOrder() method,
+        # (or rather, Eclient.placeOrder(), since our app object will be an instance of ECLient)
+        # which sends the order to IBKR with the contract, order specifications and orderId.
+        # through the TWS gateway
+        # this naturally returns an order_id that ibkr assigns to the order,
+        # This means you can submit multiple orders in a loop without manually
+        # managing order IDs.
+        # **spec carries currency and, where known, con_id / exchange / sec_type — so the
+        # order names the same contract the dry run printed, not a re-resolution of the bare
+        # ticker. The keys match submit_market_order's parameter names exactly.
+        order_id = order_app.submit_market_order(symbol, action, quantity, **spec)
+
+        # confirms that the order was submitted with the given specifications and the order ID that
+        #  IBKR assigned to it. This is useful for tracking and debugging.
+        print(f"Submitted: orderId={order_id} {action} {quantity} {symbol} [{detail}]")
+
+        # we append this to a self-created list of submitted orders, which we can then convert to a
+        # dataframe at the end. This is useful for tracking what we intended to submit, especially
+        #  in dry run mode where we don't have actual order IDs from IBKR.
+        submitted.append({'symbol': symbol, 'currency': spec['currency'],
+                          'exchange': spec.get('exchange', 'SMART'),
+                          'con_id': spec.get('con_id'), 'action': action,
+                          'quantity': quantity, 'orderId': order_id})
+
+    return pd.DataFrame(submitted)
+
+
+def wait_for_order_ack(app, order_ids, timeout=15, settle=1.0, poll=0.25):
+    """Block until TWS has acknowledged each submitted order — or report that it did not.
+
+    ═══════════════════════════════════════════════════════════════════════════
+    WHY THIS EXISTS — "Submitted" WAS NEVER EVIDENCE OF ANYTHING.
+    ``EClient.placeOrder`` writes a message to the socket and returns. It does not
+    wait, it does not confirm, and it does not raise when TWS ignores the order.
+    Acceptance arrives LATER, asynchronously, through the ``openOrder`` and
+    ``orderStatus`` callbacks on the reader thread.
+
+    A caller that submits and then disconnects therefore destroys its own evidence:
+    ``EClient.disconnect()`` closes the socket and stops the reader, so anything
+    still buffered is discarded and any callback in flight is never read. That is
+    exactly how seven orders were "Submitted" to an empty TWS Orders panel — the
+    print statements only proved the calls had not raised.
+
+    This function closes that gap. It reads the state the callbacks were already
+    filling in (``app.order_status``, ``app.open_orders``) and, critically, marks
+    every id TWS never mentioned as ``acknowledged=False`` so an unreceived order
+    is REPORTED rather than assumed successful.
+    ═══════════════════════════════════════════════════════════════════════════
+
+    Parameters
+    ----------
+    app : IBApp
+        The connected app the orders were placed through.
+    order_ids : iterable[int]
+        Order ids returned by ``place_order`` / ``submit_rebalance_orders``.
+    timeout : float
+        Seconds to wait for the last outstanding acknowledgement.
+    settle : float
+        Initial pause before the first check. The reader thread needs a scheduling
+        slot to process what was just written; polling instantly would report a
+        false negative on a perfectly healthy submission.
+    poll : float
+        Interval between checks.
+
+    Returns
+    -------
+    pd.DataFrame
+        One row per order id: orderId, status, filled, remaining, avgFillPrice,
+        whyHeld, error, acknowledged. Never raises on a missing acknowledgement —
+        the caller is expected to report it, which is the entire point.
+
+        Plus the VERDICT columns, which answer the question a trader actually has
+        ("did it work, and if not why?") rather than the weaker one this function
+        started out answering ("did TWS mention it?"):
+          verdict    FILLED / WORKING / PENDING_OPEN / HELD / REJECTED / NO_ANSWER
+          reason     the message that drove the verdict, in full
+          n_errors   how many terminal messages this order drew
+          n_notices  how many advisory messages this order drew
+
+        And one column PER MESSAGE — error_1 … error_N, notice_1 … notice_N —
+        widened from the append-only logs. The column count is set by the busiest
+        order; a run in which nothing drew a message of a kind gains no columns of
+        that kind at all. See _message_columns.
+    """
+    ids = [int(i) for i in order_ids if i is not None and not pd.isna(i)]
+    if not ids:
+        return pd.DataFrame()
+
+    # Give the reader thread a moment before the first look.
+    time.sleep(settle)
+
+    deadline = time.time() + timeout
+    # ════════════════════════════════════════════════════════════════════════
+    # WHY THE LOOP DOES NOT STOP AT "EVERY ID SEEN".
+    # It used to. An order is normally mentioned within a second (PreSubmitted
+    # from orderStatus), so the loop exited at ~1s — and a rejection arriving at
+    # 1.4s was absent from the returned frame even though it had landed in the
+    # logs a moment later. The 15s timeout was a ceiling that was never reached.
+    #
+    # The exit condition is now "every id seen AND nothing new has arrived for
+    # two consecutive polls". TWS sends an order's messages in a burst, so a
+    # short quiet period is good evidence the burst is over. Typical return is
+    # ~1.5-2s; the timeout still caps the worst case.
+    #
+    # Note this is EVIDENCE, not a guarantee: IB never signals "that is all the
+    # messages for order 15", and reqOpenOrders does not replay error() messages.
+    # Anything arriving later is still recorded, and re-running this function
+    # picks it up — which is why the logs are append-only.
+    # ════════════════════════════════════════════════════════════════════════
+    quiet_polls = 0          # consecutive polls in which no new message arrived
+    last_total = -1          # message count at the previous poll; -1 forces a first compare
+    while True:
+        with app.lock:
+            # for each of the order ids we submitted, check if it has been seen in any of the relevant
+            #  dictionaries that track the state of orders in the IBApp instance.
+            # order_status: tracks the status of orders (e.g., filled, cancelled, etc.)
+            # open_orders: tracks orders that are currently open and not yet filled or cancelled
+            # req_errors: tracks any errors that occurred during order submission or processing
+            # req_notices: tracks any notices or warnings related to the orders
+            seen = {i for i in ids
+                    if i in app.order_status or i in app.open_orders
+                    or i in app.req_errors or i in app.req_notices}
+            # Total messages logged against OUR ids only — a message about some
+            # unrelated request must not keep this loop awake.
+            messages = getattr(app, 'req_messages', {})
+            total = sum(len(messages.get(i, ())) for i in ids)
+        # A rising count means TWS is still talking; reset the quiet counter.
+        quiet_polls = quiet_polls + 1 if total == last_total else 0
+        last_total = total
+        if (len(seen) == len(ids) and quiet_polls >= 2) or time.time() >= deadline:
+            break
+        # wait another small increment of time before an additional check
+        time.sleep(poll)
+
+    rows = []
+    with app.lock:
+        for order_id in ids:
+            status = dict(app.order_status.get(order_id, {}))
+            openo = dict(app.open_orders.get(order_id, {}))
+            # IB delivers an order REJECTION through error(), with the ORDER ID in the
+            # reqId slot — so req_errors is where a refusal shows up, not order_status.
+            #
+            # CAVEAT: order ids and request ids are separate counters that share one
+            # numeric space and DO collide (a single run has held historical reqIds 2-4
+            # alongside orderIds 1-7). Reading req_errors here is safe because we only
+            # ask about ids we just submitted, in a window where no other request is in
+            # flight. Never use it in the other direction to conclude a data request failed.
+            err = app.req_errors.get(order_id)
+            # A non-terminal message is still proof TWS saw the order. 10311 in
+            # particular means "accepted, but held for manual confirmation" — an order
+            # sitting in the Pending panel with a Transmit button, which is neither
+            # working nor lost and must not be reported as either.
+            notice = app.req_notices.get(order_id)
+
+            # BELT AND BRACES: an order TWS reports as live was not rejected, whatever
+            # message came with it. Code lists go stale — IB adds warnings faster than
+            # anyone updates a constant — but the order's own status is authoritative
+            # and needs no maintenance. If the two disagree, believe the status and
+            # demote the message to a notice.
+            live_status = str(status.get('status') or openo.get('status') or '')
+            if err and live_status in _LIVE_ORDER_STATES:
+                notice = notice or err
+                err = None
+
+            # The COMPLETE message sets, from the append-only logs. err/notice above
+            # are the last of each kind and drive the existing columns; these are
+            # everything, because an order that drew a warning AND a refusal has a
+            # story that neither message tells on its own.
+            all_errors = list(getattr(app, 'req_error_log', {}).get(order_id, ()))
+            all_notices = list(getattr(app, 'req_notice_log', {}).get(order_id, ()))
+
+            verdict, reason = _order_verdict(status, openo, err, notice, all_notices)
+
+            rows.append({
+                'orderId': order_id,
+                'symbol': openo.get('symbol'),
+                'action': openo.get('action'),
+                'quantity': openo.get('totalQuantity'),
+                # The one-word answer, and the message behind it. Everything below
+                # this pair is the evidence it was derived from.
+                'verdict': verdict,
+                'reason': reason,
+                'status': status.get('status') or openo.get('status'),
+                'filled': status.get('filled'),
+                'remaining': status.get('remaining'),
+                'avgFillPrice': status.get('avgFillPrice'),
+                'whyHeld': status.get('whyHeld'),
+                'error': f"{err[0]} {err[1]}" if err else None,
+                'notice': f"{notice[0]} {notice[1]}" if notice else None,
+                # Counts, so "did this order draw anything?" is one comparison. The
+                # messages themselves arrive as error_1..error_N / notice_1..notice_N
+                # columns, appended after this loop — see _message_columns.
+                'n_errors': len(all_errors),
+                'n_notices': len(all_notices),
+                # The column that matters. False = TWS never said a word about this
+                # order, so assume it did not arrive. A notice counts: it is TWS
+                # talking about this order id, which silence is not.
+                'acknowledged': bool(status or openo or err or notice),
+            })
+
+    ack = pd.DataFrame(rows)
+    # One column per message, rather than one cell holding all of them. A blob had to
+    # be parsed back apart to answer "what was the SECOND error?", which is a question
+    # the logs can answer directly.
+    with app.lock:
+        widened = [
+            ack,
+            _message_columns(getattr(app, 'req_error_log', {}), ids, 'error'),
+            _message_columns(getattr(app, 'req_notice_log', {}), ids, 'notice'),
+        ]
+    # concat on axis=1 glues columns side by side; every frame here was built from the
+    # same `ids` in the same order, so positional alignment is exact.
+    return pd.concat([f for f in widened if not f.empty], axis=1)
+
+
+def _message_columns(log, ids, prefix):
+    """Widen a per-order message log into prefix_1 … prefix_N columns.
+
+    # ========================================================================
+    # WHY THIS IS THE WHOLE IMPLEMENTATION.
+    # req_error_log / req_notice_log already hold, per order id, a LIST of
+    # (code, text) — which is exactly one row of the wide frame. Handing pandas
+    # a ragged list of lists NaN-pads the short rows for us, so there is no
+    # explode (that reshapes rows, not columns) and no json_normalize (that is
+    # for nested dicts, and these are flat tuples).
+    #
+    # WHY THE TWO SPLIT LOGS AND NOT req_messages. The wide layout needs, per
+    # order, a list of errors and a list of notices — the partition the two logs
+    # already are. req_messages interleaves both kinds, so it would have to be
+    # filtered by 'kind' to rebuild these same two lists, and its one distinctive
+    # feature (arrival order ACROSS kinds) is meaningless once each kind has its
+    # own columns. Do not "simplify" this to read the single log.
+    #
+    # Returns an EMPTY frame when no order drew a message of this kind, so a
+    # clean run gains no columns at all rather than a column of None.
+    #
+    # Pure: dict in, DataFrame out. The caller holds the lock.
+    # ========================================================================
+    """
+    cells = [[f"{code} {text}" for code, text in log.get(i, ())] for i in ids]
+    if not any(cells):
+        return pd.DataFrame(index=range(len(ids)))
+    wide = pd.DataFrame(cells)
+    # Columns come back as 0..N-1; name them 1-based, since "error_1" reads as the
+    # first error and "error_0" reads as a mistake.
+    wide.columns = [f"{prefix}_{n + 1}" for n in range(wide.shape[1])]
+    return wide
+
+
+# Text IB uses in its 399 "Order Message" when an order is accepted but parked until
+# the venue opens ("Warning: Your order will not be placed at the exchange until
+# 2026-07-31 09:00:00 MET."). Matched on the phrase rather than the code because 399
+# covers every kind of order message, only some of which mean "queued for the open".
+_PENDING_OPEN_MARKER = 'will not be placed at the exchange until'
+
+
+def _order_verdict(status, openo, err, notice, all_notices):
+    """Reduce one order's collected state to (verdict, reason).
+
+    # ========================================================================
+    # WHY A VERDICT EXISTS AT ALL.
+    # The frame already carried status, error and notice, and reading it still
+    # required knowing that 201 means refused, that 399 usually does not, and
+    # that a live status outranks both. One armed run produced a 201 KID refusal
+    # and five 399 "queued until 09:00" warnings side by side; they look alike in
+    # a dump and mean opposite things. This turns that reading into a column.
+    #
+    # ORDER OF EVIDENCE: status first, messages second. IB adds warning codes
+    # faster than anyone updates a constant, but an order's own status is
+    # authoritative and needs no maintenance — the same reasoning as the
+    # belt-and-braces demotion in wait_for_order_ack above.
+    #
+    # Pure: takes dicts, returns a tuple. No app, no lock, no I/O.
+    # ========================================================================
+    """
+    state = str(status.get('status') or openo.get('status') or '')
+
+    # Nothing at all. Not "fine" — this is the empty-TWS-panel failure the whole
+    # harness was written for, so it gets its own verdict rather than a blank.
+    if not state and not err and not notice:
+        return 'NO_ANSWER', None
+
+    # A terminal error with no live status is a refusal: the KID rejection, a
+    # margin refusal, an unknown contract. The reason is the message verbatim —
+    # truncating it would drop precisely the part that says what to fix.
+    # note that _LIVE_ORDER_STATES is a set of order states that are considered
+    #  "live" or "active" in the IBKR system. For reference, these are:
+    # {'PreSubmitted', 'PendingSubmit', 'Submitted', 'ApiCancelled', 
+    # 'Cancelled', 'Filled', 'Inactive'}
+    if err and state not in _LIVE_ORDER_STATES:
+        return 'REJECTED', f"{err[0]} {err[1]}"
+
+    if state == 'Filled':
+        return 'FILLED', None
+
+    if state in _LIVE_ORDER_STATES:
+        # Accepted but parked until the venue opens. Checked BEFORE whyHeld
+        # because such an order is perfectly healthy and must never be reported
+        # as a problem — five of them were, once.
+        for code, text in all_notices:
+            # we check if the notice text contains the _PENDING_OPEN_MARKER string,
+            # for reference, this string is defined as 'will not be placed at the
+            #  exchange until', 
+            if _PENDING_OPEN_MARKER in str(text):
+                return 'PENDING_OPEN', f"{code} {text}"
+        # Held by TWS and waiting on a human: whyHeld set, or the 10311
+        # direct-routing warning that puts a Transmit button on the order.
+        why = str(status.get('whyHeld') or '')
+        if why:
+            return 'HELD', why
+        for code, text in all_notices:
+            if code == 10311:
+                return 'HELD', f"{code} {text}"
+        return 'WORKING', None
+
+    # A terminal non-live state that is not a rejection: Cancelled, ApiCancelled,
+    # or an Inactive with no error recorded. Report the state itself rather than
+    # inventing a category for it.
+    return state.upper(), f"{notice[0]} {notice[1]}" if notice else None
+
+
+def _cancel_kwargs(func):
+    """Build the trailing argument ibapi's cancel calls expect on THIS build.
+
+    ibapi changed these signatures: 10.47 takes an ``OrderCancel`` object
+    (``cancelOrder(orderId, orderCancel)`` / ``reqGlobalCancel(orderCancel)``),
+    older builds took a bare id, or an id plus a ``manualOrderCancelTime`` string.
+    Chosen by inspecting the actual signature rather than comparing a version
+    string — the version is a proxy for the thing we can just look at directly,
+    and a proxy is what breaks on the next release.
+    """
+    import inspect
+    try:
+        params = list(inspect.signature(func).parameters.values())
+    except (TypeError, ValueError):
+        return []
+    # Drop `self` when present (unbound) — bound methods already exclude it.
+    extras = [p for p in params if p.name not in ('self', 'orderId')]
+    if not extras:
+        return []
+    if extras[0].name == 'orderCancel':
+        from ibapi.order_cancel import OrderCancel
+        return [OrderCancel()]
+    # Legacy `manualOrderCancelTime`: empty string means "cancel now".
+    return ['']
+
+
+def cancel_order(app, order_id):
+    """Cancel one working order by id.
+
+    The other half of placing an order, and the half this repo did not have: there
+    was no ``cancelOrder`` call anywhere, so a mistaken live order could be watched
+    but not stopped.
+    """
+    args = _cancel_kwargs(app.cancelOrder)
+    app.cancelOrder(int(order_id), *args)
+    print(f"Cancel requested for orderId={order_id}")
+    return int(order_id)
+
+
+def cancel_all_orders(app):
+    """THE PANIC BUTTON — cancel every open order on the account.
+
+    ``reqGlobalCancel`` covers orders placed by ANY client id, not just this
+    session's, which is what you want when something has gone wrong and you are not
+    certain what is working. Cancellation is a request like any other: confirm the
+    result with ``get_open_orders_data`` rather than assuming it took effect.
+    """
+    args = _cancel_kwargs(app.reqGlobalCancel)
+    app.reqGlobalCancel(*args)
+    print("Global cancel requested for ALL open orders on this account.")
+
+
+def get_executions_data(app, days_back=7, symbols=None, sec_type='', side='',
+                        client_id=0, timeout=15):
+    """Fetch recent executions (fills) with their commissions, as a DataFrame.
+
+    ⚠ THE 7-DAY CEILING — read this before trusting an empty result.
+    TWS serves only a SHORT recent window of executions: today's fills by default, and at
+    most roughly the **last 7 days** even with an explicit ExecutionFilter time. This is a
+    TWS limitation, not a bug here and not something a bigger `days_back` can defeat. An
+    empty frame therefore means "no fills in the window TWS will serve", NOT "no trades
+    ever" — do not build a P&L history on the assumption that it is the latter.
+
+    For genuine full history you need IBKR's Flex Web Service (a query + token created in
+    Account Management) or a manually downloaded activity statement. Neither is available
+    through this API connection.
+
+    Parameters
+    ----------
+    app : IBApp
+        A connected app instance.
+    days_back : int
+        How far back to ask for. Values beyond ~7 are accepted but TWS will simply return
+        what it has; the request does not fail, it just returns less than you asked for.
+    symbols : str | list[str] | None
+        Optional symbol filter. A list is applied client-side after the request, because
+        ExecutionFilter carries only ONE symbol — asking for several server-side would
+        need one request per symbol.
+    sec_type, side : str
+        Passed straight through to ExecutionFilter ('STK', 'BUY'/'SELL'); '' means no filter.
+    client_id : int
+        0 = executions from every client id on the account. Any other value narrows to
+        orders placed by that client, which is rarely what you want when auditing a book.
+
+    Returns
+    -------
+    pd.DataFrame
+        One row per fill, with the commission columns joined on execId. Empty (with no
+        columns) when TWS returns nothing for the window.
+    """
+    # --- Reset the destination stores -------------------------------------
+    # Both executions and commissions are cleared: a stale commission row from a previous
+    # call would otherwise join onto this call's fills and misstate their cost.
+    app.executions_event.clear()
+    with app.lock:
+        app.executions = []
+        app.commissions = {}
+
+    # --- Build the filter -------------------------------------------------
+    exec_filter = ExecutionFilter()
+    # IB expects "yyyymmdd HH:MM:SS" for the filter's start time. We anchor the window at
+    # midnight `days_back` days ago so a request made mid-afternoon still covers whole days
+    # rather than a ragged part-day at the far end.
+    start = (datetime.now() - timedelta(days=days_back)).replace(
+        hour=0, minute=0, second=0, microsecond=0)
+    exec_filter.time = start.strftime('%Y%m%d %H:%M:%S')
+    exec_filter.clientId = client_id
+    if sec_type:
+        exec_filter.secType = sec_type
+    if side:
+        exec_filter.side = side
+    # ExecutionFilter holds a single symbol; only push it server-side when exactly one was
+    # asked for, otherwise filter client-side below.
+    if isinstance(symbols, str):
+        exec_filter.symbol = symbols
+
+    # --- Fire the request / wait for execDetailsEnd -----------------------
+    app.reqExecutions(app.next_req_id(), exec_filter)
+    _wait_for(app.executions_event, timeout, f'executions since {exec_filter.time}')
+
+    # --- Join fills to their commissions ----------------------------------
+    with app.lock:
+        rows = [dict(r) for r in app.executions]
+        commissions = dict(app.commissions)
+
+    if not rows:
+        return pd.DataFrame()
+
+    df = pd.DataFrame(rows)
+    # Left-join so a fill whose commissionReport has not arrived still appears, with a NaN
+    # commission rather than being dropped — a missing cost must be visible, not silent.
+    if commissions:
+        df = df.merge(pd.DataFrame(list(commissions.values())), on='execId',
+                      how='left', suffixes=('', '_comm'))
+
+    # Multi-symbol filtering happens here, since ExecutionFilter could not carry the list.
+    if symbols is not None and not isinstance(symbols, str):
+        df = df[df['symbol'].isin(list(symbols))]
+
+    # IB stamps execution times as "yyyymmdd HH:MM:SS" (sometimes with a trailing timezone).
+    # Parse to real timestamps so downstream code can sort and index by them; anything
+    # unparseable becomes NaT rather than raising, and stays visible in the frame.
+    if 'time' in df.columns:
+        df['ts'] = pd.to_datetime(df['time'].str.split(' ').str[:2].str.join(' '),
+                                  format='%Y%m%d %H:%M:%S', errors='coerce')
+        df = df.sort_values('ts').reset_index(drop=True)
+
+    return df
+
+
 def get_open_orders_data(app, timeout=15, all_clients=False):
     """Fetch current open orders using an existing connected IBApp."""
     # --- Reset the destination store --------------------------------------
     # We clear only the open-order snapshot itself; order_status is left intact
     # because it is also useful as the rolling live status store.
     app.open_orders_event.clear()
+    # note that the above syntax clears the open_orders_event, which is 
+    # a threading.Event object that is used to signal when the open
+    #  orders data has been received from TWS, and before clearing, might
+    # have taken a value such as set() or clear(), and we want to reset it to 
+    # clear() so that we can wait for the new data to arrive. This is 
+    # important because if we don't clear it, we might end up waiting 
+    # for an event that has already been set
     with app.lock:
+        # recall, the app.lock is a threading.Lock object that is used to
+        # synchronize access to shared data, i.e., it ensures that only
+        #  one thread can access the open_orders dictionary at a time,
+        # i.e., one of the reader thread or the main thread, 
         app.open_orders = {}
 
     # --- Fire the request / wait for callbacks ----------------------------
+    # check if all_clients is True: if so, it means we want to request open orders
+    #  for all clients, not just the current one.
     if all_clients:
         app.reqAllOpenOrders()
     else:
@@ -1412,14 +2458,217 @@ def get_open_orders_data(app, timeout=15, all_clients=False):
     _wait_for(app.open_orders_event, timeout, 'open orders')
 
     # --- Merge order definitions with latest statuses ---------------------
+    # note that app.open_orders is a dictionary that stores the open orders
+    #  received from TWS, through the openOrder callback
     rows = []
     with app.lock:
         for order_id, order_row in app.open_orders.items():
+            # we initialise the first part of the completed row with the order_row
+            # that came from the openOrder callback, which contains
+            # the order definition
             merged = dict(order_row)
+            # we then update the merged dictionary with the latest status
+            # that came from the orderStatus callback, which contains
+            # the latest status of the order, such as filled, cancelled, etc.
             merged.update(app.order_status.get(order_id, {}))
             rows.append(merged)
 
     return pd.DataFrame(rows)
+
+
+def _pair_columns(df, suffix='_broker'):
+    """Reorder a merged frame so each column sits next to the other side's copy.
+
+    # ========================================================================
+    # WHY NOT JUST LEAVE THE MERGE ALONE.
+    # pd.merge appends the right frame's columns to the FAR RIGHT in their own
+    # order, so `status` ends up a dozen columns away from `status_broker` and
+    # the two values you actually want to compare cannot be seen at once. The
+    # whole point of joining the broker's view onto ours is to spot DISAGREEMENT
+    # — a status we recorded that the broker does not confirm — and a layout
+    # that hides disagreement defeats the join.
+    #
+    # WHY NOT ALPHABETICAL. Sorting would pair `status` with `status_broker`
+    # only by luck of spelling, and would scatter the reading order that matters
+    # (orderId, symbol, verdict, reason first). This keeps the ack frame's own
+    # order — which was chosen for reading — and slots each broker copy in right
+    # after its twin. Broker-only columns (conId, tif, lmtPrice …) follow at the
+    # end, since they have nothing to be compared against.
+    #
+    # Pure: takes a frame, returns a reindexed view. No I/O.
+    # ========================================================================
+    """
+    ordered = []
+    for col in df.columns:
+        if col.endswith(suffix):
+            continue                       # placed next to its twin, below
+        ordered.append(col)
+        twin = f"{col}{suffix}"
+        if twin in df.columns:
+            ordered.append(twin)
+    # Anything the loop did not place: broker columns with no counterpart on our
+    # side. Appended in their original order rather than dropped — the broker
+    # knowing something we do not is exactly the kind of thing worth seeing.
+    ordered += [c for c in df.columns if c not in ordered]
+    return df[ordered]
+
+
+def check_orders(app, order_ids, timeout=15, settle=1.0, poll=0.25,
+                 all_clients=False, show=True, sent=None):
+    """Run the whole post-submit sequence and return one merged frame.
+
+    ═══════════════════════════════════════════════════════════════════════════
+    THE ONE CALL TO MAKE AFTER SUBMITTING. It holds NO logic of its own — the
+    verdicts live in wait_for_order_ack, the broker snapshot in
+    get_open_orders_data. What it adds is (a) running them in the right order,
+    (b) saying out loud which stage is running, so a slow one is visibly slow
+    rather than an unexplained pause, and (c) joining the two views so a single
+    table answers both "what did TWS say" and "is it live".
+
+    THE ORDER IS MANDATORY, NOT STYLISTIC. get_open_orders_data CLEARS
+    app.open_orders before re-requesting, and wait_for_order_ack reads that dict
+    for symbol / action / quantity. Swap the two calls and those columns come
+    back empty for every row — with no error to explain why. Do not "tidy" this.
+
+    WHAT WE SENT IS THE SPINE (pass `sent`). symbol / action / quantity /
+    currency are INPUTS to placeOrder — TWS only ever echoes them back, through
+    the openOrder callback. It sends no openOrder for an order it REFUSES, so
+    that echo never arrives and app.open_orders never learns the symbol; then
+    get_open_orders_data clears that dict and refills it with only what is still
+    working, blanking the broker copy too. Order 18 came back REJECTED, carrying
+    the KID reason and no ticker, while the frame that named it sat unused in the
+    caller's namespace. Building outwards from our own record makes every row
+    named BY CONSTRUCTION rather than named when a callback happened to arrive.
+    ═══════════════════════════════════════════════════════════════════════════
+
+    Parameters
+    ----------
+    app : IBApp
+        The connected app the orders were placed through.
+    order_ids : iterable[int]
+        Order ids returned by submit_rebalance_orders / place_order.
+    sent : pd.DataFrame | None
+        What submit_rebalance_orders returned. When given it becomes the spine of
+        the result — one row per order sent, in submission order — and the ack's
+        own echoed symbol / action / quantity are DROPPED rather than suffixed,
+        so each identity column appears exactly twice: ours bare, IB's current
+        view as `*_broker`. When None the ack frame is the spine, which is the
+        older behaviour and leaves existing callers unaffected.
+    timeout, settle, poll : float
+        Passed straight to wait_for_order_ack.
+    all_clients : bool
+        Passed to get_open_orders_data — True also lists orders placed by other
+        client ids, which is what you want when something has gone wrong and you
+        are not sure what is out there.
+    show : bool
+        Print the stage banners and display each intermediate frame. Set False to
+        use this as a plain function inside a pipeline.
+
+    Returns
+    -------
+    pd.DataFrame
+        The acknowledgement frame (one row per requested id, verdicts included)
+        left-joined with the broker's open-order snapshot on orderId. Left, so an
+        id TWS never mentioned survives as a NO_ANSWER row instead of vanishing —
+        which is the single most important row the frame can carry.
+
+        Columns are INTERLEAVED, not appended: where both frames carry a name,
+        ``status`` sits immediately beside ``status_broker``. See _pair_columns.
+    """
+    # Lazy, optional import: display() renders frames properly in a notebook, but
+    # portutils must not depend on IPython being installed. Falling back to print
+    # keeps this usable from a plain script.
+    def _show(obj):
+        if not show:
+            return
+        try:
+            from IPython.display import display as _display
+            _display(obj)
+        except ImportError:
+            print(obj)
+
+    # THE STAGES ARE NUMBERED FOR THE READER, so a slow one is visibly slow rather
+    # than an unexplained pause. With `sent` there are four, because what we
+    # TRANSMITTED is a stage in its own right — the question the whole table answers
+    # is "what did we ask for, and what became of it", and that reads backwards if
+    # the first thing on screen is TWS's reply to an order you have not seen stated.
+    n = 4 if sent is not None and len(sent) else 3
+    step = 0
+
+    if n == 4:
+        step += 1
+        if show:
+            print(f"{step}/{n} what we sent (our own record — authoritative for "
+                  f"symbol / action / quantity):")
+        _show(sent)
+
+    step += 1
+    if show:
+        print(f"{step}/{n} waiting for order acknowledgement (TWS answers asynchronously)…")
+    ack = wait_for_order_ack(app, order_ids, timeout=timeout, settle=settle, poll=poll)
+    # Displayed only when it is the spine. Once `sent` is the spine, every column of
+    # this frame reappears in the combined table below, so showing it here is the same
+    # data twice — and the intermediate "was it acknowledged" step is not the question
+    # being asked. The banner stays, because the WAIT still happens and should be
+    # visible while it does.
+    if n == 3:
+        _show(ack)
+
+    step += 1
+    if show:
+        print(f"{step}/{n} the broker's own view (reqOpenOrders — independent of this session)…")
+    # MUST come after the ack: this call clears app.open_orders. See the header.
+    open_orders = get_open_orders_data(app, timeout=timeout, all_clients=all_clients)
+    _show(open_orders)
+
+    step += 1
+    if show:
+        print(f"{step}/{n} combined — what we sent, what became of it:")
+
+    # ── THE SPINE ────────────────────────────────────────────────────────────
+    # With `sent`, the table is built outwards from what WE transmitted: one row
+    # per order, in submission order, named whatever TWS did or did not say. The
+    # ack's echoed identity columns are dropped rather than suffixed — they hold
+    # the same values as the spine except on precisely the rows (rejections)
+    # where they are empty, so keeping them would add a third symbol column whose
+    # only distinction is being blank when it matters.
+    if sent is not None and len(sent) and 'orderId' in getattr(sent, 'columns', ()):
+        spine = sent.copy()
+        spine['orderId'] = spine['orderId'].astype('Int64')
+        # orderId first: it is the key every other frame joins on and the id you quote
+        # when cancelling, so it should not be buried mid-table by the sent frame's own
+        # column order.
+        spine = spine[['orderId'] + [c for c in spine.columns if c != 'orderId']]
+        if len(ack):
+            echoed = [c for c in ('symbol', 'action', 'quantity', 'currency')
+                      if c in ack.columns and c in spine.columns]
+            ack_side = ack.drop(columns=echoed)
+            ack_side['orderId'] = ack_side['orderId'].astype('Int64')
+            spine = spine.merge(ack_side, on='orderId', how='left', suffixes=('', '_ack'))
+        ack = spine
+
+    if len(ack) and len(open_orders) and 'orderId' in open_orders.columns:
+        # suffixes: keep the ack column names bare so existing readers are
+        # unaffected, and mark the broker's copy of a colliding name explicitly.
+        # typically, the reason why the broker's view would disagree with the
+        #  ack is that the order was initially submitted, probably came up for a few
+        # moments in TWS, and then was rejected, so the ack's status is the one that matters.
+        # Normalise the join key on both sides: the spine may carry Int64 (nullable,
+        # because a dry-run row has no id) while the broker frame carries plain int64,
+        # and pandas will not join those without complaint.
+        broker = open_orders.copy()
+        broker['orderId'] = broker['orderId'].astype('Int64')
+        combined = ack.assign(orderId=ack['orderId'].astype('Int64')).merge(
+            broker, on='orderId', how='left', suffixes=('', '_broker'))
+        # …then put each pair side by side, so a disagreement between our record
+        # and the broker's is visible without scrolling.
+        combined = _pair_columns(combined)
+    else:
+        # Nothing to join against — an empty open-orders frame is normal once every
+        # order has filled or been rejected, and must not blank the ack frame.
+        combined = ack
+    _show(combined)
+    return combined
 
 
 def get_pnl_data(app, account, model_code='', timeout=10, keep_subscription=False):
@@ -1540,16 +2789,26 @@ class OrderApp:
         exchange='SMART',
         currency='USD',
         primary_exchange=None,
+        con_id=None,
     ):
         """Place a market order for the specified contract."""
         # Build the IB contract first so the order points at the right
         # instrument.
+        #
+        # con_id is the important one for anything not US-SMART. The defaults here
+        # (STK/SMART/USD) describe a US listing, and a bare symbol is AMBIGUOUS across
+        # venues — the same ticker can name a London line and a US one. On a historical
+        # request that ambiguity costs an error 200; on an ORDER it can mean buying the
+        # wrong instrument in the wrong currency. Callers holding a position already have
+        # its conId from the account snapshot (contract_specs_from_portfolio) and should
+        # pass it rather than let TWS re-resolve the name.
         contract_obj = contract(
             symbol=symbol,
             sec_type=sec_type,
             exchange=exchange,
             currency=currency,
             primary_exchange=primary_exchange,
+            con_id=con_id,
         )
 
         # Build a market order and submit it through the shared app.
@@ -1566,16 +2825,20 @@ class OrderApp:
         exchange='SMART',
         currency='USD',
         primary_exchange=None,
+        con_id=None,
     ):
         """Place a limit order for the specified contract."""
         # Build the IB contract first so the order points at the right
-        # instrument.
+        # instrument. See the con_id note in submit_market_order — it matters
+        # identically here, and a limit price is quoted in the CONTRACT's currency,
+        # so naming the wrong listing also silently changes what the price means.
         contract_obj = contract(
             symbol=symbol,
             sec_type=sec_type,
             exchange=exchange,
             currency=currency,
             primary_exchange=primary_exchange,
+            con_id=con_id,
         )
 
         # Build a limit order and submit it through the shared app.

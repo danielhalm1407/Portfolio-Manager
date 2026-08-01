@@ -42,3 +42,6 @@ sandbox/
 # Playwright — session data (login cookies) and MCP artifacts, never commit
 .playwright-session/
 .playwright-mcp/
+
+# Archived docs — superseded plans, kept locally only
+archive/

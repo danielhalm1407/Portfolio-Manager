@@ -180,3 +180,53 @@ class ReturnsCalculator:
         return out
 
 
+# ============================================================================
+# WIDE-MATRIX HELPERS — price panel in, derived panel out.
+#
+# These are the primary definitions of "normalise" / "daily return" / "log return"
+# for the repo. They used to live as private methods on ``PanelBuilder`` in
+# ``portutils/viz/panel.py``, which meant a plotting module owned the definition of
+# what a return is, and anything else that wanted one had to construct a PanelBuilder
+# to get at it. They are plain functions here; ``PanelBuilder`` now calls them.
+#
+# Deliberately NOT merged with ``ReturnsCalculator`` above. That class solves a
+# different problem: ONE frame carrying suffix-named columns (``spx_level`` ->
+# ``spx_period_return``, ``spx_total_return``), selected by name and written back
+# alongside the levels. These take a WIDE T x N matrix (one column per instrument,
+# no naming convention) and return a wide T x N matrix. Neither contract subsumes the
+# other, so both live in this module rather than one being bent into the other.
+#
+# Every function is pure: it never mutates the frame handed in.
+# ============================================================================
+
+
+def normalise(df: pd.DataFrame, base: float = 100.0) -> pd.DataFrame:
+    """Wealth index: ``(price / first_price) * base``."""
+    # Dividing by row 0 rebases every column to a common start, which is what makes
+    # instruments with wildly different price levels comparable on one axis.
+    return (df / df.iloc[0]) * base
+
+
+def pct_returns(df: pd.DataFrame) -> pd.DataFrame:
+    """Cumulative percentage returns from the first observation."""
+    # Same rebasing as `normalise`, expressed as a percentage change from the start
+    # rather than an index level — i.e. `normalise(df, 100) - 100`.
+    return ((df / df.iloc[0]) - 1) * 100
+
+
+def daily_returns(df: pd.DataFrame) -> pd.DataFrame:
+    """Simple period-over-period returns (first row dropped)."""
+    # The first row is dropped, not zero-filled: there is no prior observation, so a
+    # return is genuinely undefined there. Callers that multiply weights by these
+    # returns therefore need weights aligned to the SHORTENED index.
+    return df.pct_change().dropna()
+
+
+def log_returns(df: pd.DataFrame) -> pd.DataFrame:
+    """Log returns, ``log(P_t / P_{t-1})`` (first row dropped)."""
+    # Log returns add across time, which is why they are preferred for aggregation and
+    # for anything assuming normality; simple returns add across assets instead, which
+    # is why `daily_returns` is what attribution consumes.
+    return np.log(df / df.shift(1)).dropna()
+
+

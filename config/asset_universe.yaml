@@ -1,2 +1,215 @@
 # Investable universe definition
-# Define asset classes, tickers, sectors, and constraints here
+# Define asset classes, tickers, sectors, and constraints here.
+#
+# This is the single source of truth for "what is a hedge and what is beta". Pipelines,
+# studies and charts all resolve their tickers, weights and colours from here rather than
+# carrying their own literals — a ticker's role should be changeable in ONE place.
+#
+# Read it via portutils.utils.config (ASSET_UNIVERSE / tickers_by_role / portfolio_weights),
+# never by opening this file directly — the repo rule is that all config access is
+# centralised in that module.
+#
+# role:   hedge  — expected to rally, or at least hold, when equity beta falls. The legs a
+#                  rebalance sells INTO a drawdown.
+#         beta   — directional equity/market risk. The legs a rebalance buys during one.
+#         core   — broad long-term holdings that are neither a hedge nor a high-beta bet.
+# sleeve: thematic grouping, used for roll-ups in attribution charts.
+
+universe:
+  # ---- beta / directional equity ----
+  SPY:
+    name: "SPDR S&P 500 ETF"
+    role: beta
+    sleeve: broad_market
+    note: "Broad US market benchmark and the plain beta reference leg."
+  CSPX:
+    name: "iShares Core S&P 500 UCITS ETF USD (Acc)"
+    role: beta
+    sleeve: broad_market
+    note: "The TRADEABLE S&P 500 exposure for this account. SPY is US-domiciled, publishes no PRIIPs KID and is therefore refused to a UK/EU retail client (IB error 201, 'Customer Ineligible'). CSPX is the UCITS equivalent: Irish-domiciled, KID published, LSE-listed, quoted in USD. Accumulating, so dividends roll up inside the fund rather than paying out — total return matches SPY, the cash-flow profile does not."
+  FTXL:
+    name: "First Trust Nasdaq Semiconductor ETF"
+    role: beta
+    sleeve: growth_satellite
+    note: "Smart-beta semis: weights on value+vol+growth, underweights mega-cap -> mid-cap tilt; satellite growth engine."
+  JPM:
+    name: "JPMorgan Chase & Co."
+    role: beta
+    sleeve: financials
+    note: "Largest US bank; high-beta financial, levered to a recovery in risk appetite."
+  RNR:
+    name: "RenaissanceRe Holdings Ltd"
+    role: beta
+    sleeve: financials
+    note: "Specialty reinsurance, property cat / casualty; a stock, not an ETF. Grouped with JPM as the financials sleeve."
+  BARC:
+    name: "Barclays PLC"
+    role: beta
+    sleeve: financials
+    note: "UK universal bank, LSE-listed and QUOTED IN PENCE (GBX) while the contract currency is GBP — see the pence note under `live_book` below. High-beta financial, same sleeve as JPM."
+  HSBA:
+    name: "HSBC Holdings plc"
+    role: beta
+    sleeve: financials
+    note: "UK-listed global bank with heavy Asia revenue. LSE line, QUOTED IN PENCE (GBX). Financials sleeve alongside BARC and JPM."
+
+  # ---- hedge / diversifiers ----
+  KMLM:
+    name: "KFA Mount Lucas Index Strategy ETF"
+    role: hedge
+    sleeve: managed_futures
+    note: "Managed futures / trend-following across commodities, fixed income, currencies. The core crisis hedge."
+  MNA:
+    name: "IQ Merger Arbitrage ETF"
+    role: hedge
+    sleeve: event_driven
+    note: "Long announced-merger targets, short acquirers. Deal-spread carry, near-zero market beta."
+  FLSP:
+    name: "Franklin Liberty Systematic Style Premia ETF"
+    role: hedge
+    sleeve: alt_risk_premia
+    note: "Multi-factor alternative risk premia (value, momentum, carry, low-vol)."
+
+  # ---- core broad holdings ----
+  ACWX:
+    name: "iShares MSCI ACWI ex US ETF"
+    role: core
+    sleeve: global_equity
+    note: "Core broad global equities outside the US (all-cap, 47 countries); largest single position."
+  DGRE:
+    name: "WisdomTree Emerging Markets Quality Dividend Growth Fund"
+    role: core
+    sleeve: quality_em_income
+    note: "EM quality dividend growth factor."
+  EQLT:
+    name: "Xtrackers MSCI USA Quality ESG ETF"
+    role: core
+    sleeve: quality_em_income
+    note: "Quality factor screen, low-volatility / high-ROIC tilt."
+  DVYE:
+    name: "iShares Emerging Markets Dividend ETF"
+    role: core
+    sleeve: quality_em_income
+    note: "EM high-dividend income, broad EM exposure."
+  QDIV:
+    name: "Global X S&P 500 Quality Dividend ETF"
+    role: core
+    sleeve: quality_em_income
+    note: "Quality income blend, dividend screen on S&P 500."
+
+  # ---- metals ----
+  CPER:
+    name: "United States Copper Index Fund"
+    role: core
+    sleeve: metals
+    note: "Pure copper futures price exposure, no equity wrapper."
+  DBB:
+    name: "Invesco DB Base Metals Fund"
+    role: core
+    sleeve: metals
+    note: "Aluminium + copper + zinc futures basket; replaces the thin ALUM/JJU ETNs."
+
+  # ---- gas / power value chain (the structural commodity sleeve) ----
+  LNG:
+    name: "Cheniere Energy, Inc."
+    role: beta
+    sleeve: gas_power
+    note: "US LNG liquefaction and export. The listed expression of the gas/power value chain this project's commodity extension is built around. USD, US-listed."
+
+  # ---- HOLDINGS AWAITING CLASSIFICATION ----
+  # These two are held in the live account but I could not verify what they are, and an
+  # invented `name`/`note` in the file that is meant to be the single source of truth is
+  # worse than an admitted gap. Role is a PLACEHOLDER: it feeds the by-role roll-ups in
+  # research/check_existing_port.py and the hedge-vs-beta reading of the book, so a wrong
+  # one quietly mis-states the risk split. Correct both before trusting any role total.
+  AINF:
+    name: "VERIFY — unconfirmed"
+    role: core
+    sleeve: unclassified
+    note: "VERIFY: instrument not identified. LSE-listed line held in DUP102412. Confirm name, role and quote currency before relying on any role-level aggregate."
+  "5MVL":
+    name: "VERIFY — unconfirmed"
+    role: core
+    sleeve: unclassified
+    note: "VERIFY: instrument not identified. Held in DUP102412; no market-data subscription, so it returns no historical bars. Confirm name, role and quote currency. Quoted with a leading digit, so it MUST stay quoted in YAML or it parses as a number."
+
+# Named weight vectors. Weights are fractions of capital and need NOT sum to 1 — a book
+# whose gross exceeds 1.0 is levered, and the accounting engine tracks gross exposure
+# separately (it does not model financing cost; see src/portutils/portfolio/book.py).
+portfolios:
+  # The two-asset rebalancing study: enough beta to draw down, enough hedge to rally into it.
+  spy_kmlm:
+    SPY: 0.60
+    KMLM: 0.40
+
+  # ═══════════════════════════════════════════════════════════════════════════════════════
+  # THE LIVE BOOK — what src/pipelines/rebalance_live.py trades DUP102412 toward.
+  #
+  # ═══════════════════════════════════════════════════════════════════════════════════════
+  # WHY SPY AND KMLM ARE NOT HERE — THIS ACCOUNT CANNOT BUY THEM.
+  # Both were in this vector and both were REJECTED live, with IB error 201:
+  #   "No Trading Permission, Customer Ineligible; This product does not have a KID in
+  #    English or in a language approved for your country."
+  # That is PRIIPs: a UK/EU retail client may not buy a US-domiciled ETF without a Key
+  # Information Document, and US ETFs do not publish one. It is a client-eligibility rule,
+  # not a routing or permission setting, so no code change and no retry makes it work.
+  # If the exposure is still wanted, the substitute is a UCITS equivalent (e.g. CSPX or
+  # VUSA for S&P 500, and a UCITS managed-futures fund for KMLM) — a deliberate choice
+  # about what to hold, so it is left to a human rather than swapped in automatically.
+  # Both remain in the `universe:` catalogue above because the RESEARCH vectors
+  # (spy_kmlm, hedge_sleeves) still reference them; simulated books have no KID problem.
+  # ═══════════════════════════════════════════════════════════════════════════════════════
+  #
+  # Six names at 0.02 each — 12% of NetLiquidation in equity, 88% cash.
+  #
+  # The per-name weight is held at 0.02 rather than renormalised to keep the total at
+  # 10%, because five of these six ALREADY HAVE ORDERS WORKING that were sized at 0.02.
+  # Renormalising to 0.10/6 = 0.0167 would leave those in-flight orders overshooting a
+  # target that moved under them. Adding a name is the cheaper adjustment. To go back to
+  # a 10% total, set all six to 0.0166667 once the working orders have filled or been
+  # cancelled — not before.
+  #
+  # The vector SUMS TO 0.12 ON PURPOSE. Weights are fractions of capital, not of the
+  # invested portion, so the missing 0.90 is the cash allocation — ConstantMixRule sizes
+  # each leg at net_liq * w and simply leaves the remainder uninvested. Editing these to
+  # sum to 1.0 would put the account fully invested, which is a different decision.
+  #
+  # WHY 10% AND NOT 60%. On a ~1.02M account, 60% over the legs is ~87.5k per order,
+  # which every leg's `max_order_value` guard (50k) correctly REFUSED — nothing traded.
+  # 10% puts each order near 14.6k, comfortably inside the ceiling. Raising the ceiling
+  # instead would have removed the protection rather than the problem.
+  #
+  # IF YOU CHANGE THESE, CHECK `min_turnover` IN config/settings.yaml. That gate skips any
+  # leg already within N of its target, and it is compared against the WEIGHT GAP. With
+  # 1.43% targets a 2% gate is larger than the entire target — every leg would be reported
+  # "already close enough" and nothing would ever trade. It is set to 0.005 for this reason.
+  #
+  # MIXED CURRENCIES. BARC/HSBA (and AINF/5MVL) are London lines: quoted in pence, contract
+  # currency GBP, while NetLiquidation is in the account's base currency. The rebalancer
+  # therefore values every position from IBKR's own `marketValue` rather than
+  # marketPrice * qty — that field is already base-currency-converted, which removes the
+  # pence factor and the FX rate in one step. Do not "fix" a weight that looks off by ~100
+  # by scaling it here; see the currency section of src/pipelines/rebalance_live.md.
+  # ═══════════════════════════════════════════════════════════════════════════════════════
+  live_book:
+    "5MVL": 0.02
+    AINF: 0.02
+    BARC: 0.02
+    HSBA: 0.02
+    LNG: 0.02
+    CSPX: 0.02
+
+  # The capital-efficient book from research/hedge_sleeves/hedge_sleeves.py. Gross ~1.8.
+  hedge_sleeves:
+    ACWX: 0.30
+    FTXL: 0.30
+    KMLM: 0.50
+    MNA: 0.20
+    RNR: 0.10
+    JPM: 0.10
+    CPER: 0.05
+    DBB: 0.05
+    DGRE: 0.05
+    EQLT: 0.05
+    DVYE: 0.05
+    QDIV: 0.05

@@ -36,7 +36,7 @@ from matplotlib.patches import Rectangle
 from matplotlib.ticker import FuncFormatter
 import matplotlib.dates as mdates
 from collections import deque
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import datetime
 from decimal import Decimal
 
@@ -55,6 +55,20 @@ from portutils.ingestion.ibkr_requests import (
     market_order,                   # STK/CASH market order builder
     crypto_marketable_limit_order,  # PAXOS IOC marketable-limit builder
     get_historical_bars,            # one-shot intraday OHLCV pull (list[dict])
+)
+# The position/P&L accounting engine (plan §4b/§7.3) used to be defined in this file as
+# methods on KalmanTradingApp. It now lives in the library so the SAME rules serve this
+# GUI, a replay, and any offline scenario study — one implementation, one set of numbers.
+# Book is the average-cost book (one Position per symbol; this app uses a single default
+# symbol), StateLedger writes the per-bar state_df rows, and SimExecutionBackend is the
+# unchanged replay fill source, now booking into a Book rather than into `self`.
+from portutils.portfolio import (
+    Book,                           # average-cost position + P&L book (the sole mutator)
+    Fill,                           # one execution print (unchanged dataclass)
+    Order,                          # the order-ledger record above a Fill (§7.5)
+    SimExecutionBackend,            # synthesizes replay fills, no network
+    StateLedger,                    # per-bar state_df writer
+    _iso,                           # datetime -> ISO string for the JSON exports
 )
 
 # -----------------------------------------------------------------------------
@@ -317,180 +331,14 @@ class ForecastView:
 
 
 # -----------------------------------------------------------------------------
-# FILL — one execution print, the atomic unit the accounting engine consumes
-# (plan §7.3). Deliberately shaped to be a SUPERSET of what IBKR's execDetails
-# returns (order_id/qty/price/side/time/perm_id) PLUS our own extras (source +
-# the forecast context at decision time) so the SAME object works for a simulated
-# replay fill and, later, a live IBKR fill — apply_fill never has to branch on which.
+# EXECUTION + ACCOUNTING TYPES — now imported from portutils.portfolio (see the
+# import block at the top of this file). Fill, Order, _iso and SimExecutionBackend
+# used to be defined right here; they were moved out VERBATIM (comments and all) so
+# the same §4b/§7.3 accounting rules can be used without a Tk window — by an offline
+# scenario sim, a notebook, or a test — instead of being trapped in this GUI script.
+# The only behavioural change: SimExecutionBackend now books into a Book object and
+# reports each fill through an on_order callback, rather than reaching into this app.
 # -----------------------------------------------------------------------------
-@dataclass
-class Fill:
-    order_id: int           # which order this fill belongs to (our counter in sim)
-    ts: datetime            # fill timestamp (bar timestamp in replay)
-    side: int               # +1 = BUY, -1 = SELL  (signed so apply_fill is direction-agnostic)
-    qty: float              # ABSOLUTE units filled (magnitude only; sign carried by `side`)
-    price: float            # fill price
-    perm_id: int | None = None          # IBKR permId — None in pure sim
-    source: str = "sim"                 # "sim" (replay) vs "live" (real IBKR fill) — our provenance field
-    # forecast context stamped at decision time — OUR extra fields beyond IBKR (§7.3).
-    r_hat: float | None = None
-    q_low: float | None = None
-    q_high: float | None = None
-    # which risk cap (if any) was active when this trade was recommended: "none"/"idio_floor"/"factor"/"portfolio"
-    binding_cap: str | None = None
-
-
-# -----------------------------------------------------------------------------
-# ORDER — the trade ledger record that sits ABOVE Fill (plan §7.5 / GAP A).
-# Where Fill is one atomic execution print, Order is the whole order's life: its
-# metadata, the recommendation rationale that justified it, its current lifecycle
-# state, and an append-only event history. It is shaped to serialize EXACTLY to the
-# nested structure of orders/dummy_orders.json via to_dict(), so the same record
-# format works for a simulated replay order and (later) a real IBKR order.
-#
-# In SIM/replay we assume a single fill that fills the whole order immediately, so
-# `history` collapses to a Submitted→Filled pair at one timestamp and qty_filled ==
-# total_qty. The lifecycle plumbing (an order that COULD sit unfilled / partial)
-# still exists unchanged for the live path to populate from orderStatus/execDetails.
-#
-# The dataclass holds FLAT fields (cheap to build at the execute() choke point); the
-# dummy_orders.json nesting (metadata{contract, rationale}, state, history) is
-# assembled only on demand in to_dict() at serialization time.
-# -----------------------------------------------------------------------------
-@dataclass
-class Order:
-    # ---- metadata (identity + the contract + how the order was specified) ----
-    order_id: int                       # our ledger key (the SimExecutionBackend counter in sim)
-    submitted_at: datetime              # when the order was created/submitted (bar ts in replay)
-    symbol: str                         # contract symbol, e.g. "BTC" / "SMH"
-    sec_type: str                       # "CRYPTO" / "STK" / "CASH"
-    exchange: str                       # routing venue, e.g. "PAXOS" / "SMART"
-    currency: str                       # quote currency, e.g. "USD"
-    action: str                         # "BUY" / "SELL" (human-facing; sign carried by the fill side)
-    order_type: str                     # "MKT" / "LMT" — sim fills are immediate market-style
-    total_qty: float                    # absolute units the order is for (magnitude)
-    market_price_at_submit: float       # mark/quote at submit time — the price the sim fills at
-    # rationale (the ForecastView context that justified the trade) — keyed EXACTLY as the
-    # `rationale` block in dummy_orders.json so to_dict() round-trips to that schema.
-    # in the syntax, 'field' is a function imported from dataclasses that defines a field
-    #  with a default value (in this case, an empty dict as per default_factory = dict).
-    rationale: dict = field(default_factory=dict)
-    # optional IBKR-side identifiers — None in pure sim (no TWS to allocate them).
-    perm_id: int | None = None          # IBKR permId (stable across the order's life) — None in sim
-    client_id: int | None = None        # the API client id that placed it — None/our GUI id in sim
-    parent_id: int | None = None        # bracket/parent linkage — None for flat sim orders
-    con_id: int | None = None           # IBKR contract id — None/0 in sim
-    limit_price: float | None = None    # limit price for LMT orders — None for market-style sim fills
-    tif: str = "DAY"                    # time-in-force — DAY by default
-    strategy_tag: str = "ou_mean_revert_v1"  # which strategy emitted this order (provenance)
-    # ---- mutable lifecycle state (overwritten as the order progresses; one shot in sim) ----
-    state: dict = field(default_factory=dict)
-    # ---- append-only event log (Submitted → Filled in sim, richer for live) ----
-    history: list = field(default_factory=list)
-
-    def to_dict(self):
-        # Assemble the dummy_orders.json nesting from the flat fields. Called only at
-        # serialization time (export_orders_json), never on the hot path.
-        return {
-            "metadata": {
-                "order_id": self.order_id,
-                "perm_id": self.perm_id,
-                "client_id": self.client_id,
-                "parent_id": self.parent_id,
-                # ISO timestamps so the JSON matches dummy_orders.json's string form.
-                "submitted_at": _iso(self.submitted_at),
-                "contract": {
-                    "symbol": self.symbol,
-                    "sec_type": self.sec_type,
-                    "exchange": self.exchange,
-                    "currency": self.currency,
-                    "con_id": self.con_id,
-                },
-                "action": self.action,
-                "order_type": self.order_type,
-                "total_qty": self.total_qty,
-                "limit_price": self.limit_price,
-                "tif": self.tif,
-                "market_price_at_submit": self.market_price_at_submit,
-                "strategy_tag": self.strategy_tag,
-                "rationale": self.rationale,
-            },
-            "state": self.state,
-            "history": self.history,
-        }
-
-
-def _iso(ts):
-    # Normalize a timestamp to an ISO-8601 string for JSON. Accepts datetime (most cases)
-    # or anything already string-like; None passes through so optional fields stay null.
-    if ts is None:
-        return None
-    if isinstance(ts, datetime):
-        return ts.isoformat()
-    # pandas Timestamp / numpy datetime / str all have a sane str() fallback.
-    return str(ts)
-
-
-# -----------------------------------------------------------------------------
-# SIM EXECUTION BACKEND (plan §7.3, replay half only).
-# Backend-agnostic design: the accounting engine (KalmanTradingApp.apply_fill)
-# only ever sees a Fill, never knows whether it came from IBKR or from here. This
-# backend is the REPLAY/PAPER source: given a recommended trade it synthesizes a
-# Fill at the bar's price (no network, no order id from TWS) and funnels it through
-# apply_fill. The LiveExecutionBackend (not built here — out of scope for the
-# simulated path) would instead call OrderApp.place_order and build Fills from the
-# execDetails callbacks. Keeping them behind one `execute` signature means the GUI
-# code that requests a trade is identical in both modes.
-# -----------------------------------------------------------------------------
-class SimExecutionBackend:
-    def __init__(self, app):
-        # Hold a back-reference to the owning KalmanTradingApp so we can funnel the
-        # synthesized fill into its apply_fill (the single mutator of position/P&L).
-        self.app = app
-        # Local monotone order-id counter. In sim there is no TWS to hand out ids,
-        # so we mint our own starting at 1 — purely a ledger key, never sent anywhere.
-        self._next_id = 1
-
-    def execute(self, side, qty, price, ts, ctx=None):
-        # Synthesize an immediate fill at `price` (no slippage model yet — a future
-        # extension per §4c). `side` is +1/-1, `qty` is the absolute size. `ctx` is an
-        # optional ForecastView whose context we stamp onto the fill (our extra fields).
-        # Mint the next sim order id and advance the counter.
-        oid = self._next_id
-        self._next_id += 1
-        # Build the Fill. source="sim" tags provenance so replay rows are
-        # distinguishable from live ones later in the same state_df.
-        fill = Fill(
-            order_id=oid, ts=ts, side=int(side), qty=abs(float(qty)),
-            price=float(price), source="sim",
-            # Stamp the forecast context (if a recommendation drove the trade) so the
-            # ledger remembers WHY each fill happened — our edge over IBKR's bare prints.
-            r_hat=(ctx.r_hat_h if ctx is not None else None),
-            q_low=(ctx.q_low if ctx is not None else None),
-            q_high=(ctx.q_high if ctx is not None else None),
-            binding_cap=(ctx.binding_cap if ctx is not None else None),
-        )
-        # Snapshot the book BEFORE the fill so we can classify the order (did it grow the
-        # exposure → OPEN, or reduce/flip it → CLOSE) and measure the realised P&L this
-        # single fill crystallised (sim_realised moves only inside apply_fill).
-        pos_before = self.app.sim_position
-        realised_before = self.app.sim_realised
-        # Route through the app's accounting engine — the ONLY place position/P&L move.
-        self.app.apply_fill(fill)
-        # Realised P&L this fill booked = how far the cumulative realised moved.
-        realised_delta = self.app.sim_realised - realised_before
-        # OPEN if the trade pushed |exposure| in the same direction as (or from) flat;
-        # CLOSE if it traded against an existing opposite position (reduced/flipped it).
-        # pos_before == 0 → always opening; same sign as side → growing (OPEN); else CLOSE.
-        if pos_before == 0 or (pos_before > 0) == (int(side) > 0):
-            role = "OPEN"
-        else:
-            role = "CLOSE"
-        # Build the ledger Order ABOVE the fill (§7.5) and register it. In sim the whole
-        # order fills in one shot, so total_qty == qty_filled and history is Submitted→Filled
-        # at the same timestamp. ctx (a ForecastView) supplies the rationale block.
-        self.app._register_sim_order(oid, fill, ctx, role, realised_delta)
-        return fill
 
 
 # -----------------------------------------------------------------------------
@@ -696,14 +544,29 @@ class KalmanTradingApp:
         #   sim_realised    — cumulative crystallised P&L from closed units.
         # Unrealised P&L is derived on the fly (last_price vs sim_avg_entry), never stored
         # as authoritative — it changes every tick, so we recompute it when marking.
+        #
+        # Those three figures now live inside a Book (portutils.portfolio) rather than as
+        # bare attributes on this app. The sim_* names below are kept as PROPERTIES that
+        # read/write straight through to the book, so every call site in this file — and
+        # the replay scrubber's direct assignments — keep working verbatim. The book is
+        # created FIRST because the assignments immediately below go through those setters.
+        # default_symbol is left empty on purpose: this app trades one instrument at a
+        # time, so all fills land on the book's single unnamed position and a symbol change
+        # simply resets the book (see _reset_accounting).
+        self.book = Book(default_symbol="")
         self.sim_position = 0.0
         self.sim_avg_entry = 0.0
         self.sim_realised = 0.0
         # Units closed in the bar currently being marked — reset each bar, used by the
         # position-breakdown plot's "closed_units" scatter markers (§4c plot 2).
         self._sim_closed_this_bar = 0.0
-        # Backend that turns a recommended/clicked trade into a Fill (no network).
-        self.exec_backend = SimExecutionBackend(self)
+        # Backend that turns a recommended/clicked trade into a Fill (no network). It books
+        # into the Book and calls _register_sim_order for each fill so the §7.5 order ledger
+        # still gets built here, where the contract and the ForecastView live.
+        self.exec_backend = SimExecutionBackend(self.book, on_order=self._register_sim_order)
+        # Per-bar state writer (§4b). Owns state_df; this app hands it the accounting row
+        # plus the whole recommendation block as `extra` (see _record_state_row).
+        self.ledger = StateLedger()
         # ORDER LEDGER (§7.5 / GAP A) — the "separate dict keyed by order id" the plan
         # calls for, kept OUT of state_df to avoid column explosion. Each value is an
         # Order (dummy_orders.json shape). In sim every order == one immediate fill.
@@ -2912,60 +2775,82 @@ class KalmanTradingApp:
 
     # ========================================================================
     # ACCOUNTING ENGINE (plan §7.3 / §4b) — the SOLE mutator of sim position/P&L.
+    #
+    # The RULES themselves (VWAP on grow, sign(pos)·(price−avg)·units on reduce, the
+    # two-leg split on a flip) now live in portutils.portfolio.book.Position.apply_fill,
+    # moved there VERBATIM so an offline scenario study books P&L exactly the way this
+    # app does — one implementation, one set of numbers. What stays here is the plumbing
+    # that is genuinely app-specific: the sim_* property shims below, the state_df row
+    # assembly (which stamps the whole ForecastView onto each bar) and the §7.5 order
+    # ledger (which needs the Tk contract and the live recommendation).
+    #
+    # The shims exist so this file keeps reading exactly as it did: ~30 call sites plus
+    # the replay scrubber's direct assignments address self.sim_position / sim_avg_entry /
+    # sim_realised, and every one of them now resolves to the single Position in self.book.
     # ========================================================================
+    @property
+    def sim_position(self):
+        # Signed open units (long > 0, short < 0) — read straight off the book, never a
+        # duplicate counter (two copies of a position is how books drift).
+        return self.book.position().qty
+
+    @sim_position.setter
+    def sim_position(self, value):
+        # Direct assignment is used by the replay scrubber, which rewinds to a recorded
+        # state_df row instead of replaying thousands of fills on every slider drag.
+        self.book.position().qty = float(value)
+
+    @property
+    def sim_avg_entry(self):
+        # VWAP of the CURRENTLY-OPEN units (0 when flat).
+        return self.book.position().avg_entry
+
+    @sim_avg_entry.setter
+    def sim_avg_entry(self, value):
+        self.book.position().avg_entry = float(value)
+
+    @property
+    def sim_realised(self):
+        # Cumulative crystallised P&L from closed units.
+        return self.book.position().realised
+
+    @sim_realised.setter
+    def sim_realised(self, value):
+        self.book.position().realised = float(value)
+
+    @property
+    def _sim_closed_this_bar(self):
+        # Units closed in the bar currently being marked — reset each bar by the ledger.
+        return self.book.position().closed_this_bar
+
+    @_sim_closed_this_bar.setter
+    def _sim_closed_this_bar(self, value):
+        self.book.position().closed_this_bar = float(value)
+
+    @property
+    def state_df(self):
+        # The per-bar frame is owned by the StateLedger now; this shim keeps every plot,
+        # widget and export in this file reading self.state_df exactly as before.
+        return self.ledger.df
+
+    @state_df.setter
+    def state_df(self, value):
+        self.ledger.df = value
+
     def apply_fill(self, fill):
         # Apply one Fill to the running book per the §4b rules. `fill.side` is +1 BUY /
         # -1 SELL; `fill.qty` is the absolute size. Updates sim_position, sim_avg_entry
         # and sim_realised in place and accumulates closed units for the current bar.
-        signed_qty = fill.side * fill.qty          # +long add or short reduce / -short add or long reduce
-        pos = self.sim_position
-        avg = self.sim_avg_entry
-        price = fill.price
-
-        if pos == 0 or (pos > 0 and signed_qty > 0) or (pos < 0 and signed_qty < 0):
-            # SAME DIRECTION (or opening from flat): position grows. New avg entry is the
-            # volume-weighted average of the old open units and the new fill.
-            new_pos = pos + signed_qty
-            # if no previous position, then the vwap is just the fill price; 
-            if pos == 0:
-                avg = price
-            # if the fill is in the same direction as the existing position, 
-            # we calculate a new average entry price by taking a weighted average of the 
-            # existing position and the new fill. The weights are based on the absolute 
-            # number of units of the existing position and the new fill quantity. 
-            # This ensures that the average entry price accurately reflects the 
-            # combined position after the fill is applied.
-            else:
-                avg = (avg * abs(pos) + price * abs(signed_qty)) / abs(new_pos)
-            self.sim_position = new_pos
-            self.sim_avg_entry = avg
-        else:
-            # OPPOSITE DIRECTION: the fill reduces (and maybe flips) the position.
-            closing = min(abs(signed_qty), abs(pos))   # can't close more than existing position
-            # Realised P&L on the closed units: sign(pos)·(price − avg)·units.
-            self.sim_realised += np.sign(pos) * (price - avg) * closing
-            # Accumulate the closed units for this bar so the state row can report it, then reset at the next bar close.
-            self._sim_closed_this_bar += closing
-            if abs(signed_qty) <= abs(pos):
-                # Pure reduction (no flip): avg entry price of the surviving units is unchanged.
-                # since signed_qty is negative, adding it to pos reduces the position size
-                self.sim_position = pos + signed_qty
-                if self.sim_position == 0:
-                    self.sim_avg_entry = 0.0
-            else:
-                # FLIP: close all old units (done above) then OPEN the remainder on the
-                # opposite side at the fill price (new leg, fresh avg entry).
-                remainder = abs(signed_qty) - abs(pos)
-                self.sim_position = np.sign(signed_qty) * remainder
-                self.sim_avg_entry = price
+        # Kept as a method (rather than callers reaching into self.book) because this is
+        # the documented choke point both execution backends funnel through (§7.3);
+        # returns the realised P&L this fill crystallised.
+        return self.book.apply_fill(fill)
 
     def _sim_unrealised(self, price):
         # Mark-to-market P&L on currently-open units at `price`. Zero when flat or when
         # no price is available. (last_price − avg_entry)·position carries the sign
         # correctly for both long and short books.
-        if price is None or not np.isfinite(price) or self.sim_position == 0:
-            return 0.0
-        return (price - self.sim_avg_entry) * self.sim_position
+        return self.book.position().unrealised(price)
 
     def _record_state_row(self, ts, price):
         # Append/refresh the state_df row for bar timestamp `ts`, marked at `price`
@@ -2975,21 +2860,17 @@ class KalmanTradingApp:
             price = self.sim_avg_entry or 0.0
         unreal = self._sim_unrealised(price)
         fv = self._last_forecast_view
+        # The ACCOUNTING half of the row — position, avg_entry_price, entry_cost,
+        # mark_value, unrealised_pnl, realised_pnl, total_pnl, last_price, closed_units —
+        # is written straight from the book by StateLedger.record at the bottom of this
+        # method. Assembled here is everything the accounting layer has no business
+        # knowing: the strategy context that justified the bar's trade.
         row = {
-            "position": self.sim_position,
-            "avg_entry_price": self.sim_avg_entry,
-            "entry_cost": self.sim_avg_entry * self.sim_position,
-            "mark_value": price * self.sim_position,
-            "unrealised_pnl": unreal,
-            "realised_pnl": self.sim_realised,
-            "total_pnl": self.sim_realised + unreal,
-            "last_price": price,
             # In sim, intended == filled (immediate fills); unfilled is the residual,
             # always ~0 here but wired so the live path (partial fills) reuses the plot.
             "intended": self.sim_position,
             "filled": self.sim_position,
             "unfilled": 0.0,
-            "closed_units": self._sim_closed_this_bar,
             "r_hat": fv.r_hat_h if fv is not None else np.nan,
             "q_low": fv.q_low if fv is not None else np.nan,
             "q_high": fv.q_high if fv is not None else np.nan,
@@ -3025,20 +2906,19 @@ class KalmanTradingApp:
                                 else self._sim_base_equity() + self.sim_realised + unreal),
             "portfolio_pnl": self.sim_realised + unreal,
         }
-        # One row per bar timestamp: overwrite if the bar is re-marked, else append.
-        self.state_df.loc[ts] = row
-        # Reset the per-bar closure accumulator now that it's been recorded.
-        self._sim_closed_this_bar = 0.0
+        # One row per bar timestamp: overwrite if the bar is re-marked, else append. The
+        # ledger merges the book's accounting fields with the strategy block above and
+        # resets the per-bar closure accumulator now that it's been recorded.
+        self.ledger.record(ts, self.book, price, extra=row)
 
     def _reset_accounting(self):
         # Wipe all sim accounting + the state_df. Called from clear_chart so a fresh
         # symbol/run doesn't inherit a stale ledger.
-        self.sim_position = 0.0
-        self.sim_avg_entry = 0.0
-        self.sim_realised = 0.0
-        self._sim_closed_this_bar = 0.0
+        # book.reset() clears position, avg entry, realised and the per-bar closure
+        # counter in one call — the four assignments this used to do individually.
+        self.book.reset()
         self.state_df = self.state_df.iloc[0:0]
-        self.exec_backend = SimExecutionBackend(self)
+        self.exec_backend = SimExecutionBackend(self.book, on_order=self._register_sim_order)
         self._last_forecast_view = None
         # Drop the order ledger too (§7.5) so a fresh run starts with no stale orders.
         self.orders = {}
