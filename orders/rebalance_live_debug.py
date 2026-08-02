@@ -564,10 +564,18 @@ print("cancel calls are commented out on purpose — uncomment the one you mean.
 # %% 15. What actually filled
 # 15. What actually filled
 #
-# Real executions, with commissions. Empty means "no fills in the window TWS serves"
-# (roughly 7 days), never "no trades ever".
+# Real executions, with commissions. Empty means "no fills in the window TWS serves",
+# never "no trades ever".
+#
+# That window is SINCE MIDNIGHT TODAY — not the 7 days this comment used to claim. Verified
+# against live TWS on 2026-08-02: an unfiltered ExecutionFilter() returned 0 fills with
+# execDetailsEnd received, while the TWS Trade Log showed JUL 27-31. `days_back` is a floor on
+# the filter, not a reach back through that ceiling. Real history needs Flex Web Service.
+#
+# `client_id=161` NARROWS to fills placed by this harness's own client. The default of 0 is the
+# broader ask and also catches GUI-placed fills; neither returned anything on a Sunday.
 days_back = 7
-fills = ib.get_executions_data(app, days_back=7)
+fills = ib.get_executions_data(app, client_id = 161, days_back=7)
 print(f"{len(fills)} fills in the last {days_back} days")
 if len(fills):
     display(fills[["ts", "symbol", "side", "shares", "price"]])
