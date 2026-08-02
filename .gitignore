@@ -45,3 +45,8 @@ sandbox/
 
 # Archived docs — superseded plans, kept locally only
 archive/
+
+# CARL — per-session state (dedup signatures, domain toggles) written by
+# carl-hook.py into the *nearest* .carl scope, which is now this repo.
+# Pure churn; the domain config in .carl/carl.json IS tracked.
+.carl/sessions/

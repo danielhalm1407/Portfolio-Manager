@@ -1,0 +1,32 @@
+name = "Portfolio-Manager"
+version = "0.2.0"
+status = "active"
+path = "Portfolio-Manager"
+tags = []
+
+[paul]
+version = "1.4.0"
+source = "https://chrisai.cv/skool"
+
+[milestone]
+name = "Live execution against IBKR"
+version = "0.2.0"
+status = "in_progress"
+phases = 5
+
+[phase]
+number = 4
+name = "IBKR read path"
+status = "complete"
+plans_completed = 4
+
+[loop]
+position = "IDLE"
+
+[satellite]
+groom = true
+
+[stats]
+total_plans = 14
+total_phases = 9
+last_activity = "2026-08-02T02:30:00Z"
