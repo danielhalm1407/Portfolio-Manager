@@ -12,18 +12,23 @@ See: .paul/PROJECT.md (updated 2026-08-01)
 
 **Core value:** A market narrative becomes a defensible target weight, and that target weight becomes
 a real position — with the accounting, attribution and order verification needed to trust each step.
-**Current focus:** Phase 2 — reopened 2026-08-23 for 02-02/02-03 (trade rationale through the
+**Current focus:** Phase 11 — long-history data foundation, the first phase of milestone v0.4
+(*does hedging actually work?*), which is the substantive question the project exists to answer.
+Also open: Phase 2 — reopened 2026-08-23 for 02-02/02-03 (trade rationale through the
 rules into the order ledger). Phase 4 — reopened 2026-08-03 for plan 04-05 (executions client-id scoping,
 `ts` timezone semantics, terminal debug transparency).
 
 ## Current Position
 
-Milestone: v0.2 Live execution against IBKR
-Phase: 4 — IBKR read path — **REOPENED 2026-08-03** (third reopening)
-Plan: 02-02 and 02-03 created 2026-08-23, awaiting approval. 04-05 not yet created; CONTEXT.md
-written and ready for /paul:plan. 07-02 still open.
-Status: Pre-PLAN — /paul:discuss complete
-Last activity: 2026-08-23 — Phase 2 reopened; 02-02 (rationale at the rule, into Order, out as
+Milestone: v0.4 Does hedging actually work? (added 2026-08-24) — v0.2 still in progress alongside
+Phase: 11 of 15 (Long-history data foundation) — Planning
+Plan: 11-01 created 2026-08-24, awaiting approval. Also open: 02-02 and 02-03 (created 2026-08-23,
+awaiting approval), 04-05 (CONTEXT.md written, not yet planned), 07-02 (planned, not applied).
+Status: PLAN created, awaiting approval
+Last activity: 2026-08-24 — Added milestone v0.4 (phases 11-15) and created 11-01-PLAN.md.
+Survey found the binding constraint: every cached panel is 250 rows over one regime, and the
+codebase has no option support at all.
+Prior: 2026-08-23 — Phase 2 reopened; 02-02 (rationale at the rule, into Order, out as
 JSON) and 02-03 (hoverable trade plot + call-chain docs) written from a drafted plan.
 Prior: 2026-08-22 — Reconciled STATE/ROADMAP (PAUL rule 6): Phase 4 status, Phase 10 row +
 detail section, 04-05 listed, milestone progress recounted in whole phases. No code touched.
@@ -39,13 +44,14 @@ Progress:
 - Phase 4: [████████░░] 80% (4 of 5 plans complete — 04-05 scoped, not written)
 - Phase 7: [█████░░░░░] 50% (1 of 2 plans complete — 07-02 planned, not applied)
 - Phase 2: [███░░░░░░░] 33% (1 of 3 plans complete — 02-02 and 02-03 planned, not applied)
+- Milestone v0.4: [░░░░░░░░░░] 0% (0 of 5 phases — 11-01 planned, not applied)
 
 ## Loop Position
 
 Current loop state:
 ```
 PLAN ──▶ APPLY ──▶ UNIFY
-  ○        ○        ○     [Pre-PLAN — discussion done, /paul:plan 4 not yet run]
+  ✓        ○        ○     [11-01 created, awaiting approval]
 ```
 
 Phases 1-6 and 8 were completed **before** PAUL was adopted. Their SUMMARY files are
@@ -72,6 +78,10 @@ shipped, not as evidence the loop was followed.
 | 2026-08-03 | **The 2026-08-02 row above is only half right — `ExecutionFilter.clientId` WAS a bug in code** | Five fills executed 2026-08-03 and cell 15 still returned nothing, so the midnight ceiling could not be the active cause: those fills were inside the served window. The filter asked as client 161 (the debug harness) while the orders had been placed by 151 (`pipelines/rebalance_live.py`). Setting the filter to 151 returned all five. The ceiling remains real and separately confirmed (every returned row was stamped today despite `days_back=7`) — it was simply not what was biting |
 | 2026-08-06 | Added Phase 10: Deployment — web app, appended to v0.2 rather than numbered 9 | 9 was already claimed by the v0.3 research phase. Appending avoids renumbering an existing phase and its directory, at the cost of v0.2 no longer being a contiguous range (4-8, 10). The alternative — a new v0.4 milestone — was raised and the user chose the phase |
 | 2026-08-06 | Web app scope is dashboard PLUS gated live-rebalancer control, not read-only | Chosen explicitly over a read-only dashboard and over a static GitHub Pages showcase. Consequence: the dry-run approval gate, written for a terminal, has to be re-derived for a browser — and static hosting is largely ruled out, since it can hold no secrets and cannot reach TWS |
+| 2026-08-24 | v0.4 is a new milestone of five phases, not an extension of Phase 2 | The claim under test — hedge structures improve risk-adjusted returns across regimes, and in-sample optima survive out-of-sample — needs long-history data, an option overlay engine, a walk-forward harness and regime labelling. Four subsystems is a milestone. Phase 2 remains what it is: the one-year, one-regime demonstration of the mechanic |
+| 2026-08-24 | Phase 11 is the data foundation, and it comes first | Every cached panel is 250 rows spanning 2025-07-28 to 2026-07-24. On one regime the v0.4 claim is not weakly supported, it is untestable. Phases 12-15 are all blocked behind it |
+| 2026-08-24 | The option overlay is a NEW subsystem, not an extension of the weight-based rules | `strike`, `secType="OPT"`, `right` and `expiry` appear nowhere in `src/portutils/`. The rolling collar of the Obsidian hedge catalogue needs strike selection, pricing, theta and a roll calendar — none of which the `propose() -> {symbol: units}` contract currently expresses |
+| 2026-08-24 | Probe the data ceiling before designing pagination | Phase 4 spent two plans on an executions limit taken from documentation that proved wrong; the standing decision is that the running TWS outranks written sources. Task 1 of 11-01 is a probe, and the source-split decision is a blocking checkpoint on its findings |
 | 2026-08-23 | Trade rationale originates at the RULE, not derived post-hoc from the blotter | A post-hoc deriver would be guessing. `ConstantMixRule.propose` already computes equity, drift (`actual_w`, discarded outside the tolerance branch) and holds the `book`, so it can state at proposal time whether a sale crystallises a gain or a loss. A leg sold because it FELL LESS than the book can book a realised loss — only the rule knows that |
 | 2026-08-23 | `propose()`'s signature and return type stay unchanged; rationale rides a same-bar `last_rationale` attribute | Changing the return type would touch kts.py and both parity suites for zero accounting benefit |
 | 2026-08-23 | The JSON order ledger is reused, not reinvented | `Order.to_dict()` and the `orders/dummy_orders.json` schema already exist and are complete; the offline path simply never wired them up. The wide DataFrame became the de-facto record by omission, not by decision |
@@ -123,11 +133,19 @@ shipped, not as evidence the loop was followed.
 
 ## Session Continuity
 
-Last session: 2026-08-03
-Stopped at: /paul:discuss 4 complete — CONTEXT.md written for plan 04-05. No code written.
-Next action: Run **/paul:plan 4** to create 04-05 from
-`.paul/phases/04-ibkr-read-path/CONTEXT.md`.
-Resume file: .paul/HANDOFF-2026-08-03.md
+Last session: 2026-08-24
+Stopped at: Plan 11-01 created (milestone v0.4 opened).
+Next action: Review and approve, then run
+**/paul:apply .paul/phases/11-long-history-data/11-01-PLAN.md**
+Resume file: .paul/phases/11-long-history-data/11-01-PLAN.md
+
+**v0.4 context (2026-08-24).** The milestone asks whether portfolio insurance actually pays and how
+much of it a retail investor needs. The hedge structures are catalogued in the Obsidian vault at
+`../obsidian_notes/Knowledge/Finance/Hedging/` — the rolling collar is the one structure documented
+as actually rolling (63-day reset), and `How to roll a put hedge` holds the roll mechanics. 11-01 is
+autonomous: false because the source-split decision is a blocking checkpoint on probe evidence.
+
+**Older Phase 4 context (2026-08-03), still open:**
 Git strategy: feat/live-rebalancer-multicurrency (existing branch, no WIP commit taken)
 Resume context:
 - Phase 4 reopened. The 2026-08-02 "midnight ceiling" explanation was only half the story —

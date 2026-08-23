@@ -9,24 +9,26 @@ version = "1.4.0"
 source = "https://chrisai.cv/skool"
 
 [milestone]
-name = "Live execution against IBKR"
-version = "0.2.0"
+name = "Does hedging actually work?"
+version = "0.4.0"
 status = "in_progress"
 phases = 5
 
 [phase]
-number = 4
-name = "IBKR read path"
-status = "complete"
-plans_completed = 4
+number = 11
+name = "Long-history data foundation"
+status = "planning"
+plans_completed = 0
 
 [loop]
-position = "IDLE"
+position = "PLAN"
+plan = "11-01"
+plan_path = "phases/11-long-history-data/11-01-PLAN.md"
 
 [satellite]
 groom = true
 
 [stats]
-total_plans = 14
-total_phases = 9
-last_activity = "2026-08-02T02:30:00Z"
+total_plans = 17
+total_phases = 15
+last_activity = "2026-08-24T00:00:00Z"
