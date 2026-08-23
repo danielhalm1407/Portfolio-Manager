@@ -20,6 +20,9 @@ v0.2 on 2026-08-06: the execution half, once trustworthy, gets a web front end.
 | Version | Name | Phases | Status | Completed |
 |---------|------|--------|--------|-----------|
 | v0.1 | Accounting & attribution engine | 1-3 | ✅ Shipped | 2026-07-26 |
+
+> Phase 2 was reopened on 2026-08-23 for plans 02-02/02-03 (trade rationale). v0.1 stays shipped —
+> the reopening adds reasoning on top of shipped accounting, it does not reverse it.
 | v0.2 | Live execution against IBKR | 4-8, 10 | 🚧 In Progress | - |
 | v0.3 | Research half | 9 | 📋 Planned | - |
 
@@ -40,7 +43,7 @@ Progress: [█████░░░░░] 50%
 | Phase | Name | Plans | Status | Completed |
 |-------|------|-------|--------|-----------|
 | 1 | P&L accounting engine | 1 | Complete | 2026-08-01 |
-| 2 | Rebalancing as realised P&L | 1 | Complete | 2026-07-25 |
+| 2 | Rebalancing as realised P&L | 3 | In progress (reopened 2026-08-23) | - |
 | 3 | Return attribution consolidation | 1 | Complete | 2026-07-26 |
 | 4 | IBKR read path | 5 | In progress (reopened 2026-08-03) | - |
 | 5 | Live multi-currency rebalancer | 1 | Complete | 2026-07-26 |
@@ -81,6 +84,13 @@ universe and a reproducible study.
 
 **Plans:**
 - [x] 02-01: Rebalancing as the natural source of realised P&L
+- [ ] 02-02: Trade rationale originates at the rule, rides `ctx` into an `Order`, exports as JSON
+- [ ] 02-03: Hoverable trade plot, `run_books` call chain documented, `rebalance_study.md` written
+
+**Reopened 2026-08-23.** 02-01 shipped the accounting; the offline path records no *reason* for any
+trade. `PortfolioSimulator` calls `execute` with no `ctx` and `on_order=None`, so the `Order` ledger
+and its `dummy_orders.json` serialization — both complete in `fills.py` — are reached only by
+`orders/kts.py`. 02-02 connects them; 02-03 renders and documents the result.
 
 ### Phase 3: Return attribution consolidation
 
@@ -211,4 +221,4 @@ phase. v0.2 is therefore a non-contiguous range (4-8, 10) by choice — see the 
 
 ---
 *Roadmap created: 2026-08-01 — migrated from 12 pre-existing plans in `.claude/plans/`*
-*Last updated: 2026-08-22 — state reconciliation (PAUL rule 6)*
+*Last updated: 2026-08-23 — Phase 2 reopened for 02-02/02-03 (trade rationale)*

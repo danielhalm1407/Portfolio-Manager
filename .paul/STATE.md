@@ -12,16 +12,20 @@ See: .paul/PROJECT.md (updated 2026-08-01)
 
 **Core value:** A market narrative becomes a defensible target weight, and that target weight becomes
 a real position — with the accounting, attribution and order verification needed to trust each step.
-**Current focus:** Phase 4 — reopened 2026-08-03 for plan 04-05 (executions client-id scoping,
+**Current focus:** Phase 2 — reopened 2026-08-23 for 02-02/02-03 (trade rationale through the
+rules into the order ledger). Phase 4 — reopened 2026-08-03 for plan 04-05 (executions client-id scoping,
 `ts` timezone semantics, terminal debug transparency).
 
 ## Current Position
 
 Milestone: v0.2 Live execution against IBKR
 Phase: 4 — IBKR read path — **REOPENED 2026-08-03** (third reopening)
-Plan: 04-05 not yet created; CONTEXT.md written and ready for /paul:plan. 07-02 still open.
+Plan: 02-02 and 02-03 created 2026-08-23, awaiting approval. 04-05 not yet created; CONTEXT.md
+written and ready for /paul:plan. 07-02 still open.
 Status: Pre-PLAN — /paul:discuss complete
-Last activity: 2026-08-22 — Reconciled STATE/ROADMAP (PAUL rule 6): Phase 4 status, Phase 10 row +
+Last activity: 2026-08-23 — Phase 2 reopened; 02-02 (rationale at the rule, into Order, out as
+JSON) and 02-03 (hoverable trade plot + call-chain docs) written from a drafted plan.
+Prior: 2026-08-22 — Reconciled STATE/ROADMAP (PAUL rule 6): Phase 4 status, Phase 10 row +
 detail section, 04-05 listed, milestone progress recounted in whole phases. No code touched.
 Prior: 2026-08-06 — Added Phase 10: Deployment — web app (dashboard + gated live rebalancer
 control; hosting deliberately undecided). Prior: 2026-08-03 — diagnosed the empty-executions bug as
@@ -34,6 +38,7 @@ Progress:
   whole phases only, which is why this reads lower than the earlier 58%)
 - Phase 4: [████████░░] 80% (4 of 5 plans complete — 04-05 scoped, not written)
 - Phase 7: [█████░░░░░] 50% (1 of 2 plans complete — 07-02 planned, not applied)
+- Phase 2: [███░░░░░░░] 33% (1 of 3 plans complete — 02-02 and 02-03 planned, not applied)
 
 ## Loop Position
 
@@ -67,6 +72,10 @@ shipped, not as evidence the loop was followed.
 | 2026-08-03 | **The 2026-08-02 row above is only half right — `ExecutionFilter.clientId` WAS a bug in code** | Five fills executed 2026-08-03 and cell 15 still returned nothing, so the midnight ceiling could not be the active cause: those fills were inside the served window. The filter asked as client 161 (the debug harness) while the orders had been placed by 151 (`pipelines/rebalance_live.py`). Setting the filter to 151 returned all five. The ceiling remains real and separately confirmed (every returned row was stamped today despite `days_back=7`) — it was simply not what was biting |
 | 2026-08-06 | Added Phase 10: Deployment — web app, appended to v0.2 rather than numbered 9 | 9 was already claimed by the v0.3 research phase. Appending avoids renumbering an existing phase and its directory, at the cost of v0.2 no longer being a contiguous range (4-8, 10). The alternative — a new v0.4 milestone — was raised and the user chose the phase |
 | 2026-08-06 | Web app scope is dashboard PLUS gated live-rebalancer control, not read-only | Chosen explicitly over a read-only dashboard and over a static GitHub Pages showcase. Consequence: the dry-run approval gate, written for a terminal, has to be re-derived for a browser — and static hosting is largely ruled out, since it can hold no secrets and cannot reach TWS |
+| 2026-08-23 | Trade rationale originates at the RULE, not derived post-hoc from the blotter | A post-hoc deriver would be guessing. `ConstantMixRule.propose` already computes equity, drift (`actual_w`, discarded outside the tolerance branch) and holds the `book`, so it can state at proposal time whether a sale crystallises a gain or a loss. A leg sold because it FELL LESS than the book can book a realised loss — only the rule knows that |
+| 2026-08-23 | `propose()`'s signature and return type stay unchanged; rationale rides a same-bar `last_rationale` attribute | Changing the return type would touch kts.py and both parity suites for zero accounting benefit |
+| 2026-08-23 | The JSON order ledger is reused, not reinvented | `Order.to_dict()` and the `orders/dummy_orders.json` schema already exist and are complete; the offline path simply never wired them up. The wide DataFrame became the de-facto record by omission, not by decision |
+| 2026-08-23 | Split into two plans rather than one | The drafted work is four workstreams; the PLAN template caps a plan at 2-3 tasks. 02-02 is the engine, 02-03 the rendering and docs, with `depends_on: ["02-02"]` |
 | 2026-08-22 | State reconciled: ROADMAP's "4 of 5 / 80%" was phase-4 plan progress sitting in a milestone field | v0.2 spans SIX phases (4-8, 10). ROADMAP also carried Phase 4 as `Complete 2026-08-02` after its 2026-08-03 reopening, had no Phase 10 row or detail section despite Phase 10 being in the milestone range and having a directory, and omitted 04-05 from Phase 4's plan list. Milestone progress is now counted in whole phases (3 of 6 = 50%), replacing the 3.5/6 half-credit that no PAUL count supports |
 | 2026-08-03 | The Master API client ID is NOT required to see another client's executions | The connection was still `CLIENT_ID = 161` when the five fills came back; only `ExecutionFilter.clientId` changed, to 151. So connection-level scoping was never the restriction and the filter alone was. An earlier connection-scoping theory is wrong. The prior observation that `client_id=0` "returned nothing" was taken on a Sunday with no fills, and tested nothing |
 
