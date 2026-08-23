@@ -572,10 +572,10 @@ print("cancel calls are commented out on purpose — uncomment the one you mean.
 # execDetailsEnd received, while the TWS Trade Log showed JUL 27-31. `days_back` is a floor on
 # the filter, not a reach back through that ceiling. Real history needs Flex Web Service.
 #
-# `client_id=161` NARROWS to fills placed by this harness's own client. The default of 0 is the
+# `client_id=151` NARROWS to fills placed by this harness's own client. The default of 0 is the
 # broader ask and also catches GUI-placed fills; neither returned anything on a Sunday.
 days_back = 7
-fills = ib.get_executions_data(app, client_id = 161, days_back=7)
+fills = ib.get_executions_data(app, client_id = 151, days_back=7)
 print(f"{len(fills)} fills in the last {days_back} days")
 if len(fills):
     display(fills[["ts", "symbol", "side", "shares", "price"]])

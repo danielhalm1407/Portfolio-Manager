@@ -1,4 +1,5 @@
 # %% 1. Import libraries
+
 # 1. Import libraries
 #
 # Interactive companion to src/pipelines/rebalance_study.py. Structured as a cell script in
@@ -29,7 +30,7 @@ from IPython.display import display
 
 # research/ is not on the package path (it is not part of the installed portutils), so add
 # the repo's src/ before importing anything from portutils or pipelines.
-REPO = pathlib.Path(__file__).resolve().parents[1]
+REPO = pathlib.Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO / "src"))
 
 import portutils

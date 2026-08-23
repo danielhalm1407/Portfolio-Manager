@@ -12,23 +12,24 @@ The project moves in three arcs. First an accounting and attribution engine capa
 book actually earned and why (v0.1). Then the execution half — reading an IBKR account, valuing it in
 base currency, turning target weights into acknowledged orders, and being able to say precisely what
 happened to each one (v0.2). Finally the research half that feeds the allocator: theme extraction
-from market commentary into scored tilts and conviction briefs (v0.3).
+from market commentary into scored tilts and conviction briefs (v0.3). Phase 10 was appended to
+v0.2 on 2026-08-06: the execution half, once trustworthy, gets a web front end.
 
 ## Milestones
 
 | Version | Name | Phases | Status | Completed |
 |---------|------|--------|--------|-----------|
 | v0.1 | Accounting & attribution engine | 1-3 | ✅ Shipped | 2026-07-26 |
-| v0.2 | Live execution against IBKR | 4-8 | 🚧 In Progress | - |
+| v0.2 | Live execution against IBKR | 4-8, 10 | 🚧 In Progress | - |
 | v0.3 | Research half | 9 | 📋 Planned | - |
 
 ## Current Milestone
 
 **v0.2 Live execution against IBKR** (v0.2.0)
 Status: In progress
-Phases: 4 of 5 complete
+Phases: 3 of 6 complete (5, 6, 8) — 4 and 7 are reopened/in progress, 10 not started
 
-Progress: [████████░░] 80%
+Progress: [█████░░░░░] 50%
 
 ## Phases
 
@@ -41,12 +42,13 @@ Progress: [████████░░] 80%
 | 1 | P&L accounting engine | 1 | Complete | 2026-08-01 |
 | 2 | Rebalancing as realised P&L | 1 | Complete | 2026-07-25 |
 | 3 | Return attribution consolidation | 1 | Complete | 2026-07-26 |
-| 4 | IBKR read path | 4 | Complete | 2026-08-02 |
+| 4 | IBKR read path | 5 | In progress (reopened 2026-08-03) | - |
 | 5 | Live multi-currency rebalancer | 1 | Complete | 2026-07-26 |
 | 6 | Order verification & recovery | 2 | Complete | 2026-07-26 |
 | 7 | Staged live verification runbook | 2 | In progress | - |
 | 8 | Documentation hub | 1 | Complete | 2026-08-01 |
 | 9 | Research half — themes to tilts | TBD | Not started | - |
+| 10 | Deployment — web app | TBD | Not started | - |
 
 ## Phase Details
 
@@ -110,6 +112,7 @@ universe and a reproducible study.
 - [x] 04-02: Fix `get_equity_data` hangs + rejects non-US holdings
 - [x] 04-03: Render backcast cells regardless of verdict, marked per symbol
 - [x] 04-04: UTC dash `ExecutionFilter.time`; the midnight-today executions ceiling documented; terminal cell runner
+- [ ] 04-05: Executions client-id scoping, verified `ts` timezone semantics, transparent terminal debug path — scoped in `CONTEXT.md`, not yet planned
 
 ### Phase 5: Live multi-currency rebalancer
 
@@ -188,6 +191,24 @@ allocator.
 **Plans:**
 - [ ] 09-01: To be defined during `/paul:plan`
 
+### Phase 10: Deployment — web app
+
+**Goal:** A browser front end over the execution stack: a dashboard of positions, P&L and attribution,
+plus a gated control for the live rebalancer.
+**Depends on:** Phase 7 (the runbook must prove the stack before a browser is allowed to drive it)
+**Research:** Likely (hosting, secret handling, how the approval gate re-expresses in a browser)
+
+**Scope:**
+- Dashboard: positions, P&L split, attribution figures
+- Live-rebalancer control behind an explicit approval gate — the dry-run table re-derived for a browser
+- Hosting deliberately undecided; static hosting is largely ruled out (no secrets, no TWS reachability)
+
+**Plans:**
+- [ ] 10-01: To be defined during `/paul:plan`
+
+**Numbering note:** appended as 10 rather than 9 because 9 was already claimed by the v0.3 research
+phase. v0.2 is therefore a non-contiguous range (4-8, 10) by choice — see the 2026-08-06 decision.
+
 ---
 *Roadmap created: 2026-08-01 — migrated from 12 pre-existing plans in `.claude/plans/`*
-*Last updated: 2026-08-01*
+*Last updated: 2026-08-22 — state reconciliation (PAUL rule 6)*

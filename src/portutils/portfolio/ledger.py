@@ -11,6 +11,43 @@ The split here is: this module writes the accounting fields, and the caller pass
 anything else it wants stamped on the row as ``extra``. kts.py hands over its
 recommendation block; an offline scenario hands over nothing. Same frame shape, no
 strategy knowledge leaking into the accounting layer.
+
+WHAT THE CALLER HANDS OVER
+--------------------------
+``book`` is a ``portutils.portfolio.book.Book``: a dict of ``Position``s keyed by symbol
+(signed ``qty``, VWAP ``avg_entry``, cumulative ``realised``, per-bar ``closed_this_bar``)
+plus the ``base_equity`` the P&L is measured on top of. The ledger only ever READS it —
+via ``Position.snapshot(price)`` / ``Book.snapshot(prices)`` — and then clears the per-bar
+counters. It never applies a fill; ``apply_fill`` remains the sole mutator.
+
+``price`` / ``prices`` are the MARK, not a fill price: the single-asset path takes one
+scalar, the multi-asset path a ``{symbol: price}`` mapping. Marks are an input rather than
+state on the book because unrealised P&L changes on every tick and is therefore never
+stored as authoritative — it is recomputed at the moment of marking.
+
+``extra`` is the STRATEGY / CONTEXT half of the row: any flat ``{column: value}`` dict the
+caller wants stamped alongside the accounting fields, merged last so it wins on a key
+clash. It is the "why" behind the bar. In practice:
+  * kts.py (``_record_state_row``) stamps the whole recommendation block — ``r_hat``,
+    ``q_low``/``q_high``, ``direction``, previous/target/capped/recommended weights,
+    ``weight_threshold``, ``binding_cap``, ``intended``/``filled``/``unfilled`` qty,
+    ``portfolio_value``/``portfolio_pnl``.
+  * the scenario simulator stamps portfolio-level context — ``equity``,
+    ``gross_exposure``, ``n_trades``, ``turnover_notional``/``turnover_frac``.
+  * an offline scenario may stamp nothing at all; the frame shape is unchanged.
+Keys the schema did not anticipate simply widen the frame (see ``_put_row``), so earlier
+bars show NaN for a column that only starts existing mid-run.
+
+WHEN A ROW IS WRITTEN
+---------------------
+Per BAR CLOSE, plus on-demand whenever the book actually moves — the union of the two,
+not the lesser. kts.py calls it from the bar-close hook, from every replay bar, and again
+immediately after a manual/auto trade so the panel reflects the click rather than waiting
+for the next close. That is safe because ``_put_row`` keys on the bar timestamp: a re-mark
+of the same bar OVERWRITES its row instead of appending a second one, so the frame stays
+one-row-per-bar however many times a bar is marked. The one field that is genuinely
+per-bar rather than cumulative — ``closed_units`` — is why ``reset_bar_counters()`` fires
+right after the row is written.
 """
 
 import numpy as np
