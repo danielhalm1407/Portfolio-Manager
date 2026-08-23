@@ -41,7 +41,7 @@ import math
 import pathlib
 import threading
 import time
-from datetime import datetime, timedelta  # timedelta builds the executions lookback window
+from datetime import datetime, timedelta, timezone  # timedelta builds the executions lookback window; timezone stamps it UTC
 from threading import Thread  # connect_ib spins app.run() on a daemon reader thread
 
 import pandas as pd
@@ -2333,12 +2333,22 @@ def get_executions_data(app, days_back=7, symbols=None, sec_type='', side='',
                         client_id=0, timeout=15):
     """Fetch recent executions (fills) with their commissions, as a DataFrame.
 
-    ⚠ THE 7-DAY CEILING — read this before trusting an empty result.
-    TWS serves only a SHORT recent window of executions: today's fills by default, and at
-    most roughly the **last 7 days** even with an explicit ExecutionFilter time. This is a
-    TWS limitation, not a bug here and not something a bigger `days_back` can defeat. An
-    empty frame therefore means "no fills in the window TWS will serve", NOT "no trades
-    ever" — do not build a P&L history on the assumption that it is the latter.
+    ⚠ THE MIDNIGHT CEILING — read this before trusting an empty result.
+    IB is explicit: "by default, only those executions occurring since midnight for that
+    particular account will be delivered". Not 24 rolling hours, not a week — **since midnight
+    today**. Yesterday's fills are already gone by this route.
+
+    The window is widened from the GUI, never from here. TWS's Trade Log setting
+    *"Show trades for ..."* must be changed to reach further back (up to 7 days); until it is,
+    no argument to this function can help, because ExecutionFilter.time only NARROWS what TWS
+    has already decided to serve — "only those executions reported after the specified time
+    will be returned". Asking for 7 days sets a floor, not a reach. And under **IB Gateway**
+    there is no lever at all: Gateway cannot change the Trade Log's settings, so it is
+    permanently limited to executions since midnight.
+
+    This is a TWS limitation, not a bug here. An empty frame therefore means "no fills in the
+    window TWS will serve", NOT "no trades ever" — do not build a P&L history on the
+    assumption that it is the latter.
 
     For genuine full history you need IBKR's Flex Web Service (a query + token created in
     Account Management) or a manually downloaded activity statement. Neither is available
@@ -2349,8 +2359,12 @@ def get_executions_data(app, days_back=7, symbols=None, sec_type='', side='',
     app : IBApp
         A connected app instance.
     days_back : int
-        How far back to ask for. Values beyond ~7 are accepted but TWS will simply return
-        what it has; the request does not fail, it just returns less than you asked for.
+        A FLOOR on the filter, not a reach. It sets ExecutionFilter.time to midnight this many
+        days ago, and TWS then returns whatever it was already willing to serve that falls
+        after that instant — by default only today's fills (see the ceiling note above). Any
+        value is accepted and the request never fails; a larger one simply lowers a floor that
+        TWS has usually already cleared. To genuinely see more, change the Trade Log setting
+        in TWS.
     symbols : str | list[str] | None
         Optional symbol filter. A list is applied client-side after the request, because
         ExecutionFilter carries only ONE symbol — asking for several server-side would
@@ -2377,12 +2391,35 @@ def get_executions_data(app, days_back=7, symbols=None, sec_type='', side='',
 
     # --- Build the filter -------------------------------------------------
     exec_filter = ExecutionFilter()
-    # IB expects "yyyymmdd HH:MM:SS" for the filter's start time. We anchor the window at
-    # midnight `days_back` days ago so a request made mid-afternoon still covers whole days
-    # rather than a ragged part-day at the far end.
+    # The filter's start time goes out in UTC dash notation: "yyyymmdd-HH:MM:SS".
+    #
+    # TWS accepts TWO forms and we deliberately pick the second. Its own error 10314 spells
+    # them out: "The correct format is yyyymmdd hh:mm:ss xx/xxxx ... E.g.: 20031126 15:59:00
+    # US/Eastern ... You can also provide yyyymmddd-hh:mm:ss time is in UTC. Note that there
+    # is a dash between the date and time in UTC notation." So a SPACE takes an explicit
+    # timezone suffix, and a DASH means UTC and must carry NO suffix — appending " UTC" to
+    # the dash form is rejected outright.
+    #
+    # The third case is the one to avoid: a space with no timezone at all. That is what this
+    # code used to send, and TWS answers it with error 2174 — "You submitted request with
+    # date-time attributes without explicit time zone ... Implied time zone functionality
+    # will be removed in the next API release". It still works today, but it is deprecated
+    # and dated. Converting to UTC and using the dash form needs no timezone-database name,
+    # so it cannot drift with the machine's locale either.
+    #
+    # Note the conversion is real, not cosmetic: astimezone() shifts the instant off local
+    # time. Merely relabelling local time as UTC would move the floor by the offset.
+    #
+    # Note also that this bound is nearly inert. Per the ExecutionFilter reference, "only
+    # those executions reported after the specified time will be returned" — it NARROWS an
+    # already-capped set and can never widen it (see the ceiling note in the docstring). A
+    # `days_back` of 7 therefore asks for a floor TWS has usually already cleared.
+    #
+    # We anchor the window at midnight `days_back` days ago so a request made mid-afternoon
+    # still covers whole days rather than a ragged part-day at the far end.
     start = (datetime.now() - timedelta(days=days_back)).replace(
         hour=0, minute=0, second=0, microsecond=0)
-    exec_filter.time = start.strftime('%Y%m%d %H:%M:%S')
+    exec_filter.time = start.astimezone(timezone.utc).strftime('%Y%m%d-%H:%M:%S')
     exec_filter.clientId = client_id
     if sec_type:
         exec_filter.secType = sec_type

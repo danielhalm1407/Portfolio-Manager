@@ -1,0 +1,118 @@
+{
+  "version": 1,
+  "config": {},
+  "domains": {
+    "PAUL": {
+      "state": "active",
+      "always_on": true,
+      "recall": [
+        "paul",
+        "plan phase",
+        "apply phase",
+        "unify phase",
+        "PLAN.md",
+        "STATE.md",
+        "development workflow",
+        "vibe coding",
+        "ai development",
+        "planning framework",
+        ".paul/"
+      ],
+      "exclude": [],
+      "rules": [
+        {
+          "id": 0,
+          "text": "PAUL governs structured AI development via Plan-Apply-Unify loop. Requires .paul/ directory.",
+          "added": "2026-08-01",
+          "last_reviewed": null,
+          "source": "manual"
+        },
+        {
+          "id": 1,
+          "text": "LOAD BEFORE EXECUTE: Before ANY /paul:* command, MUST Read the command file (./.claude/commands/paul/{name}.md) AND every file listed in its <execution_context> block (./.claude/paul-framework/workflows/*.md and templates/*.md). NEVER execute PAUL commands from memory or inference - always load the actual files first. If files cannot be loaded, STOP and inform user.",
+          "added": "2026-08-01",
+          "last_reviewed": null,
+          "source": "manual"
+        },
+        {
+          "id": 2,
+          "text": "No implementation code without approved PLAN.md. Research/exploration OK. Violation = stop, request approval.",
+          "added": "2026-08-01",
+          "last_reviewed": null,
+          "source": "manual"
+        },
+        {
+          "id": 3,
+          "text": "Every APPLY must be followed by UNIFY. UNIFY reconciles plan vs actual, updates STATE.md, logs decisions.",
+          "added": "2026-08-01",
+          "last_reviewed": null,
+          "source": "manual"
+        },
+        {
+          "id": 4,
+          "text": "Respect PLAN.md \"Boundaries\" / \"DO NOT CHANGE\" sections. Stop and confirm before modifying protected items.",
+          "added": "2026-08-01",
+          "last_reviewed": null,
+          "source": "manual"
+        },
+        {
+          "id": 5,
+          "text": "When blocked: document in STATE.md Blockers, notify human, await approval before workarounds.",
+          "added": "2026-08-01",
+          "last_reviewed": null,
+          "source": "manual"
+        },
+        {
+          "id": 6,
+          "text": "At phase transition: VERIFY state consistency (STATE.md, PROJECT.md, ROADMAP.md aligned). Blocking error if misaligned. Re-read full files, check all fields.",
+          "added": "2026-08-01",
+          "last_reviewed": null,
+          "source": "manual"
+        },
+        {
+          "id": 7,
+          "text": "Tasks require verification criteria: <verify>[proof of success]</verify>. No verify = cannot complete.",
+          "added": "2026-08-01",
+          "last_reviewed": null,
+          "source": "manual"
+        },
+        {
+          "id": 8,
+          "text": "Log all APPLY deviations: what, why, downstream impact. Audit trail for UNIFY.",
+          "added": "2026-08-01",
+          "last_reviewed": null,
+          "source": "manual"
+        },
+        {
+          "id": 9,
+          "text": "Use BDD acceptance criteria: Given [precondition] / When [action] / Then [outcome].",
+          "added": "2026-08-01",
+          "last_reviewed": null,
+          "source": "manual"
+        },
+        {
+          "id": 10,
+          "text": "Size tasks for single session (~50% context). Split larger tasks during planning.",
+          "added": "2026-08-01",
+          "last_reviewed": null,
+          "source": "manual"
+        },
+        {
+          "id": 11,
+          "text": "One commit per phase at transition. Format: {type}({phase}): {description}. WIP commits optional at pause. Version alignment required at milestone.",
+          "added": "2026-08-01",
+          "last_reviewed": null,
+          "source": "manual"
+        },
+        {
+          "id": 12,
+          "text": "Urgent work uses decimal phases (2.1, 2.2). Integers = planned, decimals = interruptions.",
+          "added": "2026-08-01",
+          "last_reviewed": null,
+          "source": "manual"
+        }
+      ],
+      "decisions": []
+    }
+  }
+}

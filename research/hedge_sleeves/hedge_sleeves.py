@@ -77,8 +77,6 @@ df = get_equity_data(
 
 df.head()
 
-# %%
-df.columns
 
 
 # %% convert this prices data into returns data

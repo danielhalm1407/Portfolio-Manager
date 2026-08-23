@@ -1,0 +1,27 @@
+# .paul/ledger.toml — Session history for cost/time attribution
+# Append-only. BASE extracts for usage analytics cross-reference.
+
+[[session]]
+date = "2026-08-01"
+activity = "PAUL adopted and initialised; 12 pre-existing plans in .claude/plans/ migrated into ROADMAP.md and phase SUMMARY files"
+phases_touched = ["01", "02", "03", "04", "05", "06", "07", "08", "09"]
+code_changed = false
+note = "Migration only. No source file under src/, orders/ or tests/ was modified."
+
+[[entry]]
+action = "plan"
+phase = 4
+plan = "04-04"
+at = "2026-08-02T00:00:00Z"
+
+[[entry]]
+action = "apply"
+phase = 4
+plan = "04-04"
+at = "2026-08-02T00:20:00Z"
+
+[[entry]]
+action = "unify"
+phase = 4
+plan = "04-04"
+at = "2026-08-02T02:30:00Z"
