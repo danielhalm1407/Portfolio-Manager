@@ -289,7 +289,7 @@ pricing, theta, and the roll calendar.
   accounts them unchanged
 
 **Plans:**
-- [ ] 12-01: To be defined during `/paul:plan`
+- [ ] 12-01: Option overlay engine — OptionLeg pricing, roll calendar, ProtectivePut / PutSpread / RollingCollar rules
 
 ### Phase 13: Walk-forward validation harness
 
