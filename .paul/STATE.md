@@ -22,10 +22,17 @@ rules into the order ledger). Phase 4 — reopened 2026-08-03 for plan 04-05 (ex
 
 Milestone: v0.4 Does hedging actually work? (added 2026-08-24) — v0.2 still in progress alongside
 Phase: 11 of 15 (Long-history data foundation) — Planning
-Plan: 11-01 created 2026-08-24, awaiting approval. Also open: 02-02 and 02-03 (created 2026-08-23,
-awaiting approval), 04-05 (CONTEXT.md written, not yet planned), 07-02 (planned, not applied).
-Status: PLAN created, awaiting approval
-Last activity: 2026-08-24 — Added milestone v0.4 (phases 11-15) and created 11-01-PLAN.md.
+Plan: 11-01 Task 1 (probe) COMPLETE 2026-08-24; blocked at the source-split checkpoint. Also open:
+02-02 and 02-03 (created 2026-08-23, awaiting approval), 04-05 (CONTEXT.md written, not yet
+planned), 07-02 (planned, not applied).
+Status: APPLY in progress — Task 1 done, blocking decision checkpoint awaiting the user
+Last activity: 2026-08-24 — Ran 11-01 Task 1. Findings in
+.paul/phases/11-long-history-data/11-01-PROBE.md. Headline: the free source SILENTLY SERVES
+MONTHLY BARS for a daily request addressed by `range=`, at HTTP 200 — but returns 33 years of
+true daily bars in ONE epoch-addressed request, so the free path needs no pagination at all.
+IBKR is UNMEASURED (no TWS listener on the run host). AC-5 answered: VIX history yes (1990),
+live IV surface yes, historical IV surface no.
+Prior: 2026-08-24 — Added milestone v0.4 (phases 11-15) and created 11-01-PLAN.md.
 Survey found the binding constraint: every cached panel is 250 rows over one regime, and the
 codebase has no option support at all.
 Prior: 2026-08-23 — Phase 2 reopened; 02-02 (rationale at the rule, into Order, out as
@@ -44,14 +51,15 @@ Progress:
 - Phase 4: [████████░░] 80% (4 of 5 plans complete — 04-05 scoped, not written)
 - Phase 7: [█████░░░░░] 50% (1 of 2 plans complete — 07-02 planned, not applied)
 - Phase 2: [███░░░░░░░] 33% (1 of 3 plans complete — 02-02 and 02-03 planned, not applied)
-- Milestone v0.4: [░░░░░░░░░░] 0% (0 of 5 phases — 11-01 planned, not applied)
+- Milestone v0.4: [░░░░░░░░░░] 0% (0 of 5 phases — 11-01 applying: Task 1 of 3 done, held at the
+  blocking checkpoint. Whole phases only, so a part-applied plan still counts zero)
 
 ## Loop Position
 
 Current loop state:
 ```
 PLAN ──▶ APPLY ──▶ UNIFY
-  ✓        ○        ○     [11-01 created, awaiting approval]
+  ✓        ◐        ○     [11-01 Task 1 done; blocked at the source-split checkpoint]
 ```
 
 Phases 1-6 and 8 were completed **before** PAUL was adopted. Their SUMMARY files are
@@ -82,6 +90,11 @@ shipped, not as evidence the loop was followed.
 | 2026-08-24 | Phase 11 is the data foundation, and it comes first | Every cached panel is 250 rows spanning 2025-07-28 to 2026-07-24. On one regime the v0.4 claim is not weakly supported, it is untestable. Phases 12-15 are all blocked behind it |
 | 2026-08-24 | The option overlay is a NEW subsystem, not an extension of the weight-based rules | `strike`, `secType="OPT"`, `right` and `expiry` appear nowhere in `src/portutils/`. The rolling collar of the Obsidian hedge catalogue needs strike selection, pricing, theta and a roll calendar — none of which the `propose() -> {symbol: units}` contract currently expresses |
 | 2026-08-24 | Probe the data ceiling before designing pagination | Phase 4 spent two plans on an executions limit taken from documentation that proved wrong; the standing decision is that the running TWS outranks written sources. Task 1 of 11-01 is a probe, and the source-split decision is a blocking checkpoint on its findings |
+| 2026-08-24 | A daily series is addressed by explicit `period1`/`period2` epochs, NEVER by `range=` | Probed, not read: `range=max&interval=1d` on SPY returns HTTP 200 with 404 bars at 31-day spacing — Yahoo silently downgrades to MONTHLY and admits it only in `meta.dataGranularity`. The same span as epochs returns 8448 true daily bars. This is the Phase 4 executions failure in a different costume: a coarsened result indistinguishable from a complete one |
+| 2026-08-24 | The free source needs NO pagination; AC-1's stitching is an IBKR-path requirement only | One epoch-addressed request returned SPY's entire 33-year daily history in a single call. Building a paginated stitcher for a source that does not cap would be machinery guarding nothing |
+| 2026-08-24 | Every ingested symbol needs an EXPLICIT `yahoo_symbol` mapping; no suffix heuristic | Bare `AINF` and `AINF.L` are two different instruments and both answer 200 — the bare one is a six-day-old US ETF, the suffixed one is the LSE line actually held. A first probe broke such ties by "longest history wins" and was wrong three times out of three. AINF, CPER, EQLT and QDIV are all ambiguous |
+| 2026-08-24 | A historical implied-vol SURFACE is not obtainable free — Phase 12 prices off VIX, not a surface | Evidence, per AC-5: `^VIX` gives 9560 daily bars back to 1990-01-02, and today's SPY chain gives 32 expiries with IV on every contract — but the endpoint has no as-of date, so no past chain is re-observable. Realised vol was rejected as the alternative because it discards the volatility risk premium, which is the very thing a collar trades |
+| 2026-08-24 | AINF is identified: iShares AI Infrastructure UCITS ETF, LSE, GBP, listed 2024-12-09 | Closes half of the "HOLDINGS AWAITING CLASSIFICATION" gap in config/asset_universe.yaml. 5MVL remains unidentified — neither `5MVL` nor `5MVL.L` resolves to any listing |
 | 2026-08-23 | Trade rationale originates at the RULE, not derived post-hoc from the blotter | A post-hoc deriver would be guessing. `ConstantMixRule.propose` already computes equity, drift (`actual_w`, discarded outside the tolerance branch) and holds the `book`, so it can state at proposal time whether a sale crystallises a gain or a loss. A leg sold because it FELL LESS than the book can book a realised loss — only the rule knows that |
 | 2026-08-23 | `propose()`'s signature and return type stay unchanged; rationale rides a same-bar `last_rationale` attribute | Changing the return type would touch kts.py and both parity suites for zero accounting benefit |
 | 2026-08-23 | The JSON order ledger is reused, not reinvented | `Order.to_dict()` and the `orders/dummy_orders.json` schema already exist and are complete; the offline path simply never wired them up. The wide DataFrame became the de-facto record by omission, not by decision |
@@ -112,6 +125,23 @@ shipped, not as evidence the loop was followed.
 - **Execution history has no source yet.** If IB's current-day limit is real, `reqExecutions`
   cannot supply P&L history and Flex Web Service (query + token in Account Management) is the
   only route. Not built.
+- **The hedge sleeve has no pre-2020 history, so v0.4 cannot test it through the GFC.** KMLM
+  begins 2020-12-02 and FLSP begins 2019-12-23; of the hedge role only MNA (2009-11) reaches back
+  at all, and it still misses 2008. The index leg is fine (SPY 1993, JPM/BARC/HSBA 1990), so the
+  plan's stated number is met — but the instrument the whole claim rests on is not testable across
+  the regime the claim most needs. Proxying the sleeve with a managed-futures INDEX rather than the
+  ETF wrapper is the only route, and that is a research decision for Phase 13, not an ingestion one.
+- **`EQLT` disagrees with the YAML on its own identity.** config/asset_universe.yaml calls it
+  *Xtrackers MSCI USA Quality ESG ETF*; the bare Yahoo listing answers *iShares MSCI Emerging
+  Markets Quality* on Cboe US. One of the two is wrong and a USA-quality/EM-quality mix-up would
+  mis-state the core sleeve. Resolve before EQLT enters any long-history panel.
+- **`5MVL` resolves to no Yahoo listing at all**, bare or `.L`-suffixed, so the free source cannot
+  supply it. It already returns no IBKR bars (no market-data subscription). It is currently
+  un-ingestable from any source available to this project.
+- **The IBKR half of the 11-01 probe is UNMEASURED.** It ran in a container with no TWS listener on
+  7497/7496/4002/4001. The per-request bar ceiling, the pacing rate and IBKR's earliest daily bar
+  are all still unknown. Re-run `src/pipelines/probe_history_sources.py` on the dev machine with
+  TWS open to close it.
 - **Stale TWS pending rows** — five untransmitted rows were left in the TWS Pending panel. They
   cannot fill on their own, but clicking Transmit later would duplicate the live orders.
 
@@ -134,10 +164,11 @@ shipped, not as evidence the loop was followed.
 ## Session Continuity
 
 Last session: 2026-08-24
-Stopped at: Plan 11-01 created (milestone v0.4 opened).
-Next action: Review and approve, then run
-**/paul:apply .paul/phases/11-long-history-data/11-01-PLAN.md**
-Resume file: .paul/phases/11-long-history-data/11-01-PLAN.md
+Stopped at: 11-01 Task 1 complete; held at the plan's BLOCKING source-split checkpoint.
+Next action: Answer the checkpoint — **ibkr-primary, free-primary, or both-parallel** — knowing
+that the IBKR half of the probe is unmeasured, so `ibkr-primary` is a choice made without
+evidence unless the probe is re-run on the TWS machine first. Then Tasks 2 and 3 can proceed.
+Resume file: .paul/phases/11-long-history-data/11-01-PROBE.md
 
 **v0.4 context (2026-08-24).** The milestone asks whether portfolio insurance actually pays and how
 much of it a retail investor needs. The hedge structures are catalogued in the Obsidian vault at
