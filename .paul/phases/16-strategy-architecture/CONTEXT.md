@@ -69,6 +69,21 @@ Each rule exposes, in this order:
 
 `to_orders` must NOT be reimplemented per rule — it calls one common utility (see below).
 
+**The rule inventory this phase produces:**
+
+| Rule | Currency | Source |
+|---|---|---|
+| `BuyAndHoldRule` | weights | rules.py:117 — moves as-is |
+| `ConstantMixRule` | weights | rules.py:141 — moves as-is |
+| `DrawdownRotationRule` | weights | rules.py:227 — moves as-is |
+| `TradeListRule` | units | rules.py:86 — moves as-is; already unit-native |
+| `ConstrainedWeightRule` | weights | NEW — extracted from the kts ladder (friction 3) |
+| `ProtectivePutRule` / `PutSpreadRule` / `RollingCollarRule` | units | Phase 12, written here directly |
+
+`ConstrainedWeightRule` is the one that matters most for deduplication: it takes a raw
+target weight from ANY signal source and applies weight floors/caps plus turnover
+floors/caps. See friction 3.
+
 ### The shared sizing utility
 Weight delta → orders → notional → turnover, in one place, used by every rule and by kts.py.
 `weights_to_units` (rules.py:44) is the seed; `calc_units` / `calc_slippage`
@@ -113,43 +128,94 @@ is a blocker; each needs a call.
    Suggest: keep both, with the rule as the unit of definition and a vectorised runner that
    can execute a rule across a whole panel where the rule declares itself stateless.
 
-3. **kts.py is live and load-bearing.** `ARM_LIVE = True` is currently committed
-   (STATE.md), and kts.py is 4000 lines. Migrating it wholesale in one plan is high risk.
-   Suggest: kts.py becomes a CONSUMER of the shared sizing utility first (its `w_target →
-   w_capped → w_rec` ladder is the richest cap/gate implementation and should arguably be
-   the one that survives), and its `ForecastView` becomes the model for the rationale
-   payload. Full migration is a later plan.
+3. ~~**kts.py is live and load-bearing.**~~ **RESOLVED 2026-08-26 — the kts weight ladder
+   becomes a rule.** It is not a GUI concern that gets migrated eventually; it is a rule in
+   its own right, and one of the most reusable ones in the repo. Stated plainly:
+
+   > A rule that, at each point in time, recommends a weight constrained by weight floors
+   > and caps AND by turnover floors and caps.
+
+   That is `ConstrainedWeightRule` (name TBC), and its logic already exists at
+   kts.py:2626-2698:
+
+   | Step | kts.py | Becomes |
+   |---|---|---|
+   | raw target | `w_target = REC_ALPHA * r_hat_h` (:2638) | input — a raw target weight from any signal source |
+   | risk cap | `w_capped = max(-w_cap, min(w_cap, w_target))` (:2641) | the weight floor/cap constraint |
+   | which cap bound | `binding_cap` (:2643) | rationale field |
+   | turnover gate | `if abs(w_capped - w_current) < w_threshold: w_rec = w_current` (:2678) | the turnover floor constraint |
+   | output | `w_rec`, `w_delta`, `qty` (:2681-2698) | `propose_weights` → `propose_units` |
+
+   Two consequences. First, the raw target becomes an INPUT rather than being computed
+   inside the rule, so the same constraint rule serves the OU forecast (kts.py), the
+   quantile forecast (`calc_targ_weight`, strategies.py:616) and any future signal —
+   this is the deduplication, not a side effect of it. Second, kts.py keeps its GUI and
+   its live path but calls the rule instead of inlining the ladder; `ForecastView` becomes
+   the rule's rationale payload rather than a Tk-local dataclass.
+
+   Residual risk is unchanged and still real: kts.py is 4000 lines and `ARM_LIVE = True`
+   is currently committed (STATE.md). So the rule is EXTRACTED and tested standalone in
+   16-01; kts.py is rewired to call it in a separate, later plan, with golden-fixture
+   parity against the current ladder as the gate. Extraction and rewiring must not land in
+   the same plan.
 
 4. **Phase 2's reopening (02-02) overlaps this directly.** 02-02 carries rationale from rule
    → `ctx` → `Order`. That IS this phase's rationale channel. Decide whether 02-02 ships
    first and this phase builds on it, or 02-02 is absorbed here.
 
-5. **`ForecastView` vs `Order.rationale` are two rationale schemas.** kts.py's is flat and
-   forecast-shaped (20 fields, kts.py:295-325); `Order.rationale` is a nested dict keyed to
-   `dummy_orders.json`. One must win, or one must be a documented projection of the other.
+5. ~~**`ForecastView` vs `Order.rationale` are two rationale schemas.**~~ **Largely resolved
+   by friction 3.** Once the kts ladder is a rule, `ForecastView` (kts.py:295-325) is that
+   rule's rationale payload — the flat, forecast-shaped record of what the rule saw and why
+   it sized as it did. `Order.rationale` (fills.py:79) stays the nested `dummy_orders.json`
+   schema at the ORDER level. The two are different altitudes, not competitors: a rule
+   emits a `ForecastView`-shaped payload, and `to_orders` projects it into
+   `Order.rationale`. What still needs deciding is the projection itself — which of the
+   20 fields survive into the order record, and whether unit-native rules (options) emit a
+   different payload shape or a sparse `ForecastView`.
 
-## Sequencing — the decision this phase forces
+## Sequencing — DECIDED 2026-08-26
 
-**Phase 12 has no code yet.** `src/portutils/portfolio/options.py` does not exist; 12-01 is
-a plan only. That makes right now the cheapest moment this refactor will ever have: every
-later moment means writing option rules into the old shape and moving them.
+**Document all of it; implement the clean subset now; defer only what is genuinely risky.**
 
-Three options:
+The refactor is fully specified in this document regardless of what gets built when — that
+is the point of writing it down. Implementation splits by how cleanly a piece migrates:
 
-- **(a) Phase 16 before 12-01 is applied.** Option rules are written directly into
-  `strategies/rules/`. No rework. Cost: delays the v0.4 hedging answer by the length of
-  this phase.
-- **(b) 12-01 first, migrate after.** v0.4 keeps moving. Cost: `options.py` is written
-  twice, and the option rules are the ones that most stress the new interface (friction 1),
-  so the interface gets designed without its hardest case in hand.
-- **(c) 12-01 first, but written against the target interface.** Options land in
-  `portfolio/options.py` with `propose_weights` / `propose_units` / `to_orders` shaped as
-  above, then move directory later. Compromise: no interface rework, only a file move.
+**16-01 — foundation and clean migrations.** Everything that moves without behaviour change:
 
-**Recommendation: (c).** It keeps v0.4 unblocked, and the option overlay is precisely the
-case that proves whether the weights/units split works — so designing 16's interface with
-12 already written against it is better evidence than designing it in the abstract. (a) is
-the cleanest if v0.4 can wait; (b) is the one to avoid.
+- The `strategies/` skeleton and the rule interface (`propose_weights` / `propose_units` /
+  `to_orders` / `rationale`)
+- The shared weight-delta → orders → notional → turnover utility, absorbing
+  `weights_to_units` (rules.py:44), `calc_units` (strategies.py:665) and `calc_slippage`
+  (strategies.py:696)
+- The four existing rules — `BuyAndHoldRule`, `ConstantMixRule`, `DrawdownRotationRule`,
+  `TradeListRule` — moved and re-expressed against the interface. These are the clean
+  ones: self-contained, already bar-driven, already tested
+- `ConstrainedWeightRule` EXTRACTED from the kts ladder (friction 3) and tested standalone
+  against golden fixtures. Not yet wired into kts.py
+- The synthetic-instrument descriptor utility, so option legs have a home before they exist
+
+**16-02 — option rules.** Phase 12's three structures written DIRECTLY into
+`strategies/rules/options.py` against the finished interface. No `portfolio/options.py` is
+ever created, so nothing is written twice. This absorbs 12-01's Task 1.
+
+**Deferred to later plans, deliberately:**
+
+- Rewiring kts.py to call `ConstrainedWeightRule`. `ARM_LIVE = True` is committed and the
+  file is 4000 lines; extraction and rewiring must not land together (friction 3)
+- The vectorised runner and the `analysis/strategies.py` move (friction 2, open question 3)
+- Full `run_strategies` multi-scope composition — 16-01 needs only the merge the simulator
+  already does (simulator.py:62-64)
+
+**What this costs Phase 12.** 12-01 no longer creates `portfolio/options.py`; its Task 1
+becomes 16-02, and it gains a dependency on 16-01. The pricing, roll, redeployment and vol
+decisions already amended into 12-01 are unaffected — they are about option economics, not
+about where the class lives. The v0.4 hedging answer is delayed by the length of 16-01,
+which is the price of not writing the same module twice.
+
+**Why the option rules are worth waiting for rather than rushing.** They are the case that
+most stresses the interface (friction 1: no weight representation). An interface designed
+with its hardest case in hand is better than one designed around three rules that all
+happen to be weight-native.
 
 ## Out of scope
 
@@ -168,5 +234,15 @@ the cleanest if v0.4 can wait; (b) is the one to avoid.
 3. Is `analysis/strategies.py` renamed on the move? Four of its five classes
    (`QuantileForecastsMerger`, `IntradayIndexLevelsCleaner`, `StrategyReturnsMerger`) are
    data prep and results merging, not strategies — they may belong elsewhere entirely.
-4. Which cap/turnover implementation survives: kts.py's `w_capped`/`w_threshold` ladder or
-   `calc_bounded_weights`?
+4. ~~Which cap/turnover implementation survives?~~ **Answered: kts.py's ladder**, extracted
+   as `ConstrainedWeightRule` (friction 3). `calc_bounded_weights` (strategies.py:642) is
+   the narrower of the two — it bounds weights but has no turnover gate and no
+   `binding_cap` reporting. What remains open is whether it folds in as a configuration of
+   the same rule or is dropped once its caller uses the rule.
+
+## Code style — non-negotiable
+
+`CLAUDE.md` at the repo root governs, and its comment rules are load-bearing for this
+phase specifically, because this is a MOVE: comments travel with their code verbatim, and
+retention is mandatory. Read it before writing anything. It is not restated here — the
+plans should point at it, not paraphrase it.

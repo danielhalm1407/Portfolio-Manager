@@ -293,6 +293,14 @@ pricing, theta, and the roll calendar.
 **Plans:**
 - [ ] 12-01: Option overlay engine — OptionLeg pricing, roll calendar, ProtectivePut / PutSpread / RollingCollar rules
 
+**Sequencing changed 2026-08-26.** 12-01's Task 1 now executes as **16-02**, writing into
+`strategies/rules/options.py` rather than creating `portfolio/options.py`. No option code
+exists yet, so building it in the old layout would mean building it twice; the option rules
+are also the case that most stresses the Phase 16 interface, since contracts are natively
+units and have no weight representation. 12-01's option ECONOMICS — European pricing, the
+discounted intrinsic floor, the bar-based roll, collar redeployment, strike-dependent IV —
+are unaffected and stand as amended. `depends_on` is now `["11-01", "02-02", "16-01"]`.
+
 ### Phase 13: Walk-forward validation harness
 
 **Goal:** Rolling-origin train/validate: fit parameters on a backward window, score on the forward
@@ -370,11 +378,21 @@ sequencing decision in CONTEXT.md
 - Reflection through the existing `ReturnsCalculator` / `PerformanceSummary` / `Fill` paths,
   accepting both full and compressed order/fill payloads
 
-**Scoping doc:** `.paul/phases/16-strategy-architecture/CONTEXT.md` — records five design
-frictions and the Phase 12 sequencing decision
+**Scoping doc:** `.paul/phases/16-strategy-architecture/CONTEXT.md` — the full refactor is
+documented there regardless of what is built when. Two of the five design frictions are now
+resolved: the kts weight ladder becomes `ConstrainedWeightRule` (a rule that recommends a
+weight constrained by weight floors/caps AND turnover floors/caps), and `ForecastView`
+becomes that rule's rationale payload rather than competing with `Order.rationale`.
 
 **Plans:**
-- [ ] 16-01: To be defined during `/paul:plan`
+- [ ] 16-01: Foundation and clean migrations — rule interface, shared sizing utility, the
+  four existing rules moved, `ConstrainedWeightRule` extracted and tested standalone,
+  synthetic-instrument descriptors
+- [ ] 16-02: Option rules written directly into `strategies/rules/options.py` (absorbs
+  12-01 Task 1 — see Phase 12)
+- [ ] 16-03: Rewire kts.py to call `ConstrainedWeightRule`, golden-fixture parity against
+  the current ladder. Deliberately separate from 16-01: `ARM_LIVE = True` is committed
+- [ ] 16-04: Vectorised runner and the `analysis/strategies.py` disposition
 
 ---
 *Roadmap created: 2026-08-01 — migrated from 12 pre-existing plans in `.claude/plans/`*
