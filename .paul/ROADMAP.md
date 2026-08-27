@@ -31,6 +31,7 @@ history has not yet produced.
 | v0.2 | Live execution against IBKR | 4-8, 10 | 🚧 In Progress | - |
 | v0.3 | Research half | 9 | 📋 Planned | - |
 | v0.4 | Does hedging actually work? | 11-15 | 📋 Planned | - |
+| v0.5 | Strategy architecture consolidation | 16 | 📋 Planned | - |
 
 > Phase 2 was reopened on 2026-08-23 for plans 02-02/02-03 (trade rationale). v0.1 stays shipped —
 > the reopening adds reasoning on top of shipped accounting, it does not reverse it.
@@ -66,6 +67,7 @@ Progress: [█████░░░░░] 50%
 | 13 | Walk-forward validation harness | TBD | Not started | - |
 | 14 | Regime labelling and scenario guardrails | TBD | Not started | - |
 | 15 | Conviction write-up — how much hedging is enough | TBD | Not started | - |
+| 16 | Strategy architecture consolidation | TBD | Scoping | - |
 
 ## Phase Details
 
@@ -291,6 +293,16 @@ pricing, theta, and the roll calendar.
 **Plans:**
 - [ ] 12-01: Option overlay engine — OptionLeg pricing, roll calendar, ProtectivePut / PutSpread / RollingCollar rules
 
+**Superseded 2026-08-26.** 12-01 is now the option **economics specification**, not a build
+plan. Phase 16 groups code by stage, which splits its content three ways: `OptionLeg` into
+`strategies/instruments/options.py` (16-02), `RollCalendar` into `strategies/schedule.py`
+(16-02), and the three rules into `strategies/rules/options.py` (16-03). A synthetic
+contract is a kind of instrument, not a kind of option strategy.
+
+Every economics decision in 12-01 — European pricing with the discounted intrinsic floor,
+the bar-based roll, collar redeployment, strike-dependent IV, the floor 0.90 / cap 1.28
+parameters — is carried across verbatim. Phase 12 is complete when 16-02 and 16-03 land.
+
 ### Phase 13: Walk-forward validation harness
 
 **Goal:** Rolling-origin train/validate: fit parameters on a backward window, score on the forward
@@ -337,6 +349,64 @@ and how far a simple sleeve gets you.
 **Plans:**
 - [ ] 15-01: To be defined during `/paul:plan`
 
+## Milestone v0.5: Strategy architecture consolidation
+
+**The problem:** three systems compute portfolio decisions and none import each other —
+`analysis/strategies.py` (vectorised, weights, no execution), `portfolio/rules.py`
+(event-driven, units, executes into a `Book`), and `orders/kts.py` (live GUI, its own
+weight ladder). Weight logic exists three times, units/turnover twice, and the richest
+rationale in the codebase (`ForecastView`, kts.py:295) dies with the Tk window while
+`Order.rationale` is never populated at all.
+
+**The claim to be defended:** one rule abstraction, one sizing utility and one reflection
+path can serve the offline sim, the vectorised sweep and the live GUI without any of them
+losing what it currently does.
+
+### Phase 16: Strategy architecture consolidation
+
+**Goal:** A single `strategies/` home with rules as composable classes over a shared
+observe → decide → execute → reflect lifecycle.
+**Depends on:** Phase 2 (02-02, the rationale channel). Interacts with Phase 12 — see the
+sequencing decision in CONTEXT.md
+**Research:** Unlikely (consolidation of existing code, not new technique)
+
+**Scope:**
+- `strategies/rules/` — one class per rule, each with `propose_weights` / `propose_units` /
+  `to_orders` / optional `rationale`
+- One shared weight-delta → orders → notional → turnover utility in `portutils`, replacing
+  three implementations
+- Synthetic-instrument descriptors (option legs) as a utility rules call, not rule internals
+- `run_strategies` — combines rules per timestamp across an asset scope
+- Reflection through the existing `ReturnsCalculator` / `PerformanceSummary` / `Fill` paths,
+  accepting both full and compressed order/fill payloads
+
+**Scoping doc:** `.paul/phases/16-strategy-architecture/CONTEXT.md` — the full refactor is
+documented there regardless of what is built when. Two of the five design frictions are now
+resolved: the kts weight ladder becomes `ConstrainedWeightRule` (a rule that recommends a
+weight constrained by weight floors/caps AND turnover floors/caps), and `ForecastView`
+becomes that rule's rationale payload rather than competing with `Order.rationale`.
+
+**Plans — split by RISK, not by topic. Track A is new code and cannot regress anything;
+Track B migrates working code and is separately gated and individually skippable.**
+
+*Track A — new code, built into the stage structure from day one:*
+- [ ] 16-01: Stage skeleton — `observe` / `constraints` / `sizing` / `orders` / `schedule` /
+  `targets` / `instruments` / `rules`. Stage functions seeded from `weights_to_units` by
+  COPY, leaving the original in place
+- [ ] 16-02: Option instruments — `instruments/options.py` (`OptionLeg`) and
+  `schedule.py` (`RollCalendar`). Economics spec: 12-01 AC-1, AC-2
+- [ ] 16-03: Option rules — `rules/options.py`, the three structures plus theta drag.
+  Economics spec: 12-01 AC-3 through AC-6
+- [ ] 16-04: `ConstrainedWeightRule` written fresh against stages 2-3, tested standalone.
+  kts.py untouched
+
+*Track B — migrating existing code, each independently gated:*
+- [ ] 16-05: Move the four existing rules onto the stage functions; retire the duplicate.
+  Gate: 126 tests green + `rebalance_study.py` byte-identical
+- [ ] 16-06: Rewire kts.py to `ConstrainedWeightRule`. Gate: golden-fixture parity.
+  `ARM_LIVE = True` is committed — never bundle this with another plan
+- [ ] 16-07: Vectorised runner and the `analysis/strategies.py` disposition
+
 ---
 *Roadmap created: 2026-08-01 — migrated from 12 pre-existing plans in `.claude/plans/`*
-*Last updated: 2026-08-24 — v0.4 milestone added (phases 11-15); 11-01 planned*
+*Last updated: 2026-08-26 — v0.5 milestone added (phase 16, strategy architecture); 12-01 amended*
