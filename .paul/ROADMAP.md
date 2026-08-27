@@ -293,13 +293,15 @@ pricing, theta, and the roll calendar.
 **Plans:**
 - [ ] 12-01: Option overlay engine — OptionLeg pricing, roll calendar, ProtectivePut / PutSpread / RollingCollar rules
 
-**Sequencing changed 2026-08-26.** 12-01's Task 1 now executes as **16-02**, writing into
-`strategies/rules/options.py` rather than creating `portfolio/options.py`. No option code
-exists yet, so building it in the old layout would mean building it twice; the option rules
-are also the case that most stresses the Phase 16 interface, since contracts are natively
-units and have no weight representation. 12-01's option ECONOMICS — European pricing, the
-discounted intrinsic floor, the bar-based roll, collar redeployment, strike-dependent IV —
-are unaffected and stand as amended. `depends_on` is now `["11-01", "02-02", "16-01"]`.
+**Superseded 2026-08-26.** 12-01 is now the option **economics specification**, not a build
+plan. Phase 16 groups code by stage, which splits its content three ways: `OptionLeg` into
+`strategies/instruments/options.py` (16-02), `RollCalendar` into `strategies/schedule.py`
+(16-02), and the three rules into `strategies/rules/options.py` (16-03). A synthetic
+contract is a kind of instrument, not a kind of option strategy.
+
+Every economics decision in 12-01 — European pricing with the discounted intrinsic floor,
+the bar-based roll, collar redeployment, strike-dependent IV, the floor 0.90 / cap 1.28
+parameters — is carried across verbatim. Phase 12 is complete when 16-02 and 16-03 land.
 
 ### Phase 13: Walk-forward validation harness
 
@@ -384,15 +386,26 @@ resolved: the kts weight ladder becomes `ConstrainedWeightRule` (a rule that rec
 weight constrained by weight floors/caps AND turnover floors/caps), and `ForecastView`
 becomes that rule's rationale payload rather than competing with `Order.rationale`.
 
-**Plans:**
-- [ ] 16-01: Foundation and clean migrations — rule interface, shared sizing utility, the
-  four existing rules moved, `ConstrainedWeightRule` extracted and tested standalone,
-  synthetic-instrument descriptors
-- [ ] 16-02: Option rules written directly into `strategies/rules/options.py` (absorbs
-  12-01 Task 1 — see Phase 12)
-- [ ] 16-03: Rewire kts.py to call `ConstrainedWeightRule`, golden-fixture parity against
-  the current ladder. Deliberately separate from 16-01: `ARM_LIVE = True` is committed
-- [ ] 16-04: Vectorised runner and the `analysis/strategies.py` disposition
+**Plans — split by RISK, not by topic. Track A is new code and cannot regress anything;
+Track B migrates working code and is separately gated and individually skippable.**
+
+*Track A — new code, built into the stage structure from day one:*
+- [ ] 16-01: Stage skeleton — `observe` / `constraints` / `sizing` / `orders` / `schedule` /
+  `targets` / `instruments` / `rules`. Stage functions seeded from `weights_to_units` by
+  COPY, leaving the original in place
+- [ ] 16-02: Option instruments — `instruments/options.py` (`OptionLeg`) and
+  `schedule.py` (`RollCalendar`). Economics spec: 12-01 AC-1, AC-2
+- [ ] 16-03: Option rules — `rules/options.py`, the three structures plus theta drag.
+  Economics spec: 12-01 AC-3 through AC-6
+- [ ] 16-04: `ConstrainedWeightRule` written fresh against stages 2-3, tested standalone.
+  kts.py untouched
+
+*Track B — migrating existing code, each independently gated:*
+- [ ] 16-05: Move the four existing rules onto the stage functions; retire the duplicate.
+  Gate: 126 tests green + `rebalance_study.py` byte-identical
+- [ ] 16-06: Rewire kts.py to `ConstrainedWeightRule`. Gate: golden-fixture parity.
+  `ARM_LIVE = True` is committed — never bundle this with another plan
+- [ ] 16-07: Vectorised runner and the `analysis/strategies.py` disposition
 
 ---
 *Roadmap created: 2026-08-01 — migrated from 12 pre-existing plans in `.claude/plans/`*

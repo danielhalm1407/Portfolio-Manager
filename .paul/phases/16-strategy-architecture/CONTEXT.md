@@ -43,64 +43,101 @@ The cost of that split is concrete, not aesthetic:
 
 ## The target shape
 
-One directory, one lifecycle, four stages. Every loop in the repo is an instance of it.
+**Organising principle: group by STAGE, not by domain.**
 
-    OBSERVE  ->  DECIDE  ->  EXECUTE  ->  REFLECT
-    (windows)   (rules)     (sim|live)   (returns / P&L / reconcile)
+The instinct to put everything option-flavoured in one `options.py` is the wrong cut. A
+structure grouped by stage means a stack trace names the step that failed — you read the
+frame and know whether the raw weight, the constraint, the sizing or the order build broke.
+Grouped by domain, every option bug surfaces in the same 600-line file and you bisect by
+hand. The debugging argument is the strongest argument for the refactor, not the tidiness one.
 
-### OBSERVE
-At each timestamp, assemble the relevant recent windows: current positions (weights AND/OR
-units), asset prices to date, implied vol, and where applicable rates, earnings, FCF, and
-sell-side or own forecasts. One assembled observation object per timestamp, so a rule
-receives data rather than fetching it.
+So: nouns get a stage, verbs get a stage, and a "rule" is nothing more than a named
+composition of stages.
+
+### The verbs, in order
+
+| Stage | Module | Input | Output |
+|---|---|---|---|
+| 1. Observe | `strategies/observe.py` | panels, book, vol surface, forecasts | one `Observation` per timestamp |
+| 2. Raw weight | `strategies/signals/` | observation | unconstrained target weight |
+| 3. Constrain | `strategies/constraints.py` | raw weight, current weight | constrained weight + `binding_cap` |
+| 4. Size | `strategies/sizing.py` | weight delta, prices, capital | units |
+| 5. Order | `strategies/orders.py` | units, prices | orders, notional, turnover |
+| 6. Execute | `execution/` (sim \| live) | orders | fills |
+| 7. Reflect | `analysis/` | fills / weights | returns, P&L, reconciliation |
+
+A rule that is unit-native (options) enters at stage 4 and skips 2-3. A rule that is
+weight-native (constant mix) runs 2-5. Nothing else differs between them — which is the
+whole reason the split works.
+
+### The nouns, by stage
+
+| Stage | Module | Objects |
+|---|---|---|
+| Instruments | `strategies/instruments/` | real tickers; `SyntheticContract` base; `OptionLeg` (+ its pricing, delta, theta) |
+| Schedule | `strategies/schedule.py` | `RollCalendar` — reset cadence, not options-specific |
+| Targets | `strategies/targets.py` | raw weight, constrained weight, unit target |
+| Orders | `portfolio/fills.py` (exists) | `Order` — synthetic and real share one schema |
+| Fills | `portfolio/fills.py` (exists) | `Fill` — simulated and live share one schema |
+| State | `portfolio/book.py`, `ledger.py` (exist) | `Position`, `Book`, `StateLedger` |
+
+Note what this does to Phase 12: **`OptionLeg` and the three option rules do NOT live in the
+same file.** `OptionLeg` is an instrument — it belongs beside every other tradeable
+descriptor, because a synthetic contract is a *kind of instrument*, not a *kind of option
+strategy*. The rules that build legs live at the rules layer. The roll calendar is a
+schedule, not an option concept — a quarterly rebalance uses the same object.
+
+### Why this is not a new idea — `rules.py` is already halfway here
+
+The stages already exist in the current code; they are just trapped inside classes:
+
+| Current | Really is |
+|---|---|
+| `weights_to_units` (rules.py:44) | stage 4, already free-standing |
+| `DrawdownRotationRule._sell_all_units` (rules.py:273) | stage 4, private to one rule |
+| `DrawdownRotationRule._buy_with` (rules.py:285) | stage 4, private to one rule |
+| `DrawdownRotationRule._merge` (rules.py:295) | rule composition, private to one rule |
+| kts.py `w_target → w_capped → w_rec` (kts.py:2638-2681) | stages 2-3, inlined in a GUI method |
+| `calc_targ_weight` (strategies.py:616) | stage 2, in the other system |
+| `calc_bounded_weights` (strategies.py:642) | stage 3, in the other system |
+| `calc_units` / `calc_slippage` (strategies.py:665/696) | stages 4-5, in the other system |
+
+Every one of those is a stage function. `rules.py` grasped roughly half the concept —
+it separated *policy* from *accounting*, but not *stage* from *stage*, so the sizing and
+merging steps ended up as private methods on whichever rule needed them first.
 
 ### DECIDE — `strategies/rules/`
-One class per rule. A rule is **one thing that can fire at one point in time**, and a single
-firing may motivate several orders (a collar roll is four legs, even at 1:1 fills).
 
-Each rule exposes, in this order:
+A rule is **one thing that can fire at one point in time**, and a single firing may motivate
+several orders (a collar roll is four legs, even at 1:1 fills). It composes stages; it does
+not implement them.
 
 | Method | Returns | Notes |
 |---|---|---|
-| `propose_weights(obs)` | target weights + weight delta | May return `None` — see friction 1 |
-| `propose_units(obs)` | units per instrument | Derived from weight delta, OR native |
-| `to_orders(...)` | orders, notional, turnover | Delegates to the SHARED utility |
-| `rationale` | optional payload | Why it fired, and how it sized |
-
-`to_orders` must NOT be reimplemented per rule — it calls one common utility (see below).
+| `propose_weights(obs)` | target weight + delta | `None` for unit-native rules — see friction 1 |
+| `propose_units(obs)` | units per instrument | from the weight delta, OR native |
+| `to_orders(...)` | orders, notional, turnover | delegates to stage 5, never reimplemented |
+| `rationale` | optional payload | why it fired, and how it sized |
 
 **The rule inventory this phase produces:**
 
 | Rule | Currency | Source |
 |---|---|---|
-| `BuyAndHoldRule` | weights | rules.py:117 — moves as-is |
-| `ConstantMixRule` | weights | rules.py:141 — moves as-is |
-| `DrawdownRotationRule` | weights | rules.py:227 — moves as-is |
-| `TradeListRule` | units | rules.py:86 — moves as-is; already unit-native |
+| `BuyAndHoldRule` | weights | rules.py:117 — existing |
+| `ConstantMixRule` | weights | rules.py:141 — existing |
+| `DrawdownRotationRule` | weights | rules.py:227 — existing |
+| `TradeListRule` | units | rules.py:86 — existing, already unit-native |
 | `ConstrainedWeightRule` | weights | NEW — extracted from the kts ladder (friction 3) |
-| `ProtectivePutRule` / `PutSpreadRule` / `RollingCollarRule` | units | Phase 12, written here directly |
-
-`ConstrainedWeightRule` is the one that matters most for deduplication: it takes a raw
-target weight from ANY signal source and applies weight floors/caps plus turnover
-floors/caps. See friction 3.
-
-### The shared sizing utility
-Weight delta → orders → notional → turnover, in one place, used by every rule and by kts.py.
-`weights_to_units` (rules.py:44) is the seed; `calc_units` / `calc_slippage`
-(strategies.py:665/696) are the other half that must fold into it. Lives in `portutils`.
-
-### Synthetic instruments
-Option legs are NOT rules and NOT strategies. They are instrument descriptors — a separate
-utility the rules call. Phase 12's `OptionLeg` is the first instance; the synthetic-ticker
-encoding (how a leg becomes a key in a `{symbol: units}` dict and a column in a price panel)
-belongs here, not inside each option rule.
+| `ProtectivePutRule` / `PutSpreadRule` / `RollingCollarRule` | units | NEW — Phase 12, built here from the start |
 
 ### Strategies — `strategies/run_strategies.py`
+
 A strategy calls a COMBINATION of rules at each timestamp over a defined asset scope (one
 strategy may run over several scopes) and merges their outputs into one set of weights and
 orders. The existing merge at simulator.py:62-64 is the seed.
 
 ### REFLECT
+
 Returns/P&L for any strategy computed by feeding its weights and/or orders through the
 existing utilities: `ReturnsCalculator` (analysis/returns.py:48), `PerformanceSummary`
 (analysis/performance.py:11), and the `Fill`/`Book` path for order-level P&L. These must
@@ -173,49 +210,55 @@ is a blocker; each needs a call.
    20 fields survive into the order record, and whether unit-native rules (options) emit a
    different payload shape or a sparse `ForecastView`.
 
-## Sequencing — DECIDED 2026-08-26
+## Sequencing — REVISED 2026-08-26
 
-**Document all of it; implement the clean subset now; defer only what is genuinely risky.**
+**The risk in this phase is entirely in MIGRATING existing code, not in building new code
+into the new shape.** These were previously bundled and should not have been. Separated:
 
-The refactor is fully specified in this document regardless of what gets built when — that
-is the point of writing it down. Implementation splits by how cleanly a piece migrates:
+### Track A — new code, built into the structure from day one. Low risk, do it now.
 
-**16-01 — foundation and clean migrations.** Everything that moves without behaviour change:
+Nothing here can regress anything, because none of it exists yet. There is no golden
+fixture to break, no live path to disturb, no caller to update.
 
-- The `strategies/` skeleton and the rule interface (`propose_weights` / `propose_units` /
-  `to_orders` / `rationale`)
-- The shared weight-delta → orders → notional → turnover utility, absorbing
-  `weights_to_units` (rules.py:44), `calc_units` (strategies.py:665) and `calc_slippage`
-  (strategies.py:696)
-- The four existing rules — `BuyAndHoldRule`, `ConstantMixRule`, `DrawdownRotationRule`,
-  `TradeListRule` — moved and re-expressed against the interface. These are the clean
-  ones: self-contained, already bar-driven, already tested
-- `ConstrainedWeightRule` EXTRACTED from the kts ladder (friction 3) and tested standalone
-  against golden fixtures. Not yet wired into kts.py
-- The synthetic-instrument descriptor utility, so option legs have a home before they exist
+- **16-01: stage skeleton and the shared stage functions.** `strategies/` with
+  `observe.py`, `constraints.py`, `sizing.py`, `orders.py`, `schedule.py`, `targets.py`,
+  `instruments/`, `rules/`. Stage 4 and 5 seeded from `weights_to_units` (rules.py:44) by
+  COPY, not by move — the original stays until Track B retires it.
+- **16-02: option instruments.** `instruments/options.py` — `SyntheticContract` base and
+  `OptionLeg` with European pricing, delta, theta. Plus `schedule.py`'s `RollCalendar`.
+  This is Phase 12's AC-1 and AC-2, relocated by stage.
+- **16-03: option rules.** `rules/options.py` — `ProtectivePutRule`, `PutSpreadRule`,
+  `RollingCollarRule` composing the stages. Phase 12's AC-3 through AC-6.
+- **16-04: `ConstrainedWeightRule`.** Extracted from the kts ladder logic, written fresh
+  against stages 2-3, tested standalone. kts.py itself is NOT touched.
 
-**16-02 — option rules.** Phase 12's three structures written DIRECTLY into
-`strategies/rules/options.py` against the finished interface. No `portfolio/options.py` is
-ever created, so nothing is written twice. This absorbs 12-01's Task 1.
+Track A leaves the existing code running exactly as it does today. Two implementations
+coexist. That duplication is temporary and deliberate — it is what buys the zero regression
+risk.
 
-**Deferred to later plans, deliberately:**
+### Track B — migrating existing code. Higher risk, separately gated, optional.
 
-- Rewiring kts.py to call `ConstrainedWeightRule`. `ARM_LIVE = True` is committed and the
-  file is 4000 lines; extraction and rewiring must not land together (friction 3)
-- The vectorised runner and the `analysis/strategies.py` move (friction 2, open question 3)
-- Full `run_strategies` multi-scope composition — 16-01 needs only the merge the simulator
-  already does (simulator.py:62-64)
+Each of these is independently valuable and independently skippable. None blocks v0.4.
 
-**What this costs Phase 12.** 12-01 no longer creates `portfolio/options.py`; its Task 1
-becomes 16-02, and it gains a dependency on 16-01. The pricing, roll, redeployment and vol
-decisions already amended into 12-01 are unaffected — they are about option economics, not
-about where the class lives. The v0.4 hedging answer is delayed by the length of 16-01,
-which is the price of not writing the same module twice.
+- **16-05:** move `BuyAndHoldRule`, `ConstantMixRule`, `DrawdownRotationRule`,
+  `TradeListRule` onto the stage functions; retire the duplicated stage 4 code. Gate: the
+  126-test suite green, plus `rebalance_study.py` output byte-identical.
+- **16-06:** rewire kts.py to call `ConstrainedWeightRule`. Gate: golden-fixture parity
+  against the current ladder. `ARM_LIVE = True` is committed — this is the riskiest single
+  plan in the repo and must not be bundled with anything else.
+- **16-07:** the vectorised runner and the `analysis/strategies.py` disposition.
 
-**Why the option rules are worth waiting for rather than rushing.** They are the case that
-most stresses the interface (friction 1: no weight representation). An interface designed
-with its hardest case in hand is better than one designed around three rules that all
-happen to be weight-native.
+### What this means for Phase 12
+
+**12-01 is superseded and should be rewritten, not patched.** Its Task 1 assumed one
+`portfolio/options.py` holding pricing, calendar and rules together; the stage split puts
+those in three places. Its option ECONOMICS — European pricing with the discounted
+intrinsic floor, the bar-based roll, collar redeployment, strike-dependent IV, the
+parameter set — all survive verbatim and must be carried across, not re-derived. What
+changes is only which module each piece lands in.
+
+The v0.4 delay is now bounded by 16-01 alone (the skeleton), since 16-02 and 16-03 ARE the
+option work rather than a prerequisite to it.
 
 ## Out of scope
 
