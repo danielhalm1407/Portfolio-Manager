@@ -9,6 +9,9 @@ Two modules, two very different worlds: Interactive Brokers, and the web.
 
 ## `ibkr_requests.py`
 
+> Function-by-function detail — arguments, threading handshake, return shapes, the CSV/parquet
+> split — lives in [ibkr_requests.md](ibkr_requests.md). This section is the overview.
+
 The largest module in the repo, and deliberately so: it is the *only* place that speaks to TWS.
 Structure, top to bottom:
 
