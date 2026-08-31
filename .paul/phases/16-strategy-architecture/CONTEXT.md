@@ -227,6 +227,11 @@ fixture to break, no live path to disturb, no caller to update.
 - **16-02: option instruments.** `instruments/options.py` — `SyntheticContract` base and
   `OptionLeg` with European pricing, delta, theta. Plus `schedule.py`'s `RollCalendar`.
   This is Phase 12's AC-1 and AC-2, relocated by stage.
+  **Partially landed 2026-08-31** — `instruments/vol.py` (`synthetic_iv_surface`) and
+  `instruments/pricing.py` (`black_scholes_put`) already exist and are verified against
+  12-01's four anchor numbers. See "Landed ahead of the plans" below. What 16-02 still owns:
+  `SyntheticContract`, `OptionLeg` (wrapping the pricer, adding delta and theta) and
+  `RollCalendar`.
 - **16-03: option rules.** `rules/options.py` — `ProtectivePutRule`, `PutSpreadRule`,
   `RollingCollarRule` composing the stages. Phase 12's AC-3 through AC-6.
 - **16-04: `ConstrainedWeightRule`.** Extracted from the kts ladder logic, written fresh
@@ -259,6 +264,58 @@ changes is only which module each piece lands in.
 
 The v0.4 delay is now bounded by 16-01 alone (the skeleton), since 16-02 and 16-03 ARE the
 option work rather than a prerequisite to it.
+
+## Landed ahead of the plans — the vol-surface probe (2026-08-31)
+
+Two modules and one research script were written BEFORE 16-01, out of PAUL sequence and
+deliberately. What landed:
+
+| file | contents |
+|---|---|
+| `src/portutils/strategies/__init__.py` | the package anchor; documents that only `instruments/` is populated |
+| `src/portutils/strategies/instruments/__init__.py` | ditto for the instruments subpackage |
+| `src/portutils/strategies/instruments/vol.py` | `synthetic_iv_surface`, ported from `crash.py:2579` with every constant as a keyword argument |
+| `src/portutils/strategies/instruments/pricing.py` | `black_scholes_put` — European, discounted-intrinsic floor, no clamp, no scipy |
+| `research/option_overlay_probe.py` + `.md` | the `# %%` strike-ladder probe and its write-up |
+
+**Why out of sequence.** The surface existed only as an inline code block inside
+`12-01-PLAN.md`. Every consumer would therefore have retyped it, and a retyped model is a
+different model wearing the same numbers. Landing it as one importable function with a
+verified test print is strictly cheaper than carrying it in prose through three more plans.
+The alternative — writing 16-01, applying it, then 16-02 — puts three plan cycles between the
+question "do these economics work?" and any answer to it.
+
+**Why this does not compromise Track A's zero-regression property.** Both modules are new,
+pure, and imported by nothing except a research script. There is no golden fixture to break,
+no live path to disturb, and no caller to update — which is the same argument that put the
+whole of Track A ahead of Track B.
+
+**Why the surface is NOT in `options.py`.** 12-01 is explicit that "the surface itself is a
+pipeline concern, passed in; the leg never fetches it" — a rule calls a
+`vol_fn(strike, tau) -> float` handed in by the pipeline. So the surface is a SIBLING of the
+pricer, not a member of the leg. Keeping `options.py` unwritten also leaves 16-02 free to
+write `SyntheticContract` and `OptionLeg` fresh rather than editing around existing code.
+
+**What the probe established** (full numbers in `research/option_overlay_probe.md`):
+
+1. The port is exact — all four of 12-01's quoted anchors reproduce to the printed precision
+   (IV 0.2098 / 0.1760, put 3.612 / 3.206), and the put never breaches its discounted
+   intrinsic floor across a swept grid.
+2. An ATM three-month put costs **3.53% of spot**, ≈14% of notional a year rolled quarterly.
+   That is the drag figure Phase 13 must beat, and it makes an at-the-money hedge implausible
+   on its face. The 0.90x strike at 0.85% (≈3.4%/yr) is the realistic candidate.
+3. The only window that exists (SPY, 250 bars, **+16.0%**, max drawdown **−9.1%**) cannot
+   answer the payoff half of the question. Restates the Phase 11 constraint; does not weaken it.
+4. The v1/v2 gap has the sign the 2026-08-29 decision predicts (current-spot reference is
+   cheaper in the selloff) at 1–6% rather than 11%, because the probe strikes its ladder once
+   and never rolls, so `K/S` at the trough was 0.81–1.01. The magnitude scales with distance
+   travelled since the strike was set. **The decision stands unchanged.**
+
+**What 16-02 must now do differently.** Nothing is re-derived: `OptionLeg.price()` is expected
+to be a thin wrapper over `pricing.black_scholes_put`, not a second implementation of
+Black-Scholes. Delta and theta are still 16-02's to write. `DIV_YIELD` is left at 0.0 in the
+probe to match 12-01's worked examples — SPY's ~1.2% is a real parameter `OptionLeg` must
+carry, and is listed as a gap in the write-up rather than silently ignored.
 
 ## Out of scope
 
