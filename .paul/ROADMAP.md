@@ -310,11 +310,19 @@ provenance and known gaps.
 - A long-history cache under `data/processed/`, plus a coverage report naming every gap
 - Whether an option-implied vol surface is obtainable at all, or whether Phase 12 must synthesise
   from realised/VIX vol — answered with evidence, not assumed
-- **Ragged-history loading in `PanelBuilder`** — see the blocker below
+- **Ragged-history loading in `PanelBuilder` AND in `cache_prices.py`** — see the blocker below
 - **An IBKR message reference** — the codes to expect, grouped, keyed by code
 
+**Starting position, measured 2026-08-31** (full inventory in
+`.paul/phases/11-long-history-data/CONTEXT.md`): three parquets and 27 CSVs, none reaching
+beyond one year. There is **no SPX series at all** — S&P exposure exists only as SPY, whose
+earliest bar anywhere in `data/` is 2025-04-14 — and **no NDX or QQQ series of any kind**.
+`data/reference/` is empty. The index leg the milestone rests on is therefore ~1 year deep,
+and the second index leg does not exist yet.
+
 **Plans:**
-- [ ] 11-01: Reach back decades — paginated IBKR history, free-source fallback, coverage report
+- [ ] 11-01: Reach back decades — paginated IBKR history, free-source fallback, coverage report,
+  ragged-history loading and the rebase anchor policy (Task 4)
 - [ ] 11-02: IBKR message reference — the error and notice codes to expect, grouped and keyed by code
 
 **BLOCKER found 2026-08-31, and it belongs in 11-01 rather than a later viz phase.**
@@ -332,7 +340,28 @@ is silently dropped for every symbol — the only `print` in `_load` fires on a 
 not on truncation. This directly defeats the phase goal and would let `COVERAGE.md` claim 1990
 while every plot starts in 2006.
 
-**Fix, decided 2026-08-31: keep the current behaviour as the default, add an opt-in mode.**
+**TWO SITES, not one — found 2026-08-31 during the Phase 11 survey.** `_tidy`
+(`src/pipelines/cache_prices.py:45`) ends at `:55` with
+
+```python
+out = out.astype(float).ffill().dropna(how="any")
+```
+
+which is the identical defect one layer EARLIER, in the code that writes the parquet. A
+SPY-from-1993 series cached beside a QQQ-from-1999 series is truncated to 1999 **in the file
+itself**, before `PanelBuilder` is constructed and before `COVERAGE.md` is generated — so
+fixing only the viz loader bakes the loss into the very file the coverage report describes.
+`_tidy`'s own comment is correct about why it exists ("the sim must never mark a leg at a
+made-up price"): right for a simulator frame, wrong for a coverage frame. The two are not the
+same frame.
+
+The compatibility argument differs by site. `panel.py` is read by existing figures, so the
+opt-in default below is required there. `cache_prices.py` writes NEW files under NEW tags, so
+a long-history tag has no existing reader to regress and ragged retention can simply be the
+behaviour for new panels — subject to re-running an existing tag still reproducing its bytes.
+
+**Fix, decided 2026-08-31 — written up as 11-01 Task 4, with AC-6: keep the current behaviour
+as the default, add an opt-in mode.**
 The existing `ffill` + `dropna` stays the default so no current caller changes behaviour and
 no existing figure moves. A new opt-in loading mode retains series with non-overlapping
 windows, leaving each series NaN outside its own coverage rather than truncating the panel.
@@ -492,4 +521,4 @@ Track B migrates working code and is separately gated and individually skippable
 
 ---
 *Roadmap created: 2026-08-01 — migrated from 12 pre-existing plans in `.claude/plans/`*
-*Last updated: 2026-08-31 — Phase 10 split into Track A (10-01 static) / Track B (10-02 gated live); Phase 11 gains 11-02 (IBKR message reference) and the PanelBuilder ragged-history blocker; 12-01 vol surface staged v1/v2*
+*Last updated: 2026-08-31 — Phase 10 split into Track A (10-01 static) / Track B (10-02 gated live); Phase 11 gains 11-02 (IBKR message reference), the ragged-history blocker (now TWO sites: `panel.py` and `cache_prices.py`) and its measured starting position; 12-01 vol surface staged v1/v2*
