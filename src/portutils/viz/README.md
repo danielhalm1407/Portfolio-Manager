@@ -5,7 +5,7 @@ Plotting helpers shared by notebooks, the Dash app and exported reports.
 | module | what |
 |---|---|
 | [`theme.py`](theme.py) | **the single source of truth for colour.** `ticker_colour_map()`, `apply_export_theme()` |
-| [`panel.py`](panel.py) | `PanelBuilder` — data-loading plus Plotly theming for portfolio notebooks |
+| [`panel.py`](panel.py) | `PanelBuilder` — data-loading plus Plotly theming for portfolio notebooks. Includes various different plots that one can call on a dataframe of returns. |
 | [`dash_timeseries_app.py`](dash_timeseries_app.py) | configurable time-series and histogram apps: `TimeSeriesAppConfig`, `HistogramAppConfig`, `ColourGroupConfig`, `GradientColourMap`, `AutoLabelMap` |
 
 ## One colour per ticker, everywhere

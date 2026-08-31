@@ -61,8 +61,8 @@ Progress: [█████░░░░░] 50%
 | 7 | Staged live verification runbook | 2 | In progress | - |
 | 8 | Documentation hub | 1 | Complete | 2026-08-01 |
 | 9 | Research half — themes to tilts | TBD | Not started | - |
-| 10 | Deployment — web app | TBD | Not started | - |
-| 11 | Long-history data foundation | 1 | Planning | - |
+| 10 | Deployment — web app | 2 | Not started | - |
+| 11 | Long-history data foundation | 2 | Planning | - |
 | 12 | Option overlay engine | TBD | Not started | - |
 | 13 | Walk-forward validation harness | TBD | Not started | - |
 | 14 | Regime labelling and scenario guardrails | TBD | Not started | - |
@@ -221,19 +221,56 @@ allocator.
 
 **Goal:** A browser front end over the execution stack: a dashboard of positions, P&L and attribution,
 plus a gated control for the live rebalancer.
-**Depends on:** Phase 7 (the runbook must prove the stack before a browser is allowed to drive it)
-**Research:** Likely (hosting, secret handling, how the approval gate re-expresses in a browser)
+**Research:** Likely for Track B (secret handling, how the approval gate re-expresses in a browser).
+Unlikely for Track A — the hosting question is answered below.
+
+**Split into two tracks, 2026-08-31.** The two halves have opposite hosting constraints and
+opposite dependencies, and bundling them gated a zero-risk showcase behind a live-trading
+runbook it has nothing to do with.
+
+*Track A — static showcase. No secrets, no TWS, no server. Depends on nothing.*
+- [ ] 10-01: Pre-rendered Plotly figures published as a static site
 
 **Scope:**
-- Dashboard: positions, P&L split, attribution figures
-- Live-rebalancer control behind an explicit approval gate — the dry-run table re-derived for a browser
-- Hosting deliberately undecided; static hosting is largely ruled out (no secrets, no TWS reachability)
+- A pipeline under `src/pipelines/` that renders the existing figure builders to HTML and
+  writes the result to a published directory
+- `include_plotlyjs="directory"` so `plotly.min.js` is emitted ONCE beside the pages and every
+  figure references that single copy, rather than inlining ~3MB per figure
+- Figures sourced from the EXISTING builders — `PanelBuilder` (`viz/panel.py`) and
+  `_build_level_figure` (`viz/dash_timeseries_app.py:637`). Neither needs rewriting: the
+  figure layer is already separate from the Dash layer, which only wraps it
+  (`LevelDashApp`, `dash_timeseries_app.py:1041`)
+- Server-free interactivity kept deliberately: hover, zoom, pan, legend toggle, range sliders,
+  `updatemenus` dropdowns and animation frames are all client-side. `PanelBuilder`'s
+  `animation_indices` / `add_in_frames` / `play_button` survive unchanged, and
+  `_build_level_figure_with_plotly_mode_buttons` (`dash_timeseries_app.py:898`) is already the
+  `updatemenus` pattern that replaces most simple callbacks
 
-**Plans:**
-- [ ] 10-01: To be defined during `/paul:plan`
+*Track B — gated live control. Server, secrets, TWS reachability.*
+**Depends on:** Phase 7 (the runbook must prove the stack before a browser is allowed to drive it)
+- [ ] 10-02: Live-rebalancer control behind an explicit approval gate
+
+**Scope:**
+- Dashboard over LIVE positions, P&L split and attribution — as opposed to Track A's rendered snapshot
+- Live-rebalancer control behind an explicit approval gate — the dry-run table re-derived for a browser
+- Hosting deliberately undecided, but static hosting IS ruled out here: no secrets, no TWS
+  reachability. `gunicorn` is already a declared dependency
+
+**Hosting, settled for Track A (2026-08-31).** Static hosting was previously written off for
+the whole phase. That is correct for Track B and wrong for Track A. Dash itself has no static
+export and will not get one — it is Flask, and its callbacks are HTTP POSTs to
+`/_dash-update-component`, so no server means no callbacks. But a Dash app is not the only way
+to publish a Plotly figure: `fig.write_html` produces a fully interactive page with no runtime
+at all. What Track A cannot do is anything requiring Python at request time — live IBKR reads,
+secrets, the rebalancer control. That is exactly the Track B list.
+
+**Naming footgun:** HoloViz **Panel** does have a Pyodide static export; **Dash** does not.
+This repo's `viz/panel.py` is neither — it is a local `PanelBuilder` class. Do not conflate the
+three when researching 10-01.
 
 **Numbering note:** appended as 10 rather than 9 because 9 was already claimed by the v0.3 research
 phase. v0.2 is therefore a non-contiguous range (4-8, 10) by choice — see the 2026-08-06 decision.
+The Track A/B split adds a plan, not a phase, so the v0.2 denominator is unchanged.
 
 ## Milestone v0.4: Does hedging actually work?
 
@@ -273,9 +310,55 @@ provenance and known gaps.
 - A long-history cache under `data/processed/`, plus a coverage report naming every gap
 - Whether an option-implied vol surface is obtainable at all, or whether Phase 12 must synthesise
   from realised/VIX vol — answered with evidence, not assumed
+- **Ragged-history loading in `PanelBuilder`** — see the blocker below
+- **An IBKR message reference** — the codes to expect, grouped, keyed by code
 
 **Plans:**
 - [ ] 11-01: Reach back decades — paginated IBKR history, free-source fallback, coverage report
+- [ ] 11-02: IBKR message reference — the error and notice codes to expect, grouped and keyed by code
+
+**BLOCKER found 2026-08-31, and it belongs in 11-01 rather than a later viz phase.**
+`PanelBuilder._load` (`viz/panel.py:165-167`) ends with:
+
+```python
+df_all = df_all[df_all.index >= self.start_date].copy()
+df_all.ffill(inplace=True)
+df_all.dropna(inplace=True)
+```
+
+An outer join followed by `ffill` then `dropna` truncates the WHOLE panel to the latest
+first-bar across all tickers. Load a 1990 VIX series beside a 2006 KMLM series and 1990-2006
+is silently dropped for every symbol — the only `print` in `_load` fires on a load exception,
+not on truncation. This directly defeats the phase goal and would let `COVERAGE.md` claim 1990
+while every plot starts in 2006.
+
+**Fix, decided 2026-08-31: keep the current behaviour as the default, add an opt-in mode.**
+The existing `ffill` + `dropna` stays the default so no current caller changes behaviour and
+no existing figure moves. A new opt-in loading mode retains series with non-overlapping
+windows, leaving each series NaN outside its own coverage rather than truncating the panel.
+It must work for BOTH price levels and returns series, since the derived-frame wrappers
+(`_normalise`, `_pct_returns`, `_daily_returns`, `_log_returns`, `panel.py:187-211`) all run
+off the same frame — a rebase or a first-difference on a ragged frame must anchor to each
+series' own first observation, not to the panel's.
+
+**Visualisation utilities — the two that exist, and which one owns this.** `PanelBuilder`
+(`viz/panel.py`) and `LevelDashApp` (`viz/dash_timeseries_app.py`). Ragged-history inspection
+belongs in `PanelBuilder`, since it needs no Dash process — `make_panel_subplots`
+(`panel.py:276`) is the entry point. No third utility is needed; the gap was the loader, not
+the chart.
+
+**IBKR message reference (11-02).** No such document exists anywhere in the repo today. It
+should record the taxonomy the code ALREADY implements rather than invent a parallel one:
+`_ADVISORY_ORDER_CODES = {399}` (`ingestion/ibkr_requests.py:445`), the connection-noise filter
+`(2104, 2106, 2158, 2176)` (`:820`), the `errorCode >= 2100` advisory threshold (`:859`), and
+the three-way `req_messages` / `req_notices` / `req_errors` split. That is an
+**advisory-versus-terminal** axis. The grouping requested — account permissions including
+geography, IBKR or subscription limits, instrument-level limits (no data at all / not beyond a
+date / not at that frequency / not tradeable), and orders versus data — is a **cause** axis.
+Both are useful and orthogonal, so the document is keyed by code and carries both as columns.
+STATE.md's accumulated context already seeds it: 10314, 2174, and the PRIIPs/KID
+client-eligibility rejection. 11-01 Task 1 already captures the verbatim ceiling error text;
+11-02 turns that one-off probe output into a standing reference.
 
 ### Phase 12: Option overlay engine
 
@@ -409,4 +492,4 @@ Track B migrates working code and is separately gated and individually skippable
 
 ---
 *Roadmap created: 2026-08-01 — migrated from 12 pre-existing plans in `.claude/plans/`*
-*Last updated: 2026-08-26 — v0.5 milestone added (phase 16, strategy architecture); 12-01 amended*
+*Last updated: 2026-08-31 — Phase 10 split into Track A (10-01 static) / Track B (10-02 gated live); Phase 11 gains 11-02 (IBKR message reference) and the PanelBuilder ragged-history blocker; 12-01 vol surface staged v1/v2*
