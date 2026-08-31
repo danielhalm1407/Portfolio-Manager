@@ -229,7 +229,21 @@ opposite dependencies, and bundling them gated a zero-risk showcase behind a liv
 runbook it has nothing to do with.
 
 *Track A — static showcase. No secrets, no TWS, no server. Depends on nothing.*
-- [ ] 10-01: Pre-rendered Plotly figures published as a static site
+- [~] 10-01: Pre-rendered Plotly figures published as a static site
+
+**Seeded 2026-08-31, ahead of the plan.** The whole pattern now exists end to end, on the
+option-probe figures rather than on `PanelBuilder`'s: `src/pipelines/option_probe_figures.py`
+holds the builders and a `main()` that stamps `theme.apply_export_theme` and writes four
+figures plus a generated `index.html` to `docs/`, with `include_plotlyjs="directory"`.
+`docs/` was chosen over `outputs/` because `outputs/` is gitignored (`.gitignore:37`) and a
+published page has to be committed — and because Pages serves `docs/` off the default branch
+with no workflow, which matters since `.github/` has none. `docs/README.md` documents the
+regeneration command and the trade-off. Measured cost of the `directory` choice: the shared
+`plotly.min.js` is **4.1 MB committed once**, with each figure 24-107 KB on top;
+`include_plotlyjs="cdn"` is a one-word change taking `docs/` to ~270 KB if that is judged too
+heavy. What 10-01 still owes: the same treatment for the `PanelBuilder` /
+`_build_level_figure` figures, and enabling Pages in repository settings (a settings change,
+not a code change).
 
 **Scope:**
 - A pipeline under `src/pipelines/` that renders the existing figure builders to HTML and
@@ -534,4 +548,4 @@ Track B migrates working code and is separately gated and individually skippable
 
 ---
 *Roadmap created: 2026-08-01 — migrated from 12 pre-existing plans in `.claude/plans/`*
-*Last updated: 2026-08-31 — Phase 10 split into Track A (10-01 static) / Track B (10-02 gated live); Phase 11 gains 11-02 (IBKR message reference), the ragged-history blocker (now TWO sites: `panel.py` and `cache_prices.py`) and its measured starting position; 12-01 vol surface staged v1/v2*
+*Last updated: 2026-08-31 — 10-01's static-export pattern seeded end to end into `docs/`; Phase 10 split into Track A (10-01 static) / Track B (10-02 gated live); Phase 11 gains 11-02 (IBKR message reference), the ragged-history blocker (now TWO sites: `panel.py` and `cache_prices.py`) and its measured starting position; 12-01 vol surface staged v1/v2*

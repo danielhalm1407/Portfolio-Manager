@@ -1,0 +1,27 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Portfolio Manager — option overlay probe</title>
+<style>
+  body { background: #111; color: #e0e0e0;
+         font: 16px/1.6 system-ui, -apple-system, sans-serif;
+         max-width: 46rem; margin: 0 auto; padding: 3rem 1.5rem; }
+  a { color: #3987e5; }
+  li { margin: .6rem 0; }
+  p.note { color: #6e7681; font-size: .9rem; }
+</style></head><body>
+  <h1>Option overlay probe</h1>
+  <p>Pre-rendered, fully interactive Plotly figures — hover, zoom and legend toggles all work
+     with no server. Rendered by
+     <code>src/pipelines/option_probe_figures.py</code>; the write-up is
+     <code>research/option_overlay_probe.md</code>.</p>
+  <ul>
+      <li><a href="figures/iv_smirk.html">The synthetic IV surface at one spot — skew, term structure and convexity</a></li>
+      <li><a href="figures/iv_paths.html">Implied vol per ladder strike through time — v1 frozen vs v2 current-spot</a></li>
+      <li><a href="figures/put_paths.html">The ladder valued through time, against spot</a></li>
+      <li><a href="figures/drawdown_episode.html">Puts struck at the peak and carried through the drawdown</a></li>
+  </ul>
+  <p class="note">Underlying: SPY close, 250 bars, 2025-07-28 to 2026-07-24. Vol is a synthetic
+     surface with a constant ATM level, not market data — see the write-up for what that does and
+     does not support.</p>
+</body></html>

@@ -308,14 +308,46 @@ write `SyntheticContract` and `OptionLeg` fresh rather than editing around exist
    answer the payoff half of the question. Restates the Phase 11 constraint; does not weaken it.
 4. The v1/v2 gap has the sign the 2026-08-29 decision predicts (current-spot reference is
    cheaper in the selloff) at 1–6% rather than 11%, because the probe strikes its ladder once
-   and never rolls, so `K/S` at the trough was 0.81–1.01. The magnitude scales with distance
-   travelled since the strike was set. **The decision stands unchanged.**
+   and never rolls, so `K/S` at the trough was 0.81–1.01 and the two references were asking the
+   smirk almost the same question. The magnitude scales with distance travelled since the strike
+   was set. **The decision stands unchanged.**
+5. **Amended 2026-08-31, same day.** The probe's first pass reported that the window "cannot
+   answer the payoff half", which was wrong. The window's −9.1% drawdown ran from 695.49 down
+   to 631.97, but the ladder was struck at the WINDOW START (636.94) after a +9.2% rally — so
+   the fall happened entirely ABOVE every strike and the ladder finished within 1% of where it
+   began. That measures carry, not payoff. Cell 8 restrikes at the drawdown's peak, which is
+   where a rolled hedge would stand, and carries one option through its full 63-day life:
+   **0.90x returns +107%, 0.95x +161%, 1.00x +156%** on the same nine percent dip. The mechanic
+   works and is monetisable without holding to expiry.
+6. **The 0.80x strike LOSES 46.9% on that same fall**, because a 20%-OTM put is not reached by a
+   9% selloff and under a frozen vol level it is pure theta. With an illustrative term-A
+   response (ATM level 0.16 → 0.34 across the drawdown) it returns **+317%** instead. Deep-OTM
+   protection is almost entirely VEGA, so v1 cannot price the thing it is bought for — and the
+   understatement is worst on the cheapest strikes, which are the ones a retail hedge buys.
 
 **What 16-02 must now do differently.** Nothing is re-derived: `OptionLeg.price()` is expected
 to be a thin wrapper over `pricing.black_scholes_put`, not a second implementation of
 Black-Scholes. Delta and theta are still 16-02's to write. `DIV_YIELD` is left at 0.0 in the
 probe to match 12-01's worked examples — SPY's ~1.2% is a real parameter `OptionLeg` must
 carry, and is listed as a gap in the write-up rather than silently ignored.
+
+**What 16-02 must now do differently — strengthened by findings 5 and 6.** `RollCalendar` is
+not a convenience. Restriking is what puts the next drawdown IN FRONT of the strike; without
+it a backtest measures carry and reports it as a result, which is precisely the error the
+probe made and then corrected. Any harness built on a never-restruck ladder is measuring the
+wrong quantity, however long the history behind it.
+
+**And a reordering for Phase 11.** The strongest argument for 11-01 is no longer window
+length, it is that **the vol LEVEL is where the payoff lives**. Finding 6 puts a number on it:
+the same put on the same path goes from −47% to +317% when the ATM level moves. `base = 0.16`
+frozen makes every payoff figure in this probe a FLOOR rather than an estimate, and the floor
+is furthest from the truth exactly where the cheap strikes are.
+
+**Figure export (2026-08-31).** The probe's four figures are built by
+`src/pipelines/option_probe_figures.py` and rendered to `docs/` — builders shared between the
+research cells and the exporter, following the arrangement `viz/theme.py` documents for
+`rebalance_study.py` / `rebalance_realisation.py`. That is also the first working instance of
+Phase 10 Track A's pattern; see the ROADMAP's 10-01 entry.
 
 ## Out of scope
 
