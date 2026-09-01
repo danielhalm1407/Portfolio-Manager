@@ -37,13 +37,24 @@ each, not 4 MB each. If the vendored copy is ever judged too heavy for the repo,
 `include_plotlyjs="cdn"` in `main()` is a one-word change and takes `docs/` to roughly 270 KB — at
 the cost of needing the CDN reachable when someone opens the page.
 
-## Theming
+## Theming — split in two, 2026-08-31
 
-`theme.apply_export_theme(fig)` is applied immediately before `write_html` and is **not
-optional**. A figure built for the VS Code interactive window has a transparent background and
-relies on the host to supply a dark surface; a standalone file has no such host, so the browser
-paints its own white and a dark figure becomes unreadable. See the docstring at the top of
-[`src/portutils/viz/theme.py`](../src/portutils/viz/theme.py).
+The palette is applied in two stages, because only one of its halves depends on where the figure
+is shown:
+
+| half | applied | why there |
+|---|---|---|
+| **ink + gridlines** — `theme.apply_figure_theme(fig)` | at BUILD time, in each `fig_*` builder | `#e0e0e0` text is correct in every context: the interactive window, a Dash page, a saved file. Nothing about the destination changes it |
+| **background** — `theme.apply_export_theme(fig)` | at WRITE time, in `main()` | this one genuinely differs. A figure shown inline sits on a surface the host supplies; a standalone file has no host, so the browser paints its own white |
+
+Before the split there were only two options, and both were wrong: theme nothing and get plotly's
+default navy text on a dark editor background, or bake an opaque background in and break the
+inline case. `apply_export_theme` still applies **both** halves, so every existing caller
+(`pipelines/rebalance_study.py:440`) is unchanged and calling it twice is harmless.
+
+The practical consequence: **the inline figure and the published page now carry identical
+colours**, and differ only in the one property that has to differ. See the docstrings on both
+functions in [`src/portutils/viz/theme.py`](../src/portutils/viz/theme.py).
 
 ## Status
 

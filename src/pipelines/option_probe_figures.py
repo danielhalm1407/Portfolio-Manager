@@ -215,10 +215,12 @@ def episode_paths(spot_path, peak, tenor=TENOR_YEARS, moneyness=MONEYNESS,
 # backgrounds. Correct as-is inline; main() stamps the export palette on.
 # ============================================================================
 
-# Transparent rather than a dark template. theme.py is explicit that the dark palette applies
-# where an HTML DOCUMENT is produced; a figure shown in the VS Code interactive window inherits
-# VS Code's own theme through a transparent background and already reads correctly. Baking
-# plotly_dark in here would fix the export case by breaking the inline one.
+# The BACKGROUND is the only property that depends on where the figure is shown, so it is the
+# only one left undecided here: transparent, so a figure shown in the VS Code interactive window
+# inherits VS Code's own surface. `main()` stamps the opaque surface on at export, where there is
+# no host to inherit from. Everything ELSE in the palette — ink and gridlines — is applied at
+# build time by theme.apply_figure_theme() at the bottom of each builder, so the figure carries
+# the repo's colours wherever it goes rather than falling back to plotly's default navy text.
 _TRANSPARENT = dict(paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)")
 
 
@@ -249,7 +251,9 @@ def fig_smirk(spot=SMIRK_SPOT, tenors=SMIRK_TENORS, grid=SMIRK_MONEYNESS_GRID, b
         xaxis_title="moneyness K / S", yaxis_title="implied vol",
         yaxis_tickformat=".0%", hovermode="x unified", **_TRANSPARENT,
     )
-    return fig
+    # The display-independent half of the palette, applied here rather than at export so the
+    # inline figure and the published page carry identical colours.
+    return theme.apply_figure_theme(fig)
 
 
 def fig_iv_paths(iv_v1, iv_v2, spot_ref, tenor=TENOR_YEARS):
@@ -274,7 +278,9 @@ def fig_iv_paths(iv_v1, iv_v2, spot_ref, tenor=TENOR_YEARS):
         xaxis_title="date", yaxis_title="implied vol", yaxis_tickformat=".0%",
         hovermode="x unified", **_TRANSPARENT,
     )
-    return fig
+    # The display-independent half of the palette, applied here rather than at export so the
+    # inline figure and the published page carry identical colours.
+    return theme.apply_figure_theme(fig)
 
 
 def fig_put_paths(put_v1, put_v2, spot_path, tenor=TENOR_YEARS, symbol=UNDERLYING):
@@ -305,7 +311,9 @@ def fig_put_paths(put_v1, put_v2, spot_path, tenor=TENOR_YEARS, symbol=UNDERLYIN
         yaxis2=dict(title=f"{symbol} spot", overlaying="y", side="right", showgrid=False),
         hovermode="x unified", **_TRANSPARENT,
     )
-    return fig
+    # The display-independent half of the palette, applied here rather than at export so the
+    # inline figure and the published page carry identical colours.
+    return theme.apply_figure_theme(fig)
 
 
 def fig_drawdown_episode(idx, strikes, mtm_flat, mtm_spike, spot_path, peak, trough,
@@ -347,7 +355,9 @@ def fig_drawdown_episode(idx, strikes, mtm_flat, mtm_spike, spot_path, peak, tro
         yaxis2=dict(title=f"{symbol} spot", overlaying="y", side="right", showgrid=False),
         hovermode="x unified", **_TRANSPARENT,
     )
-    return fig
+    # The display-independent half of the palette, applied here rather than at export so the
+    # inline figure and the published page carry identical colours.
+    return theme.apply_figure_theme(fig)
 
 
 # ============================================================================
