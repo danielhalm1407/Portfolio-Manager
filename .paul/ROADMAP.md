@@ -229,7 +229,21 @@ opposite dependencies, and bundling them gated a zero-risk showcase behind a liv
 runbook it has nothing to do with.
 
 *Track A — static showcase. No secrets, no TWS, no server. Depends on nothing.*
-- [ ] 10-01: Pre-rendered Plotly figures published as a static site
+- [~] 10-01: Pre-rendered Plotly figures published as a static site
+
+**Seeded 2026-08-31, ahead of the plan.** The whole pattern now exists end to end, on the
+option-probe figures rather than on `PanelBuilder`'s: `src/pipelines/option_probe_figures.py`
+holds the builders and a `main()` that stamps `theme.apply_export_theme` and writes four
+figures plus a generated `index.html` to `docs/`, with `include_plotlyjs="directory"`.
+`docs/` was chosen over `outputs/` because `outputs/` is gitignored (`.gitignore:37`) and a
+published page has to be committed — and because Pages serves `docs/` off the default branch
+with no workflow, which matters since `.github/` has none. `docs/README.md` documents the
+regeneration command and the trade-off. Measured cost of the `directory` choice: the shared
+`plotly.min.js` is **4.1 MB committed once**, with each figure 24-107 KB on top;
+`include_plotlyjs="cdn"` is a one-word change taking `docs/` to ~270 KB if that is judged too
+heavy. What 10-01 still owes: the same treatment for the `PanelBuilder` /
+`_build_level_figure` figures, and enabling Pages in repository settings (a settings change,
+not a code change).
 
 **Scope:**
 - A pipeline under `src/pipelines/` that renders the existing figure builders to HTML and
@@ -415,6 +429,13 @@ Every economics decision in 12-01 — European pricing with the discounted intri
 the bar-based roll, collar redeployment, strike-dependent IV, the floor 0.90 / cap 1.28
 parameters — is carried across verbatim. Phase 12 is complete when 16-02 and 16-03 land.
 
+**Partially discharged 2026-08-31.** The vol surface and the European put — the two pieces of
+12-01 that were only ever inline code blocks in the plan — are now real modules under
+`src/portutils/strategies/instruments/`, verified against 12-01's own quoted numbers by
+`research/option_overlay_probe.py`. That probe also produced the first hard cost figure for
+the milestone: an ATM three-month put is 3.53% of spot, ≈14% of notional a year rolled
+quarterly. Phase 12 is still complete only when 16-02 and 16-03 land in full.
+
 ### Phase 13: Walk-forward validation harness
 
 **Goal:** Rolling-origin train/validate: fit parameters on a backward window, score on the forward
@@ -505,8 +526,14 @@ Track B migrates working code and is separately gated and individually skippable
 - [ ] 16-01: Stage skeleton — `observe` / `constraints` / `sizing` / `orders` / `schedule` /
   `targets` / `instruments` / `rules`. Stage functions seeded from `weights_to_units` by
   COPY, leaving the original in place
-- [ ] 16-02: Option instruments — `instruments/options.py` (`OptionLeg`) and
-  `schedule.py` (`RollCalendar`). Economics spec: 12-01 AC-1, AC-2
+- [~] 16-02: Option instruments — `instruments/options.py` (`OptionLeg`) and
+  `schedule.py` (`RollCalendar`). Economics spec: 12-01 AC-1, AC-2.
+  **Part-landed 2026-08-31, ahead of 16-01:** `instruments/vol.py` (`synthetic_iv_surface`)
+  and `instruments/pricing.py` (`black_scholes_put`) exist and reproduce all four of 12-01's
+  anchor numbers. Still owed: `SyntheticContract`, `OptionLeg` (delta, theta, a `price()`
+  wrapping the pricer), `RollCalendar`. See the "Landed ahead of the plans" section of
+  `.paul/phases/16-strategy-architecture/CONTEXT.md` and
+  `research/option_overlay_probe.md`
 - [ ] 16-03: Option rules — `rules/options.py`, the three structures plus theta drag.
   Economics spec: 12-01 AC-3 through AC-6
 - [ ] 16-04: `ConstrainedWeightRule` written fresh against stages 2-3, tested standalone.
@@ -521,4 +548,4 @@ Track B migrates working code and is separately gated and individually skippable
 
 ---
 *Roadmap created: 2026-08-01 — migrated from 12 pre-existing plans in `.claude/plans/`*
-*Last updated: 2026-08-31 — Phase 10 split into Track A (10-01 static) / Track B (10-02 gated live); Phase 11 gains 11-02 (IBKR message reference), the ragged-history blocker (now TWO sites: `panel.py` and `cache_prices.py`) and its measured starting position; 12-01 vol surface staged v1/v2*
+*Last updated: 2026-08-31 — 10-01's static-export pattern seeded end to end into `docs/`; Phase 10 split into Track A (10-01 static) / Track B (10-02 gated live); Phase 11 gains 11-02 (IBKR message reference), the ragged-history blocker (now TWO sites: `panel.py` and `cache_prices.py`) and its measured starting position; 12-01 vol surface staged v1/v2*
