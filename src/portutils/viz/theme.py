@@ -10,6 +10,16 @@ PIPELINE owning a definition that `research/rebalance_realisation.py` then reach
 One import-light module fixes both: anything can ask for a colour without pulling in the
 1,700-line Dash app, and there is one place to change when the palette changes.
 
+FINISHED 2026-08-31. Defining the token was only half the job — the old sites went on carrying
+hand-copied literals for months afterwards, so "one place to change" was aspirational rather than
+true. ``panel.py``'s ``OFF_WHITE`` (:931), its PCA-waterfall title (:559) and
+``rebalance_study.py``'s ``FIG_KW`` (:104) now all read ``INK`` from here.
+
+ONE DIVERGENCE SURVIVES, DELIBERATELY: ``make_level_figure``'s ``font_color`` default
+(``dash_timeseries_app.py:1542``, again at :1701) is the CSS keyword ``white``, i.e. full-strength
+#ffffff, not this off-white. It is left alone pending a decision on whether the Dash surface
+wants the brighter text — a question about design intent, not a stray literal.
+
 THE RULE ABOUT WHERE THE DARK PALETTE APPLIES
 ---------------------------------------------
 It applies where an HTML DOCUMENT is produced — a running Dash app, or a figure saved with
@@ -171,28 +181,23 @@ RESIDUAL_COLOUR = MUTED
 # EXPORT THEMING
 # ============================================================================
 
-def apply_figure_theme(fig, *, ink=INK, grid=GRID):
-    """Stamp the DISPLAY-INDEPENDENT half of the palette — text and gridlines — in place.
+def apply_export_theme(fig, *, ink=INK, grid=GRID, paper=PAPER_BG, plot=PLOT_BG):
+    """Stamp the dark palette onto a FINISHED figure, in place, and return it.
 
-    Split out of ``apply_export_theme`` on 2026-08-31. The two halves of that function were never
-    the same kind of thing:
-
-    * ink and grid are correct in EVERY context. ``#e0e0e0`` text is right in the VS Code
-      interactive window, right in a Dash page, right in a saved file. Nothing about the
-      destination changes what colour the tick labels should be.
-    * the BACKGROUND is the only genuinely destination-dependent property, for the reason the
-      module docstring gives: a figure shown inline sits on a surface the host already supplies,
-      and a saved file has no host.
-
-    Bundling them meant a builder had exactly two choices — theme nothing and get plotly's
-    default navy text inline, or bake in an opaque background and break the inline case. Calling
-    THIS at build time and ``apply_export_theme`` at write time removes that trade-off: the
-    figure object carries the full palette everywhere it goes, and only its surface is decided
-    late.
+    Called immediately before ``write_html``. Applied to a completed figure rather than threaded
+    through figure construction on purpose: the ``fig_*`` builders in
+    ``pipelines/rebalance_study.py`` serve BOTH the pipeline (which saves HTML) and
+    ``research/rebalance_realisation.py`` (which shows the same figures inline). Theming at the
+    point of export means one implementation serves both, with no ``theme=`` argument to thread
+    through five signatures and no change to what the interactive window sees.
 
     Only presentation attributes are touched — never traces, never data.
     """
     fig.update_layout(
+        # Opaque backgrounds. This is the actual fix for white standalone HTML: the saved document
+        # has no page div behind it, so the figure has to bring its own surface.
+        paper_bgcolor=paper,
+        plot_bgcolor=plot,
         # Global font, then the specific roles. Plotly does not reliably inherit the global font
         # colour into axis tick labels, so each role is set explicitly rather than assumed.
         font=dict(color=ink),
@@ -208,37 +213,5 @@ def apply_figure_theme(fig, *, ink=INK, grid=GRID):
     fig.update_yaxes(
         gridcolor=grid, zerolinecolor=grid, linecolor=grid, tickcolor=grid,
         title_font=dict(color=ink), tickfont=dict(color=ink),
-    )
-    return fig
-
-
-def apply_export_theme(fig, *, ink=INK, grid=GRID, paper=PAPER_BG, plot=PLOT_BG):
-    """Stamp the dark palette onto a FINISHED figure, in place, and return it.
-
-    Called immediately before ``write_html``. Applied to a completed figure rather than threaded
-    through figure construction on purpose: the ``fig_*`` builders in
-    ``pipelines/rebalance_study.py`` serve BOTH the pipeline (which saves HTML) and
-    ``research/rebalance_realisation.py`` (which shows the same figures inline). Theming at the
-    point of export means one implementation serves both, with no ``theme=`` argument to thread
-    through five signatures.
-
-    AMENDED 2026-08-31. That last clause used to end "and no change to what the interactive
-    window sees", which was true and was the problem: it left the interactive window with NO
-    palette at all, so a builder that did not hand-roll its own font colour rendered plotly's
-    default navy text on a dark editor background. The colour half now lives in
-    ``apply_figure_theme`` and is meant to be called at BUILD time; this function remains the
-    single call to make before ``write_html`` and still applies both halves, so every existing
-    caller keeps working unchanged and calling it twice is harmless.
-
-    Only presentation attributes are touched — never traces, never data.
-    """
-    # The display-independent half. Idempotent, so a figure already themed at build time is
-    # simply re-stamped with the same values.
-    apply_figure_theme(fig, ink=ink, grid=grid)
-    fig.update_layout(
-        # Opaque backgrounds. This is the actual fix for white standalone HTML: the saved document
-        # has no page div behind it, so the figure has to bring its own surface.
-        paper_bgcolor=paper,
-        plot_bgcolor=plot,
     )
     return fig

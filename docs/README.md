@@ -37,24 +37,27 @@ each, not 4 MB each. If the vendored copy is ever judged too heavy for the repo,
 `include_plotlyjs="cdn"` in `main()` is a one-word change and takes `docs/` to roughly 270 KB — at
 the cost of needing the CDN reachable when someone opens the page.
 
-## Theming — split in two, 2026-08-31
+## Theming
 
-The palette is applied in two stages, because only one of its halves depends on where the figure
-is shown:
+Every colour on these figures comes from
+[`src/portutils/viz/theme.py`](../src/portutils/viz/theme.py) — the repo's single palette — and is
+passed straight through the plotly arguments in each `fig_*` builder (`_AXIS` and `_LAYOUT` in
+`option_probe_figures.py`). No literals, and no theming helper of its own.
 
-| half | applied | why there |
-|---|---|---|
-| **ink + gridlines** — `theme.apply_figure_theme(fig)` | at BUILD time, in each `fig_*` builder | `#e0e0e0` text is correct in every context: the interactive window, a Dash page, a saved file. Nothing about the destination changes it |
-| **background** — `theme.apply_export_theme(fig)` | at WRITE time, in `main()` | this one genuinely differs. A figure shown inline sits on a surface the host supplies; a standalone file has no host, so the browser paints its own white |
+It is set at **build** time, not at export, because it is correct in every context: `#e0e0e0`
+reads right in the VS Code interactive window, in a Dash page and in a saved file alike. Without
+it a figure silently falls back to plotly's default template — dark navy text, illegible on a dark
+editor background.
 
-Before the split there were only two options, and both were wrong: theme nothing and get plotly's
-default navy text on a dark editor background, or bake an opaque background in and break the
-inline case. `apply_export_theme` still applies **both** halves, so every existing caller
-(`pipelines/rebalance_study.py:440`) is unchanged and calling it twice is harmless.
+`theme.apply_export_theme(fig)` is then applied immediately before `write_html`, and is **not
+optional**. It supplies the one property that genuinely depends on destination: an opaque
+background. A figure shown inline sits on a surface the host provides; a standalone file has no
+host, so a transparent figure lets the browser paint its own white.
 
-The practical consequence: **the inline figure and the published page now carry identical
-colours**, and differ only in the one property that has to differ. See the docstrings on both
-functions in [`src/portutils/viz/theme.py`](../src/portutils/viz/theme.py).
+**Known cosmetic gap:** plotly's generated page carries only `html, body {height: 100%}` as CSS —
+no `margin: 0` — so the dark figure sits inside the browser's default ~8px body margin and shows a
+thin white frame. The fix is a page-level stylesheet rather than a figure change; see
+`index.html`, which already sets `theme.PAGE_BG` on its own body.
 
 ## Status
 

@@ -29,6 +29,43 @@ WHAT THE FIGURES SHOW
 4. ``fig_drawdown_episode`` a put struck AT THE PEAK and held through the drawdown — the figure
                             that shows monetisation rather than carry
 
+WHY THESE ARE NOT BUILT THROUGH ``viz/panel.py`` (checked 2026-08-31)
+--------------------------------------------------------------------
+``PanelBuilder`` DOES already own a dark theme — ``apply_dark_theme`` (panel.py:1059) and
+``dark_axis_style`` (panel.py:963), both classmethods so they can be called without an instance.
+Two things came out of actually reading them, and neither is what one would assume:
+
+1. **It is not applied uniformly inside panel.py itself.** Only THREE of its six figure builders
+   call it — ``add_pca_waterfall`` (:619), ``add_var_explained_chart`` (:698) and
+   ``add_loadings_comparison`` (:781). ``make_panel_subplots``, ``add_sector_traces`` and
+   ``add_sector_correlation_heatmaps`` do not; they set colours inline instead
+   (``tickfont=dict(color='white')`` at :575, ``color="gray"`` at :668, ``color='white'`` at
+   :694). So "the panel.py figures are themed" is true of half of them.
+
+2. **No panel.py builder produces these SHAPES.** Its builders are a sector-per-subplot grid, a
+   correlation heatmap and three PCA charts — all of them structurally specific. None takes
+   "arbitrary series, one trace per column, optional secondary axis", which is what all four
+   figures here need. There is nothing to route through.
+
+The closest generic builder in the repo is ``make_level_figure``
+(``dash_timeseries_app.py:1517``), which IS a multi-series line builder and would be the natural
+home for the three TIME-INDEXED figures here. It cannot take them today for two concrete reasons:
+
+* **no secondary-axis support.** ``yaxis2`` / ``secondary_y`` appear nowhere in that module, and
+  ``fig_put_paths`` and ``fig_drawdown_episode`` both put spot on a right-hand axis.
+* **it is time-series specific** — ``reindex``, ``close_hour``, ``x_tick_label_mode`` — while
+  ``fig_smirk``'s x-axis is moneyness, not a date. That one has no analogue anywhere.
+
+**Conclusion: a new generic builder would be required**, not a reuse. That is 10-01 / 16-07
+territory (one multi-series builder serving the Dash app, the static export and research alike),
+and deliberately not attempted here. Recorded so the next person does not re-derive it.
+
+``apply_dark_theme`` is also not usable as a THEMING call on these figures even setting the shape
+question aside: it forces ``height=700, width=1200`` (fixed pixels, wrong for a responsive page),
+sets ``template="plotly_dark"`` rather than composing the theme tokens, and uses
+``gridcolor='rgba(255,255,255,0.1)'`` with ``zeroline=False`` — which is not ``theme.GRID``. The
+two "dark themes" in this repo already disagree; that is a cleanup, not a dependency to take on.
+
 Run as a script to export:  ``python -m pipelines.option_probe_figures``
 """
 
@@ -215,13 +252,39 @@ def episode_paths(spot_path, peak, tenor=TENOR_YEARS, moneyness=MONEYNESS,
 # backgrounds. Correct as-is inline; main() stamps the export palette on.
 # ============================================================================
 
-# The BACKGROUND is the only property that depends on where the figure is shown, so it is the
-# only one left undecided here: transparent, so a figure shown in the VS Code interactive window
-# inherits VS Code's own surface. `main()` stamps the opaque surface on at export, where there is
-# no host to inherit from. Everything ELSE in the palette — ink and gridlines — is applied at
-# build time by theme.apply_figure_theme() at the bottom of each builder, so the figure carries
-# the repo's colours wherever it goes rather than falling back to plotly's default navy text.
-_TRANSPARENT = dict(paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)")
+# ----------------------------------------------------------------------------
+# PALETTE, PASSED STRAIGHT THROUGH THE PLOTLY ARGUMENTS
+#
+# Every colour below comes from theme.py — no literals, and no new theming
+# helper. Plotly does not reliably inherit the global font colour into axis
+# tick labels, which is why `tickfont` and `title_font` are stated per axis
+# rather than assumed from `font`.
+#
+# Set at BUILD time, not at export, because it is correct in every context:
+# #e0e0e0 text reads right in the VS Code interactive window, in a Dash page
+# and in a saved file alike. Without it a figure falls back to plotly's
+# DEFAULT template — dark navy text, illegible on a dark editor background —
+# which is exactly what these four figures were doing until 2026-08-31.
+#
+# The BACKGROUND is the one property that genuinely depends on where the
+# figure is shown, so it is the only one left transparent here: inline, the
+# host supplies the surface. `main()` stamps the opaque surface on at export,
+# where there is no host to inherit from.
+# ----------------------------------------------------------------------------
+
+# Axis-level styling. Applied to every axis including the secondary spot axis, so the right-hand
+# scale is not left in plotly's default navy while the left-hand one is inked.
+_AXIS = dict(
+    gridcolor=theme.GRID, zerolinecolor=theme.GRID, linecolor=theme.GRID, tickcolor=theme.GRID,
+    tickfont=dict(color=theme.INK), title_font=dict(color=theme.INK),
+)
+
+# Figure-level styling: transparent surface plus the three text roles plotly treats separately.
+_LAYOUT = dict(
+    paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
+    font=dict(color=theme.INK), title_font=dict(color=theme.INK),
+    legend=dict(font=dict(color=theme.INK)),
+)
 
 
 def _strike_colours(moneyness=MONEYNESS):
@@ -248,12 +311,11 @@ def fig_smirk(spot=SMIRK_SPOT, tenors=SMIRK_TENORS, grid=SMIRK_MONEYNESS_GRID, b
                   annotation_text="ATM", annotation_position="top")
     fig.update_layout(
         title=f"Synthetic IV surface — the smirk at spot {spot:.0f}",
-        xaxis_title="moneyness K / S", yaxis_title="implied vol",
-        yaxis_tickformat=".0%", hovermode="x unified", **_TRANSPARENT,
+        xaxis=dict(title="moneyness K / S", **_AXIS),
+        yaxis=dict(title="implied vol", tickformat=".0%", **_AXIS),
+        hovermode="x unified", **_LAYOUT,
     )
-    # The display-independent half of the palette, applied here rather than at export so the
-    # inline figure and the published page carry identical colours.
-    return theme.apply_figure_theme(fig)
+    return fig
 
 
 def fig_iv_paths(iv_v1, iv_v2, spot_ref, tenor=TENOR_YEARS):
@@ -275,12 +337,11 @@ def fig_iv_paths(iv_v1, iv_v2, spot_ref, tenor=TENOR_YEARS):
     fig.update_layout(
         title=f"Implied vol per ladder strike — {tenor * 252:.0f}-day tenor, "
               f"struck off spot {spot_ref:.2f}",
-        xaxis_title="date", yaxis_title="implied vol", yaxis_tickformat=".0%",
-        hovermode="x unified", **_TRANSPARENT,
+        xaxis=dict(title="date", **_AXIS),
+        yaxis=dict(title="implied vol", tickformat=".0%", **_AXIS),
+        hovermode="x unified", **_LAYOUT,
     )
-    # The display-independent half of the palette, applied here rather than at export so the
-    # inline figure and the published page carry identical colours.
-    return theme.apply_figure_theme(fig)
+    return fig
 
 
 def fig_put_paths(put_v1, put_v2, spot_path, tenor=TENOR_YEARS, symbol=UNDERLYING):
@@ -307,13 +368,13 @@ def fig_put_paths(put_v1, put_v2, spot_path, tenor=TENOR_YEARS, symbol=UNDERLYIN
     fig.update_layout(
         title=f"European put value per ladder strike — {tenor * 252:.0f}-day tenor, "
               f"re-struck never (one snapshot repriced)",
-        xaxis_title="date", yaxis_title="put value (price units)",
-        yaxis2=dict(title=f"{symbol} spot", overlaying="y", side="right", showgrid=False),
-        hovermode="x unified", **_TRANSPARENT,
+        xaxis=dict(title="date", **_AXIS),
+        yaxis=dict(title="put value (price units)", **_AXIS),
+        yaxis2=dict(title=f"{symbol} spot", overlaying="y", side="right", showgrid=False,
+                    **{k: v for k, v in _AXIS.items() if k != "gridcolor"}),
+        hovermode="x unified", **_LAYOUT,
     )
-    # The display-independent half of the palette, applied here rather than at export so the
-    # inline figure and the published page carry identical colours.
-    return theme.apply_figure_theme(fig)
+    return fig
 
 
 def fig_drawdown_episode(idx, strikes, mtm_flat, mtm_spike, spot_path, peak, trough,
@@ -351,13 +412,13 @@ def fig_drawdown_episode(idx, strikes, mtm_flat, mtm_spike, spot_path, peak, tro
     fig.update_layout(
         title=f"Puts struck at the peak ({peak.date()}) and carried — "
               f"value as a multiple of premium paid",
-        xaxis_title="date", yaxis_title="value / premium paid",
-        yaxis2=dict(title=f"{symbol} spot", overlaying="y", side="right", showgrid=False),
-        hovermode="x unified", **_TRANSPARENT,
+        xaxis=dict(title="date", **_AXIS),
+        yaxis=dict(title="value / premium paid", **_AXIS),
+        yaxis2=dict(title=f"{symbol} spot", overlaying="y", side="right", showgrid=False,
+                    **{k: v for k, v in _AXIS.items() if k != "gridcolor"}),
+        hovermode="x unified", **_LAYOUT,
     )
-    # The display-independent half of the palette, applied here rather than at export so the
-    # inline figure and the published page carry identical colours.
-    return theme.apply_figure_theme(fig)
+    return fig
 
 
 # ============================================================================

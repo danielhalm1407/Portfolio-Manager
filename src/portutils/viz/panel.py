@@ -22,6 +22,11 @@ from plotly.subplots import make_subplots
 from portutils.analysis import returns
 from portutils.analysis import performance
 
+# palette — the single source of truth for colour across every figure in the repo. Imported for
+# OFF_WHITE below, which was a hand-copied duplicate of theme.INK until 2026-08-31. theme.py is
+# import-light by design, so this costs nothing.
+from portutils.viz import theme
+
 # %%
 
 # ── 1. Module-level config constants ────────────────────────────────────────────
@@ -556,7 +561,7 @@ class PanelBuilder:
                             styles_dict = EIGENVEC_STYLES,
                             title = dict(
                                 text="<b>Spectral Decomposition of Portfolio Returns</b><br><sup>Eigenvalue Decay (Scree Plot)</sup>",
-                                font=dict(color="#e0e0e0", size=22),
+                                font=dict(color=theme.INK, size=22),
                                 x=0.5, xanchor='center'
                             ),
                             height = 600,
@@ -928,7 +933,10 @@ class PanelBuilder:
 
     # ── Plotly theming ───────────────────────────────────────────────────
 
-    OFF_WHITE = "#e0e0e0"
+    # Kept as a class-level alias rather than replaced outright: dark_axis_style and
+    # apply_dark_theme both reference cls.OFF_WHITE, and the class-method indirection is the
+    # documented reason those are classmethods at all. It is now the TOKEN, not a copy of it.
+    OFF_WHITE = theme.INK
     OFF_BLACK = "#222222"
 
     @classmethod
