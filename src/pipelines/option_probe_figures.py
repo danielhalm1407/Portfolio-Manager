@@ -72,6 +72,7 @@ Run as a script to export:  ``python -m pipelines.option_probe_figures``
 import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
+import plotly.offline  # get_plotlyjs — the shared library written once beside the pages
 
 from portutils.strategies.instruments.pricing import black_scholes_put
 from portutils.strategies.instruments.vol import synthetic_iv_surface
@@ -253,39 +254,24 @@ def episode_paths(spot_path, peak, tenor=TENOR_YEARS, moneyness=MONEYNESS,
 # ============================================================================
 
 # ----------------------------------------------------------------------------
-# PALETTE, PASSED STRAIGHT THROUGH THE PLOTLY ARGUMENTS
+# PALETTE — theme.apply_dark_theme, the repo's one figure theme.
 #
-# Every colour below comes from theme.py — no literals, and no new theming
-# helper. Plotly does not reliably inherit the global font colour into axis
-# tick labels, which is why `tickfont` and `title_font` are stated per axis
-# rather than assumed from `font`.
+# Called at BUILD time by every builder below, because the palette is correct
+# in every context: #e0e0e0 text and a 10%-white grid read right in the VS
+# Code interactive window, in a Dash page and in a saved file alike. Without
+# it a figure falls back to plotly's DEFAULT template — dark navy text,
+# illegible on a dark editor background.
 #
-# Set at BUILD time, not at export, because it is correct in every context:
-# #e0e0e0 text reads right in the VS Code interactive window, in a Dash page
-# and in a saved file alike. Without it a figure falls back to plotly's
-# DEFAULT template — dark navy text, illegible on a dark editor background —
-# which is exactly what these four figures were doing until 2026-08-31.
+# It leaves the backgrounds TRANSPARENT, which is the whole design: the figure
+# never paints its own surface, the HOST does. Inline that host is the editor;
+# in Dash it is the page div; for the static export it is the stylesheet in
+# write_figure_page() below. One figure object, three surfaces.
 #
-# The BACKGROUND is the one property that genuinely depends on where the
-# figure is shown, so it is the only one left transparent here: inline, the
-# host supplies the surface. `main()` stamps the opaque surface on at export,
-# where there is no host to inherit from.
+# This used to be a pair of local `_AXIS` / `_LAYOUT` dicts here, and before
+# that a short-lived helper in theme.py — both of them third implementations
+# of a theme that already existed as PanelBuilder.apply_dark_theme. That one
+# was lifted into theme.py on 2026-08-31 instead, and this calls it.
 # ----------------------------------------------------------------------------
-
-# Axis-level styling. Applied to every axis including the secondary spot axis, so the right-hand
-# scale is not left in plotly's default navy while the left-hand one is inked.
-_AXIS = dict(
-    gridcolor=theme.GRID, zerolinecolor=theme.GRID, linecolor=theme.GRID, tickcolor=theme.GRID,
-    tickfont=dict(color=theme.INK), title_font=dict(color=theme.INK),
-)
-
-# Figure-level styling: transparent surface plus the three text roles plotly treats separately.
-_LAYOUT = dict(
-    paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
-    font=dict(color=theme.INK), title_font=dict(color=theme.INK),
-    legend=dict(font=dict(color=theme.INK)),
-)
-
 
 def _strike_colours(moneyness=MONEYNESS):
     # One fixed colour per ladder strike, assigned in ladder order so the same strike is the same
@@ -309,13 +295,13 @@ def fig_smirk(spot=SMIRK_SPOT, tenors=SMIRK_TENORS, grid=SMIRK_MONEYNESS_GRID, b
     # log-moneyness is zero there and the skew and smile both vanish.
     fig.add_vline(x=1.0, line=dict(color=theme.MUTED, width=1, dash="dot"),
                   annotation_text="ATM", annotation_position="top")
-    fig.update_layout(
+    return theme.apply_dark_theme(
+        fig,
         title=f"Synthetic IV surface — the smirk at spot {spot:.0f}",
-        xaxis=dict(title="moneyness K / S", **_AXIS),
-        yaxis=dict(title="implied vol", tickformat=".0%", **_AXIS),
-        hovermode="x unified", **_LAYOUT,
+        xaxis=dict(title="moneyness K / S"),
+        yaxis=dict(title="implied vol", tickformat=".0%"),
+        hovermode="x unified",
     )
-    return fig
 
 
 def fig_iv_paths(iv_v1, iv_v2, spot_ref, tenor=TENOR_YEARS):
@@ -334,14 +320,14 @@ def fig_iv_paths(iv_v1, iv_v2, spot_ref, tenor=TENOR_YEARS):
         fig.add_trace(go.Scatter(x=iv_v2.index, y=iv_v2[m], mode="lines",
                                  name=f"{m:.2f}x  v2 current", legendgroup=f"{m:.2f}",
                                  line=dict(color=colours[m], width=1.5, dash="dash")))
-    fig.update_layout(
+    return theme.apply_dark_theme(
+        fig,
         title=f"Implied vol per ladder strike — {tenor * 252:.0f}-day tenor, "
               f"struck off spot {spot_ref:.2f}",
-        xaxis=dict(title="date", **_AXIS),
-        yaxis=dict(title="implied vol", tickformat=".0%", **_AXIS),
-        hovermode="x unified", **_LAYOUT,
+        xaxis=dict(title="date"),
+        yaxis=dict(title="implied vol", tickformat=".0%"),
+        hovermode="x unified",
     )
-    return fig
 
 
 def fig_put_paths(put_v1, put_v2, spot_path, tenor=TENOR_YEARS, symbol=UNDERLYING):
@@ -365,16 +351,17 @@ def fig_put_paths(put_v1, put_v2, spot_path, tenor=TENOR_YEARS, symbol=UNDERLYIN
     fig.add_trace(go.Scatter(x=spot_path.index, y=spot_path.to_numpy(), mode="lines",
                              name=f"{symbol} spot (rhs)", yaxis="y2",
                              line=dict(color=theme.MUTED, width=1)))
-    fig.update_layout(
+    # second_axis=True is what re-merges the spot axis after update_yaxes has flattened it —
+    # without it the right-hand scale comes back with gridlines on and the wrong tick colour.
+    return theme.apply_dark_theme(
+        fig, second_axis=True,
         title=f"European put value per ladder strike — {tenor * 252:.0f}-day tenor, "
               f"re-struck never (one snapshot repriced)",
-        xaxis=dict(title="date", **_AXIS),
-        yaxis=dict(title="put value (price units)", **_AXIS),
-        yaxis2=dict(title=f"{symbol} spot", overlaying="y", side="right", showgrid=False,
-                    **{k: v for k, v in _AXIS.items() if k != "gridcolor"}),
-        hovermode="x unified", **_LAYOUT,
+        xaxis=dict(title="date"),
+        yaxis=dict(title="put value (price units)"),
+        yaxis2=dict(title=f"{symbol} spot", overlaying="y", side="right", showgrid=False),
+        hovermode="x unified",
     )
-    return fig
 
 
 def fig_drawdown_episode(idx, strikes, mtm_flat, mtm_spike, spot_path, peak, trough,
@@ -409,16 +396,15 @@ def fig_drawdown_episode(idx, strikes, mtm_flat, mtm_spike, spot_path, peak, tro
     fig.add_trace(go.Scatter(x=idx, y=spot_path.loc[idx].to_numpy(), mode="lines",
                              name=f"{symbol} spot (rhs)", yaxis="y2",
                              line=dict(color=theme.MUTED, width=1)))
-    fig.update_layout(
+    return theme.apply_dark_theme(
+        fig, second_axis=True,
         title=f"Puts struck at the peak ({peak.date()}) and carried — "
               f"value as a multiple of premium paid",
-        xaxis=dict(title="date", **_AXIS),
-        yaxis=dict(title="value / premium paid", **_AXIS),
-        yaxis2=dict(title=f"{symbol} spot", overlaying="y", side="right", showgrid=False,
-                    **{k: v for k, v in _AXIS.items() if k != "gridcolor"}),
-        hovermode="x unified", **_LAYOUT,
+        xaxis=dict(title="date"),
+        yaxis=dict(title="value / premium paid"),
+        yaxis2=dict(title=f"{symbol} spot", overlaying="y", side="right", showgrid=False),
+        hovermode="x unified",
     )
-    return fig
 
 
 # ============================================================================
@@ -493,23 +479,55 @@ def write_index(out_dir, figures, captions=FIGURE_CAPTIONS):
     (out_dir.parent / "index.html").write_text(html, encoding="utf-8")
 
 
+def write_figure_page(fig, path):
+    """Write one figure as a standalone page whose PAGE supplies the dark surface.
+
+    WHY NOT ``fig.write_html``
+    --------------------------
+    ``write_html`` emits a complete document whose only CSS is ``html, body {height: 100%}`` —
+    no background and no ``margin: 0``. So a figure written that way either brings its own opaque
+    background (the old ``apply_export_theme`` route) and still sits inside the browser's default
+    ~8px white body margin, or stays transparent and the browser paints the whole page white.
+    There is no parameter to fix this: ``write_html`` takes ``include_plotlyjs``,
+    ``include_mathjax``, ``post_script``, ``div_id``, ``full_html`` and sizing — and no CSS hook.
+
+    So the page is written here instead. ``to_html(full_html=False)`` returns just the plotting
+    div, and the shell around it carries one rule: the body is ``theme.PAGE_BG``. That is exactly
+    what a Dash page does — theme.py's own docstring describes the Dash page div as supplying the
+    ``#111`` behind a transparent figure — so the static page now behaves like the Dash page, and
+    the SAME figure object is correct inline, in Dash and here, with nothing stamped on at export.
+
+    ``include_plotlyjs="directory"`` makes the fragment reference a shared ``plotly.min.js``
+    rather than inline ~4MB per figure. ``to_html`` only writes the REFERENCE, never the file —
+    that is ``write_html``'s doing — so ``main`` writes the library itself, once.
+    """
+    div = fig.to_html(full_html=False, include_plotlyjs="directory")
+    path.write_text(
+        "<!doctype html>\n"
+        '<html lang="en"><head><meta charset="utf-8">\n'
+        '<meta name="viewport" content="width=device-width, initial-scale=1">\n'
+        # height:100% so the figure fills the window; margin:0 kills the default white frame;
+        # the background is the surface the transparent figure composites onto.
+        f"<style>html,body{{height:100%;margin:0;background:{theme.PAGE_BG};}}</style>\n"
+        f"</head><body>{div}</body></html>\n",
+        encoding="utf-8",
+    )
+
+
 def main(out_dir=DOCS_FIGURES):
-    """Render every probe figure to standalone, fully interactive HTML.
+    """Render every probe figure to a standalone, fully interactive page.
 
-    ``include_plotlyjs="directory"`` emits ``plotly.min.js`` ONCE beside the pages, and every
-    figure references that single copy — rather than inlining ~3MB per figure, or depending on a
-    CDN being reachable at view time. That is 10-01's stated choice. Switching to ``"cdn"`` is a
-    one-word change if the vendored copy is ever judged too heavy for the repo.
-
-    ``apply_export_theme`` is NOT optional here. A saved figure has no page div behind it, so a
-    transparent background lets the browser paint its own white and the dark figure becomes
-    unreadable. That is the exact failure theme.py's docstring records.
+    The figures are already themed by their builders and stay TRANSPARENT; the surface comes from
+    the page (see ``write_figure_page``). Nothing is stamped on here — which is what makes the
+    published figure the same object as the one shown inline.
     """
     out_dir.mkdir(parents=True, exist_ok=True)
+    # The shared library, written once. Every page's fragment references it by relative name, so
+    # adding a figure costs its own ~30-100KB and not another copy of this.
+    (out_dir / "plotly.min.js").write_text(plotly.offline.get_plotlyjs(), encoding="utf-8")
     figures = build_all()
     for name, fig in figures.items():
-        theme.apply_export_theme(fig)
-        fig.write_html(out_dir / f"{name}.html", include_plotlyjs="directory")
+        write_figure_page(fig, out_dir / f"{name}.html")
     # The index lives one level up, at docs/index.html, because that is what GitHub Pages serves
     # as the site root when the source is set to the docs/ folder.
     write_index(out_dir, figures)

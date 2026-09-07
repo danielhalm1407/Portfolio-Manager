@@ -972,17 +972,17 @@ class PanelBuilder:
     def dark_axis_style(cls):
         """
         Return the standard axis-style dict
-        We use a class method here so that we can reference the OFF_WHITE color constant defined at the class level,
-        and so that we can call this method directly on the class without needing an instance (e.g. PanelBuilder.dark_axis_style())
+
+        MOVED 2026-08-31 — the body now lives in ``theme.dark_axis_style`` so that anything can
+        reuse it without importing this 1,100-line class. Kept as a classmethod because that is
+        how ``apply_dark_theme`` and every existing caller reach it, and because the ``cls``
+        indirection lets a subclass override ``OFF_WHITE`` and still get a consistent style.
+        The original rationale — a class method so we can reference the OFF_WHITE color constant
+        defined at the class level, and so we can call it directly on the class without needing an
+        instance (e.g. PanelBuilder.dark_axis_style()) — still holds; OFF_WHITE is simply an alias
+        of theme.INK now, and is passed through rather than read inside the body.
         """
-        return dict(
-            showgrid=True,
-            gridcolor='rgba(255,255,255,0.1)', # light transparent grid lines
-            tickfont=dict(color=cls.OFF_WHITE), # tick labels in off-white
-            linecolor=cls.OFF_WHITE, # axis lines in off-white, just like the ticks and labels
-            zeroline=False,
-            title_font=dict(color=cls.OFF_WHITE), # axis title in off-white as well
-        )
+        return theme.dark_axis_style(ink=cls.OFF_WHITE)
     
     # ── subplot axis helpers ─────────────────────────────────────────────
 
@@ -1072,7 +1072,7 @@ class PanelBuilder:
                          play_label=None, play_y=-0.25, play_duration=20,
                          second_axis = False, # whether to apply the standard axis styling to a secondary y-axis (useful for the PCA waterfall plot where we have a secondary y axis for the cumulative variance)
 
-                         **layout_overrides 
+                         **layout_overrides
                          # note that the ** syntax allows us to accept any number of additional keyword
                          #  arguments that will be collected into a dictionary called layout_overrides;
                          #  this is useful for allowing users to override or add to the base layout
@@ -1087,83 +1087,26 @@ class PanelBuilder:
 
         If *play_label* is provided, a play/animate button is added.
         Extra keyword arguments are forwarded to ``fig.update_layout()``.
-        """
-        # ---- 1. Base Layout ----
-        # we start by defining a base layout dict with the standard dark theme settings: we use the "plotly_dark" 
-        # template for overall styling,
-        # the 'theme' being dark means that the default colors for text, axes, and gridlines will be light/off-white,
-        #  which provides good contrast against the dark background;
-        # and we set both the paper and plot background colors to transparent so that it can blend seamlessly 
-        # when embedded in the portfolio site, which has its own dark background 
-        #   (the portfolio site only has this dark background because the plots have transparent backgrounds while the 
-        #   rest of the site design is light on dark (due to the fact that we specify the theme as "plotly_dark"))
-        # we also set the height and 
-        # width to the provided values (defaulting to 700x1200)
-        base = dict(
-            template="plotly_dark",
-            paper_bgcolor='rgba(0,0,0,0)', # transparent background for embedding in the portfolio site, which has its own dark background; this way we get a seamless look without a black box around the plot
-            plot_bgcolor='rgba(0,0,0,0)',
-            height=height,
-            width=width,
-        )
 
+        MOVED 2026-08-31 — the theming itself is now ``theme.apply_dark_theme``, so pipelines and
+        research scripts can reuse it without importing this class. What stays here is the part
+        that is genuinely PanelBuilder's: the play/animate button, which is animation machinery
+        rather than palette. The 700x1200 defaults also stay here rather than in the shared
+        function, because a fixed pixel size is right for a Dash panel and wrong for a static page
+        — so this wrapper keeps them and the shared default is None. Behaviour is unchanged for
+        every existing caller.
+        """
         # if a play_label is provided, we add an "updatemenus" entry to the layout using the play_button method defined above; this will add a play button to the plot that triggers the animation when clicked
         if play_label:
-            base['updatemenus'] = cls.play_button(
+            layout_overrides['updatemenus'] = cls.play_button(
                 label=play_label, y=play_y, duration=play_duration,
             )
 
-        # finally, we update the figure's layout with our base settings, and then apply the standard axis styling to 
-        # both x and y axes using the dark_axis_style method defined above; 
-        # this ensures that the axes have the consistent off-white color and grid styling defined in that method
-
-        # The below allows us to override any of the base layout settings by passing additional keyword 
-        # arguments when calling apply_dark_theme.
-        # note that base is a dictionary and using the .update() method allows us to update it with
-        # the key-value pairs from layout_overrides, (e.g., if we have showlegend=True, the base dict 
-        # will now have 'showlegend': True, added onto the end
-        # so if we pass in something like title="My Title" when calling apply_dark_theme, it will add 'title':
-        #  'My Title' to the base dictionary, which will then be applied to the figure's layout; this way, 
-        # we can easily customize the layout of the figure while still applying the standard dark theme settings as a base
-        base.update(layout_overrides) 
-
-        # in the belwo syntax, we apply the possibly overridden base layout settings to the figure
-        # even though base is a dict, and fig_update_layout() accepts keyword arguments, the ** syntax allows us
-        #  to unpack the key-value pairs in the base dictionary and pass them as keyword arguments to 
-        # fig.update_layout(); 
-        fig.update_layout(**base) 
-
-        # ----- 2. Axis Styling ----
-
-        # apply standard dark styling to all x-axes (including grid lines) and all y-axes (no grid lines)
-        axis_style = cls.dark_axis_style()
-
-        # we don't want the x_axis to inherit gridlines usually
-        x_axis_style = {**axis_style, 'showgrid': False}
-        fig.update_xaxes(x_axis_style)
-
-        # y-axes use the same base style but with showgrid disabled — grid lines on x-axes only
-        # update_yaxes applies to EVERY y-axis in the figure (yaxis, yaxis2, etc.)
-        # overwrite=False only affects nested dict properties (e.g. title=dict(...)): it merges
-        # the existing nested dict with the update rather than replacing it wholesale.
-        # for flat scalar properties (showgrid, gridcolor, tickfont, linecolor, etc.) the flag has
-        # no effect — update_yaxes always overwrites them, including on yaxis2
-        
-        fig.update_yaxes(axis_style, overwrite=False)
-
-        # Because update_yaxes above replaced any yaxis2-specific settings BESIDES nested dict properties
-        # (i.e., title, overlyaing and side, unchanged, but showgrid and tickfont.color were replaced) that were written
-        # in update_layout(**base) (step 1 above), we re-apply them here for the secondary axis.
-        # merged = axis_style defaults overridden by whatever the caller passed as yaxis2 in layout_overrides
-        # (e.g. range, title, overlaying, side, tickformat).
-        # fig.update_layout(yaxis2=merged) MERGES into the existing yaxis2 object — it does NOT
-        # wipe and replace it. Only the keys present in merged are touched; any other properties
-        # already on yaxis2 (written by earlier calls) survive untouched.
-        if second_axis:
-            merged = {**axis_style, **layout_overrides.get('yaxis2', {})}
-            fig.update_layout(yaxis2=merged)
-
-
-        return fig
+        # Everything else is the shared theme. OFF_WHITE is passed explicitly rather than left to
+        # the module default so a subclass overriding it still gets its own ink.
+        return theme.apply_dark_theme(
+            fig, height=height, width=width, second_axis=second_axis,
+            ink=cls.OFF_WHITE, **layout_overrides,
+        )
 
     

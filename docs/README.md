@@ -37,27 +37,32 @@ each, not 4 MB each. If the vendored copy is ever judged too heavy for the repo,
 `include_plotlyjs="cdn"` in `main()` is a one-word change and takes `docs/` to roughly 270 KB — at
 the cost of needing the CDN reachable when someone opens the page.
 
-## Theming
+## Theming — the figure carries colour, the page carries the surface
 
-Every colour on these figures comes from
-[`src/portutils/viz/theme.py`](../src/portutils/viz/theme.py) — the repo's single palette — and is
-passed straight through the plotly arguments in each `fig_*` builder (`_AXIS` and `_LAYOUT` in
-`option_probe_figures.py`). No literals, and no theming helper of its own.
+Each `fig_*` builder ends by calling `theme.apply_dark_theme(fig)` — the repo's one figure theme,
+lifted out of `PanelBuilder` on 2026-08-31 so anything can reuse it. It sets ink (`theme.INK`),
+gridlines (`theme.GRID`, white at 10%) and **transparent backgrounds**.
 
-It is set at **build** time, not at export, because it is correct in every context: `#e0e0e0`
-reads right in the VS Code interactive window, in a Dash page and in a saved file alike. Without
-it a figure silently falls back to plotly's default template — dark navy text, illegible on a dark
-editor background.
+The figure therefore never paints its own surface. The *host* does, in all three places it is
+shown:
 
-`theme.apply_export_theme(fig)` is then applied immediately before `write_html`, and is **not
-optional**. It supplies the one property that genuinely depends on destination: an opaque
-background. A figure shown inline sits on a surface the host provides; a standalone file has no
-host, so a transparent figure lets the browser paint its own white.
+| context | surface comes from |
+|---|---|
+| VS Code interactive window | the editor's own background |
+| a Dash page | the page div (`theme.PAGE_BG`) |
+| **these static pages** | the `<style>` in the page shell, also `theme.PAGE_BG` |
 
-**Known cosmetic gap:** plotly's generated page carries only `html, body {height: 100%}` as CSS —
-no `margin: 0` — so the dark figure sits inside the browser's default ~8px body margin and shows a
-thin white frame. The fix is a page-level stylesheet rather than a figure change; see
-`index.html`, which already sets `theme.PAGE_BG` on its own body.
+That last one is why `write_figure_page()` exists rather than `fig.write_html()`. `write_html`
+emits a document whose only CSS is `html, body {height: 100%}` — no background and no `margin: 0`
+— and offers no hook to add any. So the shell is written here instead: `to_html(full_html=False)`
+returns the plotting div, and eleven lines of HTML around it set the body to `theme.PAGE_BG` with
+the margin zeroed.
+
+The payoff: **the published figure is the same object as the one shown inline**, with nothing
+stamped on at export. It also removes the thin white frame the old route left around every figure.
+
+`theme.apply_export_theme` still exists and is still correct for anything writing HTML the plain
+way — `pipelines/rebalance_study.py:440` does — it just is not needed here.
 
 ## Status
 

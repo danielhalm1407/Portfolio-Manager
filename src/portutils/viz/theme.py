@@ -42,9 +42,23 @@ div — so the browser painted its own white. Chrome's dark mode styles its UI, 
 # white — full-strength white on a near-black background glares and makes thin type shimmer.
 INK = "#e0e0e0"
 
-# Gridlines, zerolines and axis ticks. The plotly_dark grid tone: visible enough to read a value
-# off, dim enough that the data sits in front of it rather than competing with it.
-GRID = "#526070"
+# Gridlines and axis ticks: white at 10% opacity. Visible enough to read a value off, dim enough
+# that the data sits in front of it rather than competing with it.
+#
+# CHANGED 2026-08-31, from the solid "#526070" plotly_dark grid tone. Two grid colours were in
+# use — this token, and the rgba literal inside PanelBuilder.dark_axis_style — and when
+# dark_axis_style was lifted into this module the two had to become one. The rgba won because it
+# is the one the panel figures have actually been rendering with, and because a TRANSPARENT grid
+# composites correctly against any surface: the same figure now sits on VS Code's editor
+# background, on the Dash page div and on a static page, and a solid tone that suits one of those
+# is wrong on the others. Consequence: figures exported through apply_export_theme (the
+# rebalance_study scenarios) now carry a slightly fainter grid than before. Deliberate.
+GRID = "rgba(255,255,255,0.1)"
+
+# The zero line, kept SOLID and therefore brighter than the grid: it is a reference value, not
+# background rule, and should read as such. Consumed by dash_timeseries_app's BaseFigureConfig
+# (:134). NOTE: apply_export_theme below passes `grid` for zerolinecolor rather than this token —
+# left as written, since changing it would move existing exports for a reason nobody asked for.
 ZEROLINE = "#526070"
 
 # Background outside the plot frame (the "paper") and inside it (the axes region). Kept equal so
@@ -175,6 +189,138 @@ SPLIT_COLOURS = {"realised": "#2ca02c", "unrealised": "#f0c040", "total": INK}
 # instruments, and it must be distinguishable from every TICKER_COLOURS entry above.
 RESIDUAL_LABEL = "cash / costs"
 RESIDUAL_COLOUR = MUTED
+
+
+# ============================================================================
+# FIGURE THEMING — the palette applied to a figure being BUILT.
+#
+# Lifted out of PanelBuilder (panel.py) on 2026-08-31, verbatim apart from the
+# changes noted below. It lived there as two classmethods, which meant that
+# only code willing to import an 1,100-line class that also loads CSVs could
+# reuse it — so pipelines and research scripts each grew their own partial
+# copy instead. It is not a panel concept; it is THE theme, and it belongs
+# with the tokens it uses.
+#
+# PanelBuilder.dark_axis_style and PanelBuilder.apply_dark_theme both remain,
+# as thin wrappers, so every existing call site is untouched.
+# ============================================================================
+
+def dark_axis_style(ink=INK, grid=GRID):
+    """
+    Return the standard axis-style dict
+
+    Was a classmethod on PanelBuilder so that it could reference the OFF_WHITE color constant
+    defined at the class level, and so that it could be called directly on the class without
+    needing an instance (e.g. PanelBuilder.dark_axis_style()). Now a plain function reading INK
+    from this module: the class-level indirection existed only to reach a colour that already
+    lives here, and OFF_WHITE is itself an alias of INK as of 2026-08-31.
+    """
+    return dict(
+        showgrid=True,
+        gridcolor=grid, # light transparent grid lines
+        tickfont=dict(color=ink), # tick labels in off-white
+        linecolor=ink, # axis lines in off-white, just like the ticks and labels
+        zeroline=False,
+        title_font=dict(color=ink), # axis title in off-white as well
+    )
+
+
+def apply_dark_theme(fig, # important: usually a now enriched figure object that we have created
+                     height=None, # pixel height; None leaves it unset, so the figure fills its container
+                     width=None, # pixel width; None likewise — see the note on responsiveness below
+                     second_axis=False, # whether to apply the standard axis styling to a secondary y-axis (useful for the PCA waterfall plot where we have a secondary y axis for the cumulative variance)
+                     ink=INK,
+                     grid=GRID,
+                     **layout_overrides
+                     # note that the ** syntax allows us to accept any number of additional keyword
+                     #  arguments that will be collected into a dictionary called layout_overrides;
+                     #  this is useful for allowing users to override or add to the base layout
+                     #  settings when calling this method, without having to explicitly define every
+                     #  possible layout parameter in the method signature
+                     ):
+    """
+    Apply the standard dark transparent theme to *fig*.
+
+    Extra keyword arguments are forwarded to ``fig.update_layout()``.
+
+    CHANGED ON EXTRACTION (2026-08-31): ``height`` and ``width`` default to None rather than
+    700/1200. A fixed pixel size is right for a Dash panel and wrong for a static page, which
+    should fill the browser window; ``PanelBuilder.apply_dark_theme`` passes the old defaults, so
+    its figures are unaffected. The play/animate button moved to that wrapper too — it is
+    PanelBuilder's animation machinery, not part of a palette.
+    """
+    # ---- 1. Base Layout ----
+    # we start by defining a base layout dict with the standard dark theme settings: we use the "plotly_dark"
+    # template for overall styling,
+    # the 'theme' being dark means that the default colors for text, axes, and gridlines will be light/off-white,
+    #  which provides good contrast against the dark background;
+    # and we set both the paper and plot background colors to transparent so that it can blend seamlessly
+    # when embedded in the portfolio site, which has its own dark background
+    #   (the portfolio site only has this dark background because the plots have transparent backgrounds while the
+    #   rest of the site design is light on dark (due to the fact that we specify the theme as "plotly_dark"))
+    base = dict(
+        template="plotly_dark",
+        paper_bgcolor='rgba(0,0,0,0)', # transparent background for embedding in the portfolio site, which has its own dark background; this way we get a seamless look without a black box around the plot
+        plot_bgcolor='rgba(0,0,0,0)',
+        # The three text roles plotly treats separately. Added on extraction: the original relied
+        # on plotly_dark's own font colour for these, which is NOT this repo's ink.
+        font=dict(color=ink),
+        title_font=dict(color=ink),
+        legend=dict(font=dict(color=ink)),
+    )
+    # Only pin a pixel size if the caller asked for one — see the docstring note.
+    if height is not None:
+        base['height'] = height
+    if width is not None:
+        base['width'] = width
+
+    # The below allows us to override any of the base layout settings by passing additional keyword
+    # arguments when calling apply_dark_theme.
+    # note that base is a dictionary and using the .update() method allows us to update it with
+    # the key-value pairs from layout_overrides, (e.g., if we have showlegend=True, the base dict
+    #  will be updated to include that setting)
+    base.update(layout_overrides)
+
+    # in the belwo syntax, we apply the possibly overridden base layout settings to the figure
+    # even though base is a dict, and fig_update_layout() accepts keyword arguments, the ** syntax allows us
+    #  to unpack the key-value pairs in the base dictionary and pass them as keyword arguments to
+    # fig.update_layout();
+    fig.update_layout(**base)
+
+    # ----- 2. Axis Styling ----
+
+    # apply standard dark styling to all axes. NOTE — the two comments here previously described
+    # the opposite of what the code does ("grid lines on x-axes only"); corrected on extraction
+    # rather than carried across wrong. The code has always turned the x grid OFF and left the y
+    # grid ON, i.e. HORIZONTAL rules only, which is the right default for a time series: you read
+    # a level off the y-axis, and vertical rules just add noise.
+    axis_style = dark_axis_style(ink=ink, grid=grid)
+
+    # x-axes: same style, grid suppressed
+    x_axis_style = {**axis_style, 'showgrid': False}
+    fig.update_xaxes(x_axis_style)
+
+    # y-axes keep the grid.
+    # update_yaxes applies to EVERY y-axis in the figure (yaxis, yaxis2, etc.)
+    # overwrite=False only affects nested dict properties (e.g. title=dict(...)): it merges
+    # the existing nested dict with the update rather than replacing it wholesale.
+    # for flat scalar properties (showgrid, gridcolor, tickfont, linecolor, etc.) the flag has
+    # no effect — update_yaxes always overwrites them, including on yaxis2
+    fig.update_yaxes(axis_style, overwrite=False)
+
+    # Because update_yaxes above replaced any yaxis2-specific settings BESIDES nested dict properties
+    # (i.e., title, overlyaing and side, unchanged, but showgrid and tickfont.color were replaced) that were written
+    # in update_layout(**base) (step 1 above), we re-apply them here for the secondary axis.
+    # merged = axis_style defaults overridden by whatever the caller passed as yaxis2 in layout_overrides
+    # (e.g. range, title, overlaying, side, tickformat).
+    # fig.update_layout(yaxis2=merged) MERGES into the existing yaxis2 object — it does NOT
+    # wipe and replace it. Only the keys present in merged are touched; any other properties
+    # already on yaxis2 (written by earlier calls) survive untouched.
+    if second_axis:
+        merged = {**axis_style, **layout_overrides.get('yaxis2', {})}
+        fig.update_layout(yaxis2=merged)
+
+    return fig
 
 
 # ============================================================================
