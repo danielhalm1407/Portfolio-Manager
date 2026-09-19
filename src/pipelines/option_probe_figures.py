@@ -335,8 +335,13 @@ def fig_drawdown_episode(idx, strikes, mtm_flat, mtm_spike, spot_path, peak, tro
     # Break-even: below this line the put is worth less than it cost.
     fig.add_hline(y=1.0, line=dict(color=theme.MUTED, width=1, dash="dot"),
                   annotation_text="premium paid", annotation_position="right")
-    fig.add_vline(x=trough, line=dict(color=theme.MUTED, width=1),
-                  annotation_text="trough", annotation_position="top")
+    # Trough marker. The line and its label are added separately on purpose: add_vline's own
+    # annotation_* arguments make Plotly average the line's x-coordinates with sum(), which pandas
+    # Timestamps refuse ("Addition/subtraction of integers ... with Timestamp is no longer
+    # supported"). A plain shape plus a paper-anchored annotation avoids that code path entirely.
+    fig.add_vline(x=trough, line=dict(color=theme.MUTED, width=1))
+    fig.add_annotation(x=trough, y=1.0, xref="x", yref="paper", text="trough",
+                       showarrow=False, yanchor="bottom")
     fig.add_trace(go.Scatter(x=idx, y=spot_path.loc[idx].to_numpy(), mode="lines",
                              name=f"{symbol} spot (rhs)", yaxis="y2",
                              line=dict(color=theme.MUTED, width=1)))
