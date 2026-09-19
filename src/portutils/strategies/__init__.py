@@ -14,7 +14,13 @@ WHAT IS ACTUALLY HERE RIGHT NOW
 -------------------------------
 Only ``instruments/`` — and within it only the two pieces the option-overlay probe needed:
 ``vol.py`` (the synthetic implied-vol surface) and ``pricing.py`` (the European put). Plan 16-01
-fills in the remaining stage modules; 16-02 adds ``instruments/options.py``. This package is
+fills in the remaining stage modules; 16-02 adds ``instruments/options.py``.
+
+Updated by 16-02 (2026-09-19): ``instruments/options.py`` now exists (``SyntheticContract``,
+``OptionLeg``), ``pricing.py`` gained the European call and delta, and ``schedule.py`` holds
+``RollCalendar`` — the bar-counted reset cadence. 16-02 was built WITHOUT the rest of 16-01's
+skeleton (``observe``, ``constraints``, ``sizing``, ``orders``, ``targets``), which the option
+work does not need; those still belong to 16-01. This package is
 deliberately created EARLY and EMPTY-ish so the probe's code has a home that matches where it
 will permanently live, rather than sitting in a research script and being moved later.
 

@@ -13,8 +13,10 @@ It serves TWO consumers with one implementation:
 That is exactly the arrangement ``viz/theme.py`` documents for ``pipelines/rebalance_study.py``
 and ``research/rebalance_realisation.py``, and the reason ``apply_export_theme`` exists as a
 post-hoc stamp rather than a ``theme=`` argument threaded through every signature. The builders
-below therefore return UNTHEMED figures with transparent backgrounds — correct inline — and only
-``main()`` stamps the dark palette on, immediately before writing.
+below therefore return figures with transparent backgrounds — correct inline — but with the
+theme's INK text and GRID lines already applied (``_inline_theme``), because a transparent figure
+with no font colour falls back to Plotly's default dark-blue text and white grid. Only ``main()``
+stamps the opaque dark backgrounds on, immediately before writing.
 
 It lives in ``pipelines/`` and not ``portutils/`` for the same reason ``rebalance_study.py``
 does: it has side effects (it writes files), and ``src/CLAUDE.md`` puts side effects here. The
@@ -211,8 +213,9 @@ def episode_paths(spot_path, peak, tenor=TENOR_YEARS, moneyness=MONEYNESS,
 
 
 # ============================================================================
-# FIGURE BUILDERS — each returns an UNTHEMED figure with transparent
-# backgrounds. Correct as-is inline; main() stamps the export palette on.
+# FIGURE BUILDERS — each returns a figure with transparent backgrounds and
+# the theme's ink/grid colours (_inline_theme). Correct as-is inline; main()
+# stamps the opaque export backgrounds on.
 # ============================================================================
 
 # Transparent rather than a dark template. theme.py is explicit that the dark palette applies
@@ -220,6 +223,26 @@ def episode_paths(spot_path, peak, tenor=TENOR_YEARS, moneyness=MONEYNESS,
 # VS Code's own theme through a transparent background and already reads correctly. Baking
 # plotly_dark in here would fix the export case by breaking the inline one.
 _TRANSPARENT = dict(paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)")
+
+
+def _inline_theme(fig):
+    # ============================================================================
+    # INK + GRID FOR THE INLINE FIGURE, backgrounds left transparent.
+    # Called as the last step of every fig_* builder. A transparent background
+    # alone is NOT enough inline: with no font colour set, Plotly falls back to
+    # its default "plotly" template — dark-blue #2a3f5f text and white gridlines
+    # — which reads as muted blue-grey on VS Code's dark surface and glares where
+    # the grid crosses the data. The HTML export never showed this because main()
+    # stamps theme.INK / theme.GRID on via apply_export_theme before write_html.
+    #
+    # Reusing apply_export_theme with the backgrounds overridden to transparent
+    # gives the inline figure the SAME text and grid colours as the published
+    # page, while still letting VS Code's own background show through — so the
+    # rule in theme.py (no opaque background inline) still holds. main()'s later
+    # call then only swaps the backgrounds to opaque for the saved document.
+    # ============================================================================
+    return theme.apply_export_theme(fig, paper=_TRANSPARENT["paper_bgcolor"],
+                                    plot=_TRANSPARENT["plot_bgcolor"])
 
 
 def _strike_colours(moneyness=MONEYNESS):
@@ -249,7 +272,7 @@ def fig_smirk(spot=SMIRK_SPOT, tenors=SMIRK_TENORS, grid=SMIRK_MONEYNESS_GRID, b
         xaxis_title="moneyness K / S", yaxis_title="implied vol",
         yaxis_tickformat=".0%", hovermode="x unified", **_TRANSPARENT,
     )
-    return fig
+    return _inline_theme(fig)
 
 
 def fig_iv_paths(iv_v1, iv_v2, spot_ref, tenor=TENOR_YEARS):
@@ -274,7 +297,7 @@ def fig_iv_paths(iv_v1, iv_v2, spot_ref, tenor=TENOR_YEARS):
         xaxis_title="date", yaxis_title="implied vol", yaxis_tickformat=".0%",
         hovermode="x unified", **_TRANSPARENT,
     )
-    return fig
+    return _inline_theme(fig)
 
 
 def fig_put_paths(put_v1, put_v2, spot_path, tenor=TENOR_YEARS, symbol=UNDERLYING):
@@ -305,7 +328,7 @@ def fig_put_paths(put_v1, put_v2, spot_path, tenor=TENOR_YEARS, symbol=UNDERLYIN
         yaxis2=dict(title=f"{symbol} spot", overlaying="y", side="right", showgrid=False),
         hovermode="x unified", **_TRANSPARENT,
     )
-    return fig
+    return _inline_theme(fig)
 
 
 def fig_drawdown_episode(idx, strikes, mtm_flat, mtm_spike, spot_path, peak, trough,
@@ -352,7 +375,7 @@ def fig_drawdown_episode(idx, strikes, mtm_flat, mtm_spike, spot_path, peak, tro
         yaxis2=dict(title=f"{symbol} spot", overlaying="y", side="right", showgrid=False),
         hovermode="x unified", **_TRANSPARENT,
     )
-    return fig
+    return _inline_theme(fig)
 
 
 # ============================================================================

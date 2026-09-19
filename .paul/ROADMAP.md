@@ -67,7 +67,7 @@ Progress: [█████░░░░░] 50%
 | 13 | Walk-forward validation harness | TBD | Not started | - |
 | 14 | Regime labelling and scenario guardrails | TBD | Not started | - |
 | 15 | Conviction write-up — how much hedging is enough | TBD | Not started | - |
-| 16 | Strategy architecture consolidation | TBD | Scoping | - |
+| 16 | Strategy architecture consolidation | 7 | Planning (16-02, 16-03 created 2026-09-19) | - |
 
 ## Phase Details
 
@@ -534,8 +534,12 @@ Track B migrates working code and is separately gated and individually skippable
   wrapping the pricer), `RollCalendar`. See the "Landed ahead of the plans" section of
   `.paul/phases/16-strategy-architecture/CONTEXT.md` and
   `research/option_overlay_probe.md`
+  **Complete 2026-09-19** (`16-02-SUMMARY.md`): `black_scholes_call`/`black_scholes_delta`,
+  `SyntheticContract`/`OptionLeg`, `RollCalendar`, 28 offline tests; built without the rest of 16-01's skeleton
 - [ ] 16-03: Option rules — `rules/options.py`, the three structures plus theta drag.
-  Economics spec: 12-01 AC-3 through AC-6
+  Economics spec: 12-01 AC-3 through AC-6.
+  **Planned 2026-09-19:** `16-03-PLAN.md` — rules run through `PortfolioSimulator` via an
+  additive synthetic-marks hook (byte-identity gated), value figure over the probe window
 - [ ] 16-04: `ConstrainedWeightRule` written fresh against stages 2-3, tested standalone.
   kts.py untouched
 
