@@ -30,7 +30,7 @@ sites (`cache_prices.py::_tidy` and `PanelBuilder._load`), and has a phase-level
 written above it. Also open: 02-02 and 02-03 (created 2026-08-23, awaiting approval), 04-05 (CONTEXT.md written,
 not yet planned), 07-02 (planned, not applied), and three scoped-but-unwritten plans: 10-01, 10-02,
 11-02.
-Status: 16-02 COMPLETE (SUMMARY written; 157 passed, 1 known ARM_LIVE failure). 16-03 ready for APPLY
+Status: 16-03 APPLY — tasks 1-3 PASS (167 passed, 1 known ARM_LIVE failure; 16 pipeline CSVs byte-identical), awaiting the figure checkpoint
 Last activity: 2026-09-19 — created 16-02-PLAN.md and 16-03-PLAN.md. Same day, outside PAUL:
 fixed `option_probe_figures.py` (trough `add_vline` Timestamp TypeError; inline figures now
 get theme INK/GRID via `_inline_theme`, previously Plotly's default dark-blue text), and
@@ -91,7 +91,7 @@ Progress:
 Current loop state:
 ```
 PLAN ──▶ APPLY ──▶ UNIFY
-  ✓        ✓        ✓     [16-02 loop closed 2026-09-19; next: 16-03 (planned, awaiting approval); 11-01 awaiting]
+  ✓        ◐        ○     [16-03 APPLY: tasks 1-3 PASS, paused at human-verify checkpoint; 16-02 closed; 11-01 awaiting]
 ```
 
 Phases 1-6 and 8 were completed **before** PAUL was adopted. Their SUMMARY files are
@@ -197,6 +197,18 @@ Next action: approve and run
 **/paul:apply .paul/phases/16-strategy-architecture/16-03-PLAN.md**
 (11-01 remains approved-pending: /paul:apply .paul/phases/11-long-history-data/11-01-PLAN.md)
 Resume file: .paul/phases/16-strategy-architecture/16-03-PLAN.md
+
+**REMIND THE USER FIRST THING (left 2026-09-19 evening):**
+1. 16-03 is PAUSED at its human-verify checkpoint (tasks 1-3 PASS, uncommitted on branch
+   `feat/16-option-instruments`). The user is reviewing the code and figure; after "approved" run
+   UNIFY (16-03-SUMMARY, STATE/ROADMAP, commit + push). Log the collar net-cash deviation
+   (settlement-only, per AC-6) and the 2026-09-19 hover-label fix in `_inline_theme`.
+2. Open question from the user, NOT yet investigated: protective put and collar come out almost
+   identical (+12.4% both). Starting point, unverified: the 1.28 call is ~28% OTM on a 63-bar
+   tenor at ~15% IV (~3.3 sd), so it prices at ~0.009 and funds almost nothing; the 0.90 put is
+   ~1.2 sd. Check the numbers, and whether cap 1.28 is the right default for a quarterly roll.
+3. The user's main focus is Phase 13 (walk-forward), reached incrementally. Finding 7 already
+   points at it: roll-only rules never monetise (the put hit 1.97x at the trough, expired at 0).
 
 **v0.4 context (2026-08-24).** The milestone asks whether portfolio insurance actually pays and how
 much of it a retail investor needs. The hedge structures are catalogued in the Obsidian vault at

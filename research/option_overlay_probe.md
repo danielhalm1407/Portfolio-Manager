@@ -153,11 +153,52 @@ actually buy.
 This is the sharpest argument yet for Phase 11 being the gate on the *result* — and it also says
 the 3.53% ATM cost figure is the wrong thing to design around.
 
+## Finding 7 — rolled for real, the hedges gained mid-period and then gave it all back
+
+**Added 2026-09-19 (plan 16-03), cell 10.** The first six findings price legs. This one runs a
+hedged BOOK. Each structure is a rule in `PortfolioSimulator`: it holds one SPY unit bought on bar
+0, opens its hedge on bar 1 at one option per unit, and rolls every 63 bars off the spot at that
+moment. That restriking is what Finding 4 said was missing. v1 surface, and dividend yield 0.
+
+| strategy | final value | return | max drawdown | net premium, %/yr of spot |
+|---|---|---|---|---|
+| SPY only | 738.93 | +16.0% | 9.1% | — |
+| + protective put (0.90) | 715.87 | +12.4% | 8.4% | 3.39% |
+| + put spread (0.90 / 0.80) | 720.76 | +13.2% | 8.3% | 2.67% |
+| + collar (0.90 / 1.28) | 715.91 | +12.4% | 8.4% | 3.38% |
+
+The rolls fell on 2025-07-29, 2025-10-27, **2026-01-28** and 2026-04-29. The third roll is the one
+that matters. It struck one bar after the drawdown's 2026-01-27 peak, at 695.42, so the 0.90 put's
+strike (625.88) sat in front of the whole fall. **By the 2026-03-30 trough, the put was worth 1.97×
+what it cost, and the spread 2.38×.** Those are the same monetisation numbers cell 8 found, now
+measured inside a rolling book.
+
+**It still expired worthless.** SPY recovered to 711.58 by the 2026-04-29 roll, so the put settled
+at 0. The rules hold every leg to expiry, so a hedge that nearly doubled mid-period contributed
+nothing. The book paid ≈3.4% a year of drag to cut max drawdown by 0.7 points. Three observations:
+
+1. **A roll-only rule does not monetise.** The payoff exists (the middle panel shows it), but no
+   rule takes it. A monetisation trigger is the natural next rule. It is a policy question for
+   Phase 13's sweep, not a pricing one: for example, close and re-strike when a hedge reaches N×
+   its premium, or when spot is X% below the strike-time spot.
+2. **The wide collar here is a protective put with a rounding error.** A 1.28 call struck 90 days
+   out on a 16% base vol is worth ≈0.009, so it funds almost nothing. That is 12-01's cap working as
+   intended: +28% a quarter is what the source ran, and it is chosen to rarely bind. On this window
+   it never did, so no collar redeploy or funding ever fired. All three rolls logged "collar
+   carry".
+3. **The put spread was the cheapest and did best.** Its net premium was ≈21% lower. The sold 0.80
+   put was never reached, so the credit was kept in full.
+
+The usual caveats apply, and they apply more strongly here. The vol level is frozen, so every
+mid-period multiple above is a floor (Finding 6). And this is one window with one drawdown: one
+observation, not evidence that hedging does or does not pay.
+
 ## What this does not cover — and who owns it
 
 | gap | owner |
 |---|---|
-| Rolling / restriking, theta decay within a period | 16-02 `RollCalendar`, 16-03 |
+| ~~Rolling / restriking, theta decay within a period~~ | **Done 2026-09-19** — 16-02 `RollCalendar`, 16-03 rules (Finding 7) |
+| Monetising a hedge before expiry (take-profit / re-strike triggers) | Phase 13 policy sweep; a new rule |
 | Delta, theta, `OptionLeg` as an object | 16-02 |
 | Put spreads, collars, funding branch | 16-03 |
 | Dividend yield (left at 0.0 to match the plan's worked examples; SPY is ~1.2%) | 16-02 |
@@ -165,7 +206,7 @@ the 3.53% ATM cost figure is the wrong thing to design around.
 
 ## Published figures
 
-All four figures render to standalone interactive HTML under [`docs/`](../docs/README.md), which is
+All five figures render to standalone interactive HTML under [`docs/`](../docs/README.md), which is
 the GitHub Pages root:
 
 ```bash
