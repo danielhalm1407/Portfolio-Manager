@@ -15,8 +15,8 @@ status = "in_progress"
 phases = 5
 
 [phase]
-number = 10
-name = "Deployment — web app"
+number = 13
+name = "Walk-forward validation harness"
 status = "in_progress"
 plans_completed = 1
 
@@ -27,6 +27,6 @@ position = "IDLE"
 groom = true
 
 [stats]
-total_plans = 22
+total_plans = 24
 total_phases = 15
 last_activity = "2026-09-20T00:00:00Z"

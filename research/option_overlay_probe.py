@@ -11,9 +11,10 @@ import pandas as pd
 import pipelines.option_probe_figures as opf
 from pipelines.option_probe_figures import (
     BASE_VOL, DIV_YIELD, MONEYNESS, OVERLAY_ORDER, RATE, TENOR_YEARS, UNDERLYING, VOL_BETA,
-    build_ladder, episode_paths, fig_drawdown_episode, fig_iv_paths, fig_overlay_values,
-    fig_put_paths, fig_smirk, iv_paths, load_spot_path, overlay_runs, overlay_table, put_paths,
-    worst_drawdown_episode,
+    align_real_iv, build_ladder, episode_paths, fig_drawdown_episode, fig_iv_paths,
+    fig_overlay_values, fig_put_paths, fig_put_paths_market, fig_real_iv_history, fig_smirk,
+    iv_paths, iv_paths_market, load_real_iv, load_spot_path, overlay_runs, overlay_table,
+    put_paths, worst_drawdown_episode,
 )
 from portutils.strategies.instruments.pricing import black_scholes_put
 from portutils.strategies.instruments.vol import synthetic_iv_surface
@@ -26,9 +27,10 @@ from portutils.strategies.instruments.vol import synthetic_iv_surface
 # actually get iterated on in a session; the two instrument modules underneath them are stable.
 importlib.reload(opf)
 from pipelines.option_probe_figures import (
-    build_ladder, episode_paths, fig_drawdown_episode, fig_iv_paths, fig_overlay_values,
-    fig_put_paths, fig_smirk, iv_paths, load_spot_path, overlay_runs, overlay_table, put_paths,
-    worst_drawdown_episode,
+    align_real_iv, build_ladder, episode_paths, fig_drawdown_episode, fig_iv_paths,
+    fig_overlay_values, fig_put_paths, fig_put_paths_market, fig_real_iv_history, fig_smirk,
+    iv_paths, iv_paths_market, load_real_iv, load_spot_path, overlay_runs, overlay_table,
+    put_paths, worst_drawdown_episode,
 )
 
 # %% 2. What this script is
@@ -49,6 +51,14 @@ from pipelines.option_probe_figures import (
 # Cell 9 (added by plan 16-03, 2026-09-19) goes one step further: the three
 # hedge structures as simulator rules, ROLLED every 63 bars over the window,
 # valued as a whole book next to SPY alone.
+#
+# Cells 10-11 (added 2026-09-20, following 11-01) replace assumption with
+# measurement: cell 10 plots SPY's REAL implied vol over this same window
+# (IBKR's OPTION_IMPLIED_VOLATILITY, not synthetic, not VIX), and cell 11
+# reprices the ladder with BOTH the vol level and the moneyness reference
+# dynamic together, sourced from that real series — the "never term B alone"
+# combination the 2026-08-29 decision required, landing here with real
+# numbers instead of Finding 6's illustrative VOL_BETA stand-in.
 #
 # The figures themselves are built by pipelines/option_probe_figures.py, which
 # also renders them to docs/figures/ for the static site. One implementation
@@ -246,12 +256,61 @@ for name in OVERLAY_ORDER[1:]:
           .to_string(index=False, float_format=lambda v: f"{v:.3f}"))
 
 
-# %% 10. Export the figures AND the report page for the static site
+# %% 10. Real implied vol over the probe window (Finding 8)
 
-# 10. Export the figures AND the report page for the static site
+# 10. Real implied vol over the probe window (Finding 8)
+
+# IBKR's OPTION_IMPLIED_VOLATILITY for SPY itself — NOT VIX (an SPX-derived, 30-day-constant-
+# maturity index IBKR would only serve as its own contract) and not synthetic. Cached by 11-01's
+# probe path, reaching back to 2006-01-09; sliced here to this probe's own short window.
+real_iv = align_real_iv(load_real_iv(), spot_path)
+fig_real_iv_history(real_iv).show()
+
+print(f"real IV over the window: {real_iv.min():.1%} to {real_iv.max():.1%}, "
+      f"mean {real_iv.mean():.1%}  (vol.py base = {BASE_VOL:.0%})")
+print(f"at the drawdown peak ({peak.date()}): {real_iv.loc[peak]:.1%}")
+print(f"at the drawdown trough ({trough.date()}): {real_iv.loc[trough]:.1%}  "
+      f"({real_iv.loc[trough] / real_iv.loc[peak] - 1:+.0%} vs the peak)")
+
+# %% 11. The ladder repriced with real vol level AND current spot, both dynamic (Finding 9)
+
+# 11. The ladder repriced with real vol level AND current spot, both dynamic (Finding 9)
+
+# ============================================================================
+# BOTH TERMS DYNAMIC TOGETHER, FOR REAL — the 2026-08-29 decision was "ship v1,
+# and never enable term B (current-spot moneyness) without term A (a dynamic
+# vol level)". Cells 5-7 show term B alone (v2) and Finding 6 illustrates term
+# A alone (the VOL_BETA stand-in). This is the first time both run together
+# off REAL data rather than an assumption: `iv_paths_market` feeds cell 10's
+# real IV series into `synthetic_iv_surface` as `base`, bar by bar, while the
+# moneyness reference is each bar's own spot — exactly v2's mechanism, just
+# no longer paired with a frozen level.
+# ============================================================================
+
+market_iv = iv_paths_market(spot_path, LADDER, real_iv)
+put_market = put_paths(spot_path, LADDER, market_iv)
+# Cell 10's IV series is STACKED underneath this figure's put panel on a shared x-axis, so the
+# vol spike lines up vertically with the jump it caused in the dashed lines. Cell 10 keeps its
+# standalone figure too — that one is about the vol level itself, this one about its consequence.
+fig_put_paths_market(put_v1, put_market, spot_path, real_iv).show()
+
+print(f"at the trough ({trough.date()}):\n")
+print(f"{'strike':>10} {'IV v1':>8} {'IV market':>10} {'put v1':>9} {'put market':>11} {'vs v1':>9}")
+for m in MONEYNESS:
+    p1, pm = put_v1.loc[trough, m], put_market.loc[trough, m]
+    print(f"{LADDER[m]:10.2f} {iv_v1.loc[trough, m]:8.1%} {market_iv.loc[trough, m]:10.1%} "
+          f"{p1:9.2f} {pm:11.2f} {(pm / p1 - 1):+9.1%}")
+
+# This is a probe-window result, not the walk-forward: it confirms the MECHANISM (a real vol spike
+# repriced the cheap strikes far more than the ATM one) on one window. The full 2006-2026 real
+# series calibrating vol.py's v2 across many regimes is Phase 13's job, not this probe's.
+
+# %% 12. Export the figures AND the report page for the static site
+
+# 12. Export the figures AND the report page for the static site
 
 # LAST CELL ON PURPOSE. main() rebuilds every figure from scratch and writes docs/figures/*.html
 # plus the narrative report at docs/index.html, so it has to run AFTER the cells whose figures it
-# publishes — otherwise a figure change made in cell 9 would not reach the page until the next
-# run. Also runnable from a terminal as:  python -m pipelines.option_probe_figures
+# publishes — otherwise a figure change made in an earlier cell would not reach the page until the
+# next run. Also runnable from a terminal as:  python -m pipelines.option_probe_figures
 opf.main()

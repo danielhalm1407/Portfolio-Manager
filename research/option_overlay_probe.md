@@ -243,6 +243,79 @@ a quarterly reset the same number is nearly four sigma out. A cap nearer 1.05-1.
 would fund a visible share of the floor and would genuinely cap upside — a different structure, and
 exactly the kind of parameter Phase 13 should sweep rather than assume.
 
+## Finding 8 — the real vol level nearly doubled at the trough, confirming Finding 6's guess
+
+**Added 2026-09-20**, using 11-01's cached SPY implied vol
+(`data/processed/iv_long_history.parquet`, IBKR's `OPTION_IMPLIED_VOLATILITY` for the ticker
+itself, back to 2006-01-09 — not VIX, not synthetic). Finding 6's "+vol spike" columns were an
+**illustrative** stand-in — `base` rising by `VOL_BETA = 2.0` points per unit of drawdown, chosen
+to bound the gap v1 leaves out, not measured. This finding replaces the guess with the real
+number.
+
+Over the probe window (2025-07-28 → 2026-07-24), SPY's real IV ranged **10.5% to 26.2%**, mean
+**14.7%** — sitting BELOW `base = 0.16` most of the time, not above it. Across the drawdown episode
+specifically:
+
+| | date | real IV |
+|---|---|---|
+| peak | 2026-01-27 | **12.9%** |
+| trough | 2026-03-30 | **25.1%** |
+| episode max | — | 26.2% |
+
+The level roughly **doubled** from peak to trough — close to the illustrative 0.16 → 0.34 jump
+Finding 6 assumed, arrived at independently from real market data rather than a chosen constant.
+
+## Finding 9 — repriced with real vol AND current spot together, the cheap strikes move the most
+
+Same ladder, same trough, now valued with `iv_paths_market` — term A (the level) from Finding 8's
+real series, term B (the moneyness reference) from that bar's own spot, both dynamic together
+(never term B alone, per the 2026-08-29 decision):
+
+| strike | K/S then | IV v1 | IV market | put v1 | put market | market vs v1 |
+|---|---|---|---|---|---|---|
+| 509.55 | 0.81 | 25.8% | 34.6% | 1.32 | 4.72 | **+257.6%** |
+| 573.25 | 0.91 | 21.9% | 30.7% | 6.14 | 13.88 | **+126.1%** |
+| 605.09 | 0.96 | 20.3% | 29.2% | 12.83 | 22.89 | +78.5% |
+| 636.94 | 1.01 | 19.0% | 27.9% | 24.88 | 36.09 | +45.0% |
+
+Same ordering as Finding 6, now with real numbers instead of an illustrative one: **the cheapest,
+most OTM strike gains the most from a real vol repricing** (+258% vs +45% for the ATM strike).
+Finding 6's frozen-`base` run showed the 0.80× strike LOSING 46.9% over this same episode when held
+to expiry with decaying tau — the two are different measurements (a fixed 63-day snapshot here vs
+one option carried to expiry there) but they point at the same mechanism from opposite directions:
+a model whose vol level never moves cannot price what deep-OTM protection is actually bought for,
+and this finding is the first time that statement is backed by a real, measured vol series rather
+than an assumption.
+
+**The vol spike is the overriding factor, and it is not close.** Both the market series here and
+the v2 series in Finding 5 measure the moneyness reference against each bar's own spot — term B is
+common to both. The only thing this finding adds is term A, the real vol level. So the two tables
+decompose the effect cleanly:
+
+| strike | term B alone (Finding 5, v2 vs v1) | term B **and** term A (this finding, market vs v1) |
+|---|---|---|
+| 0.80× | −5.7% | **+257.6%** |
+| 0.90× | −2.9% | **+126.1%** |
+| 0.95× | −1.8% | **+78.5%** |
+| 1.00× | −0.9% | **+45.0%** |
+
+Sliding down the smirk — a fixed strike becoming less of a tail strike as spot falls toward it —
+makes protection **cheaper by 1-6%**. The vol level rising makes it **dearer by 45-258%**. They
+push in opposite directions and they are not the same order of magnitude: term A is roughly two
+orders larger than term B on the same bars. Any model that freezes the vol level is therefore not
+making a small approximation, and the 2026-08-29 rule ("never term B alone") is doing more work
+than it appears to — enabling term B by itself would not merely under-price the hedge, it would
+move the price the *wrong way* in a selloff.
+
+The figure above is stacked for exactly this reason: the real IV panel shares its x-axis with the
+put panel, so the spike and the jump in the dashed series line up vertically rather than having to
+be matched by eye across two separate charts.
+
+This is a probe-window result, not yet the walk-forward: the FULL 2006-2026 real IV series is what
+Phase 13 needs to actually calibrate `vol.py`'s v2 (`base` driven bar-by-bar off a real series,
+per the 2026-08-29 decision) across many regimes rather than one window. See that phase's scope
+note in the roadmap.
+
 ## What this does not cover — and who owns it
 
 | gap | owner |
@@ -256,11 +329,11 @@ exactly the kind of parameter Phase 13 should sweep rather than assume.
 
 ## Published figures
 
-All five figures render to standalone interactive HTML under [`docs/`](../docs/README.md), which is
+All seven figures render to standalone interactive HTML under [`docs/`](../docs/README.md), which is
 the GitHub Pages root:
 
 ```bash
-python -m pipelines.option_probe_figures      # or cell 10 of the script
+python -m pipelines.option_probe_figures      # or the last cell of the script
 ```
 
 The builders live in

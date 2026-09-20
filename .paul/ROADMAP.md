@@ -62,9 +62,9 @@ Progress: [█████░░░░░] 50%
 | 8 | Documentation hub | 1 | Complete | 2026-08-01 |
 | 9 | Research half — themes to tilts | TBD | Not started | - |
 | 10 | Deployment — web app | 2 | In progress (Track A done 2026-09-20; Track B not started) | - |
-| 11 | Long-history data foundation | 2 | Planning | - |
+| 11 | Long-history data foundation | 2 | In progress (1 of 2) | 11-01 complete 2026-09-20 |
 | 12 | Option overlay engine | TBD | Not started | - |
-| 13 | Walk-forward validation harness | TBD | Not started | - |
+| 13 | Walk-forward validation harness | 4 (13-01.1 COMPLETE, 13-01 in progress, 13-02 planned, 13-03 TBD) | In progress (1 of 4) | 13-01.1 complete 2026-09-20 |
 | 14 | Regime labelling and scenario guardrails | TBD | Not started | - |
 | 15 | Conviction write-up — how much hedging is enough | TBD | Not started | - |
 | 16 | Strategy architecture consolidation | 7 | In progress (16-02, 16-03 complete 2026-09-20) | - |
@@ -361,8 +361,17 @@ earliest bar anywhere in `data/` is 2025-04-14 — and **no NDX or QQQ series of
 and the second index leg does not exist yet.
 
 **Plans:**
-- [ ] 11-01: Reach back decades — paginated IBKR history, free-source fallback, coverage report,
-  ragged-history loading and the rebase anchor policy (Task 4)
+- [x] 11-01: Reach back decades — paginated IBKR history, free-source fallback, coverage report,
+  ragged-history loading and the rebase anchor policy (Task 4). **COMPLETE 2026-09-20** — loop
+  closed (SUMMARY at `phases/11-long-history-data/11-01-SUMMARY.md`). All 6 ACs pass; 15 new
+  offline tests in `tests/test_history.py`; full suite 182 passed with the one known `ARM_LIVE`
+  failure. Probe finding: **no pagination ceiling exists** for daily bars — SPY returns
+  1993-02-01 in a single request, QQQ 1999-03-11, so `ibkr-primary` was chosen at the checkpoint
+  and yfinance kept only as a documented fallback. Real `OPTION_IMPLIED_VOLATILITY` history
+  reaches 2006-01-09, which is what Phase 13's v2 pricing now rests on. The ragged-truncation
+  defect was fixed at BOTH sites. Wrote `data/processed/prices_long_history.parquet`,
+  `provenance_long_history.csv` and `COVERAGE.md` (2008/2020/2022 COVERED; one named gap,
+  2001-09-10 to 2001-09-17, the post-9/11 closure)
 - [ ] 11-02: IBKR message reference — the error and notice codes to expect, grouped and keyed by code
 
 **BLOCKER found 2026-08-31, and it belongs in 11-01 rather than a later viz phase.**
@@ -491,9 +500,114 @@ what this phase exists for.** Full numbers: the "How a collar leg is actually pr
   2026-01-27 peak reached **1.97x** premium at the trough and expired worthless, because every
   rule holds to expiry. Close or re-strike on N x premium, or on spot X% through the strike — a
   policy to sweep, not a pricing change.
+- **Added 2026-09-20: the FULL real IV history is what feeds this phase's vol level, not the
+  synthetic `base=0.16`.** 11-01 cached genuine IBKR implied vol for SPY/QQQ back to
+  2006-01-09 (`data/processed/iv_long_history.parquet`) — many years, many regimes, which is
+  exactly what a rolling-origin walk-forward needs and a one-year synthetic-`base` run cannot
+  supply. This is `vol.py`'s v2 (`base` driven bar-by-bar off a real series, per the 2026-08-29
+  v1/v2 decision) actually landing, scoped to Phase 13 rather than Phase 16 because it changes
+  what the pricer ASSUMES market-wide — a parameter/policy question, the same reason `cap=1.28`
+  and the monetisation trigger above live here rather than in the option-instruments phase. The
+  short-window real-IV comparison in Phase 16 (see that phase's 2026-09-20 note) is a smaller,
+  earlier check on the SAME cached series, not a substitute for this.
+
+**Added 2026-09-20 — the phase now starts with a monetisation POLICY run on the full IV history,
+not with the splitter.** The rules give every gain back (Finding 7), and the pricer still assumes a
+synthetic `base`, so a rolling-origin harness built first would validate the wrong strategy on the
+wrong vol. Two changes to how the work is done, one to what is built:
+
+- **A batch script, not more probe cells.** `research/option_overlay_probe.py` is twelve cells written
+  to explain the pricer on one window; its mechanism work is finished (Findings 1-9). The full-history
+  run is ONE command, `src/pipelines/option_monetisation_batch.py`, which skips straight to v2 pricing
+  and reports a table. No new notebook cells.
+- **v2 pricing, both terms live together.** Term A, the vol LEVEL, comes bar by bar from the real SPY IV
+  series (`data/processed/iv_long_history.parquet`, 2006-01-09 to 2026-09-18); term B, the moneyness
+  reference, is each bar's own spot. Enforced in code as "never term B alone" (the 2026-08-29
+  decision). The run window is IV-limited: SPY closes go back to 1993 but real IV starts 2006, so
+  2000 and earlier stay out of reach of v2.
+- **What the option rules must TUNE so they monetise instead of blindly rolling.** A three-state
+  cycle per rule. (1) **Monetise:** when the long leg's value divided by the premium paid reaches
+  `monetise_multiple`, sell the whole structure — do not wait for expiry. (2) **Wait for cheap
+  insurance:** stay unhedged until implied vol has fallen to a re-entry level, because the spike that
+  made the old put pay would make the new one dear. (3) **Reopen and repeat:** the moment the
+  position reopens it is back to step 1 — monetise early on a multiple spike, otherwise roll at
+  expiry as today.
+
+  Parameters to tune (each defaults to "off", so nothing existing moves):
+
+  | parameter | what it sets | note |
+  |---|---|---|
+  | `monetise_multiple` | value / premium paid at which to sell | try 1.5, 2, 3; measured on the LONG legs only, since a collar's net premium can be about zero |
+  | `reentry_iv` or `reentry_iv_pctile` | how cheap vol must get before buying again | absolute level, or percentile of trailing IV (`pctile_window`, 252); exactly one |
+  | `max_flat_bars` | reopen anyway after this many unhedged bars | **`None` waits forever, and in 2008-09 that is an unhedged book through the drawdown** — the sweep must include a finite value |
+  | `gate_rolls` | whether the same vol gate applies to ordinary expiry rolls | default off, as the policy was described; on is a sweepable extension |
+
+  Two things this must not do: report a policy as good because it sat unhedged (the share of bars
+  spent FLAT is a mandatory column), or present a threshold fitted on 20 years as a finding.
+
+  **Amended 2026-09-20 — the phase now runs across THREE plans, and the trigger changed.** The
+  drawdown trigger is PRIMARY (monetise when the underlying is X% below its running peak, because
+  that is the loss event the insurance exists for); the value multiple above is retained as the
+  comparator, and 13-01 reports how often the two fire together. 13-01 is the ENGINE only — its
+  original parameter sweep was 13-02's work in the wrong file and has been removed from it. 13-02
+  is the in-sample grid and surface; 13-03 is CPCV. Each plan is in-sample until 13-03.
+- **Open calibration questions, measured in 13-01 and decided later:** `synthetic_iv_surface` adds
+  `0.06 * sqrt(0.25) = 0.03` to `base` for a 63-bar tenor, which may double-count against IBKR's
+  roughly 30-day ATM series; and `iv_floor = 0.10` sits above the real series' minimum of 0.065.
 
 **Plans:**
-- [ ] 13-01: To be defined during `/paul:plan`
+- [ ] 13-01: Option monetisation policy on the full real-IV history — v2 pricing (level and
+  moneyness together), `monetise_multiple` / re-entry gate / `max_flat_bars`, and a one-command batch
+  run over 2006-2026. Plan written 2026-09-20 at `.paul/phases/13-walk-forward-validation/13-01-PLAN.md`.
+  **Tasks 1 and 2 COMPLETE and verified 2026-09-20** (v2 pricing in the rule; the monetise / wait /
+  reopen state machine; 23 new tests; AC-1's byte-identity hashes unchanged). **Task 3 INTERRUPTED**
+  — its code exists, its full-history run was deliberately not completed, and the checkpoint was not
+  reached. Amended 2026-09-20 to resume against 13-01.1 as a staged ladder (rungs 3a single hedge /
+  3b rolling / 3c monetising, each a STOP inspected through the probe, then 3d one configuration
+  over the full history, then 3e the named set). AC-6's wall-clock is now measured AFTER 13-01.1 and
+  requires three persisted artefacts per configuration — equity series, blotter and rule history —
+  because the narrow ledger can no longer explain its own equity path
+- [x] 13-01.1: **COMPLETE 2026-09-20** — one full-history simulator run goes from a projected
+  ~6.5 min to a measured **6.30 s / 5,201 bars / 1.21 ms/bar**, with equity **bit-identical** to the
+  wide ledger. `NarrowLedger` is a constant-width `StateLedger` SUBCLASS handed in through the
+  `ledger=` argument `PortfolioSimulator` already accepts, so nothing on 13-01's DO NOT CHANGE list
+  moved and every existing caller keeps the wide ledger by construction. Also shipped
+  `classify_option_events` (new `portutils/strategies/scoring.py`) and the ladder probe. **On its
+  first real run the probe found 13-01's re-entry gate thrashing** — 281 monetisations against 48
+  rolls over twenty years — which now blocks 13-02. Four findings routed into 13-01.
+  SUMMARY: `phases/13-walk-forward-validation/13-01.1-SUMMARY.md`. Plan written 2026-09-20 at
+  `phases/13-walk-forward-validation/13-01.1-PLAN.md`. 13-01 stopped mid-APPLY because the
+  simulator is QUADRATIC in bars (`13-01-IMPLEMENTATION-CONTEXT.md` section 5: 5.99 ms/bar at 250
+  bars, 28.63 at 2,000), which puts 13-01's own AC-5 run at ~45 min and 13-02's grid at ~11 hours.
+  The cost is the RECORDER, not the rules and not the fill model: `Book` retains every option leg it
+  has ever held, `Book.snapshot` iterates all of them, and `Ledger.record_book` flattens all of them
+  into an ever-widening row — ~82 dead legs over a 20-year window. Fixed by a constant-width
+  `StateLedger` SUBCLASS handed in through the `ledger=` argument `PortfolioSimulator` already
+  accepts, so nothing on 13-01's DO NOT CHANGE list moves and every existing caller keeps the wide
+  ledger by construction. Also delivers `research/validation/option_ladder_probe.py` — equity and
+  spot with every fill marked, classified OPEN / ROLL / MONETISE and hoverable with that bar's
+  state / drawdown / multiple / iv — because 13-01's mechanisms are so far proven only on synthetic
+  paths, and a table of final values cannot say whether a trigger fired on the right BAR.
+  **Blocks both 13-01's Task 3 and 13-02's grid**, and its SUMMARY carries the measured single-run
+  constant both of them size from
+- [ ] 13-02: **The in-sample grid and response surface** — plan written 2026-09-20 at
+  `phases/13-walk-forward-validation/13-02-PLAN.md`. Cartesian product of moneyness x monetisation
+  drawdown for the long put, each combination simulated ONCE over 2006-2026 and scored by slicing
+  the persisted per-bar series. Metric: Calmar with a floored denominator (default 0.02), window
+  peak reset at the slice start. Indicative windows include CALM regimes as well as drawdowns, and
+  ranks are reported separately for each set. Surfaces fitted 1-D first, then a 2-D tensor smooth,
+  per window AND pooled. Produces the trial count 13-03 needs. In-sample by construction; claims
+  nothing validated
+- [ ] 13-03: To be defined during `/paul:plan` — CPCV procedure validation at N=6, k=2 (15 splits,
+  5 out-of-sample paths), selection rule = argmax of the fitted surface, plus the PBO figure. Also
+  still unscoped: the `cap = 1.28` sweep, hedge sizing (notional / overhedge) and a tenor axis.
+  **Design decisions taken 2026-09-20 are recorded in
+  [13-walk-forward-validation/CONTEXT.md](phases/13-walk-forward-validation/CONTEXT.md)**: drawdown
+  as the primary monetisation trigger with the value multiple as comparator; long put only for the
+  sweep; per-bar P&L persisted once per configuration so window scoring is a slice rather than a
+  re-run; surrogate staged 1-D to 2-D tensor smooth; walk-forward and CPCV used for different
+  questions. Methodology background lives in the `obsidian_notes` vault at
+  `Knowledge/Finance/Quant finance/Out-of-sample validation of strategy parameters.md`
 
 ### Phase 14: Regime labelling and scenario guardrails
 
@@ -556,6 +670,27 @@ sequencing decision in CONTEXT.md
 - Reflection through the existing `ReturnsCalculator` / `PerformanceSummary` / `Fill` paths,
   accepting both full and compressed order/fill payloads
 
+**Added 2026-09-20, from `research/data_inspection/` — real implied-vol history as an
+incremental layer on the option probe, NOT a rebuild.** 11-01 cached genuine (non-synthetic)
+IBKR `OPTION_IMPLIED_VOLATILITY` for SPY/QQQ back to 2006-01-09
+(`data/processed/iv_long_history.parquet`), measured against `vol.py`'s `base=0.16`:
+SPY's own full-history mean is **0.166**, last-5yr mean **0.160** — matches `base` almost
+exactly; QQQ runs richer, mean **0.203**. Two separate uses, on two different slices of that
+same series, deliberately not conflated:
+- **Here (Phase 16):** `research/option_overlay_probe.py` currently prices its ladder with
+  `vol.py`'s frozen `base=0.16` over the probe's existing SHORT window (the same span as the
+  `spy_kmlm` panel, 2025-07-28 to 2026-07-24 — one year, one regime). The incremental step is
+  to add a cell (or cells) to that SAME script — layering richness onto the existing probe
+  rather than opening a new file — that re-prices the same ladder over that SAME short window
+  using the REAL SPY IV series sliced to that window, next to the synthetic `base=0.16` run,
+  so the two can be compared directly on identical dates/strikes. This does NOT need the full
+  2006-2026 history — only the slice matching the probe's own window — and does not touch
+  `vol.py`'s `base` default itself (that stays a Phase 13 parameter question, not a Phase 16
+  code change).
+- **Not here (Phase 13):** the FULL 2006-2026 real IV series is what the walk-forward harness
+  actually needs, since a rolling-origin split requires many years and many regimes of vol
+  history, not one short window. See the new Phase 13 scope note below.
+
 **Scoping doc:** `.paul/phases/16-strategy-architecture/CONTEXT.md` — the full refactor is
 documented there regardless of what is built when. Two of the five design frictions are now
 resolved: the kts weight ladder becomes `ConstrainedWeightRule` (a rule that recommends a
@@ -597,4 +732,7 @@ Track B migrates working code and is separately gated and individually skippable
 
 ---
 *Roadmap created: 2026-08-01 — migrated from 12 pre-existing plans in `.claude/plans/`*
-*Last updated: 2026-08-31 — 10-01's static-export pattern seeded end to end into `docs/`; Phase 10 split into Track A (10-01 static) / Track B (10-02 gated live); Phase 11 gains 11-02 (IBKR message reference), the ragged-history blocker (now TWO sites: `panel.py` and `cache_prices.py`) and its measured starting position; 12-01 vol surface staged v1/v2*
+*Last updated: 2026-09-20 (latest) — 13-01.1 COMPLETE: one full-history run 6.5 min -> 6.3 s, equity bit-identical; the ladder probe found 13-01's monetise/reopen thrash (281 monetisations vs 48 rolls), which blocks 13-02 until 13-01 resolves it*
+*Previously updated: 2026-09-20 (later) — Phase 13 gains 13-01.1, an interruption plan fixing the quadratic simulator cost found while implementing 13-01 Task 3; 13-01 Tasks 1-2 marked complete and Task 3 amended into a staged, probe-inspected ladder; 13-02 reduced to consuming 13-01.1's measured constant and its narrow-ledger artefact contract*
+*Previously updated: 2026-09-20 — Phase 13 gains 13-01 (option monetisation policy on the full real-IV history, run as a batch script) and a 13-02 placeholder for the walk-forward split and sweep*
+*Previously updated: 2026-08-31 — 10-01's static-export pattern seeded end to end into `docs/`; Phase 10 split into Track A (10-01 static) / Track B (10-02 gated live); Phase 11 gains 11-02 (IBKR message reference), the ragged-history blocker (now TWO sites: `panel.py` and `cache_prices.py`) and its measured starting position; 12-01 vol surface staged v1/v2*

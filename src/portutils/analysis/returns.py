@@ -200,18 +200,87 @@ class ReturnsCalculator:
 # ============================================================================
 
 
-def normalise(df: pd.DataFrame, base: float = 100.0) -> pd.DataFrame:
-    """Wealth index: ``(price / first_price) * base``."""
-    # Dividing by row 0 rebases every column to a common start, which is what makes
-    # instruments with wildly different price levels comparable on one axis.
-    return (df / df.iloc[0]) * base
+# ============================================================================
+# RAGGED-FRAME ANCHOR POLICY — added 2026-09-20 (Phase 11, Task 4, Step 2).
+# `normalise` and `pct_returns` both divide by a single anchor row. On a ragged
+# frame (series whose listing histories start years apart, e.g. SPY 1993 beside
+# a vol series starting 2005) the OLD unconditional `df.iloc[0]` divides a
+# late-starting column's row 0 (NaN, since it has no observation yet) through
+# NaN, and the ENTIRE column silently becomes NaN — an invisible trace, no
+# error raised. `anchor` makes that choice explicit instead of accidental.
+# ============================================================================
 
 
-def pct_returns(df: pd.DataFrame) -> pd.DataFrame:
-    """Cumulative percentage returns from the first observation."""
-    # Same rebasing as `normalise`, expressed as a percentage change from the start
-    # rather than an index level — i.e. `normalise(df, 100) - 100`.
-    return ((df / df.iloc[0]) - 1) * 100
+def _resolve_anchor(df: pd.DataFrame, anchor):
+    """Resolve the anchor ROW used to rebase a frame. Shared by `normalise` and
+    `pct_returns`; `anchor="self"` is handled separately by the callers because it
+    anchors PER COLUMN rather than on one shared row.
+    """
+    if anchor == "first_row":
+        # Unchanged current behaviour — every existing caller keeps this default.
+        return df.iloc[0]
+    if anchor == "common":
+        # The first date where EVERY series has data. A series that starts later
+        # is still shown before that date (divided by this same anchor row), which
+        # is meaningful information about where it stood relative to the common
+        # baseline — not an artefact to be trimmed.
+        common = df.dropna()
+        if common.empty:
+            # `.index[0]` on an empty frame raises a bare IndexError that names no
+            # series — useless when the whole point is to find WHICH series never
+            # overlap. Name them explicitly instead.
+            coverage = ", ".join(
+                f"{c}: {df[c].first_valid_index()} to {df[c].last_valid_index()}"
+                for c in df.columns
+            )
+            raise ValueError(
+                f"anchor='common' found no date where every series has data "
+                f"(no overlapping window across the panel). Per-series coverage: {coverage}"
+            )
+        return common.iloc[0]
+    if isinstance(anchor, pd.Timestamp):
+        # An explicit anchor date. Exists because one late-starting series can drag
+        # "common" forward and discard the comparability of everything before it —
+        # e.g. a vol series starting 2005 beside SPX from 1990 makes "common" 2005.
+        return df.loc[anchor]
+    raise ValueError(
+        f"unknown anchor {anchor!r}; expected 'first_row', 'common', 'self', or a pd.Timestamp"
+    )
+
+
+def _self_anchor_row(df: pd.DataFrame) -> pd.Series:
+    # Each column anchored on ITS OWN first valid observation, not a shared row —
+    # right for "growth of 100 since inception" per series, but the resulting
+    # levels are NOT comparable across series: a series that started in 2020 and
+    # one that started in 1993 both read `base` at their own start, which says
+    # nothing about where either stood relative to the other on any shared date.
+    # Use anchor="common" for a cross-series comparison chart.
+    return df.apply(
+        lambda s: s.loc[s.first_valid_index()] if s.first_valid_index() is not None else np.nan
+    )
+
+
+def normalise(df: pd.DataFrame, base: float = 100.0, anchor: str = "first_row") -> pd.DataFrame:
+    """Wealth index: ``(price / anchor_price) * base``.
+
+    anchor : "first_row" (default, unchanged), "common", "self", or a pd.Timestamp.
+        See the RAGGED-FRAME ANCHOR POLICY block above for what each means on a
+        ragged (non-overlapping-coverage) frame. Existing callers pass nothing and
+        get exactly today's `df.iloc[0]` behaviour.
+    """
+    anchor_row = _self_anchor_row(df) if anchor == "self" else _resolve_anchor(df, anchor)
+    return (df / anchor_row) * base
+
+
+def pct_returns(df: pd.DataFrame, anchor: str = "first_row") -> pd.DataFrame:
+    """Cumulative percentage returns from the anchor observation.
+
+    Same rebasing as `normalise`, expressed as a percentage change from the anchor
+    rather than an index level — i.e. ``normalise(df, 100, anchor) - 100``. See
+    `normalise` for what `anchor` means.
+    """
+    anchor_row = _self_anchor_row(df) if anchor == "self" else _resolve_anchor(df, anchor)
+    return ((df / anchor_row) - 1) * 100
 
 
 def daily_returns(df: pd.DataFrame) -> pd.DataFrame:
@@ -219,6 +288,10 @@ def daily_returns(df: pd.DataFrame) -> pd.DataFrame:
     # The first row is dropped, not zero-filled: there is no prior observation, so a
     # return is genuinely undefined there. Callers that multiply weights by these
     # returns therefore need weights aligned to the SHORTENED index.
+    # NO anchor parameter, unlike normalise/pct_returns above: pct_change() is PER-SERIES
+    # (each row divides by that same column's PREVIOUS row, not a shared anchor row), so it
+    # is already correct on a ragged frame — a late-starting column just yields extra leading
+    # NaNs, not a silently-NaN'd column. There is no anchor choice to make here.
     return df.pct_change().dropna()
 
 

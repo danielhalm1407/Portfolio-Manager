@@ -151,6 +151,11 @@ class BaseFigureConfig:
 class TimeSeriesFigureConfig:
     """Time-series-specific configuration."""
     figure_title: str = "Levels Reindexed to 100"
+    # bool OR the same anchor-policy strings as analysis.returns.normalise/pct_returns
+    # ("first_row" / "common" / "self" / a pd.Timestamp). Added 2026-09-20 (Phase 11,
+    # Task 4, Step 3) so a ragged frame can be reindexed without an all-NaN series —
+    # see _build_level_figure Step 4 for the resolution. True/False keep their exact
+    # prior meaning (-> "first_row" / raw levels), so no existing config changes.
     reindex: bool = True
     cols_of_interest: Optional[Sequence[str]] = None
     regime_col: Optional[str] = None
@@ -674,20 +679,53 @@ def _build_level_figure(df, cfg: TimeSeriesAppConfig, time_range=None):
     # ── Step 4: reindex (or not) each series ─────────────────────────────────
     # Store the transformed y-values keyed by column so all stack-mode branches
     # can share the same pre-processed data.
+    #
+    # ANCHOR RESOLUTION — added 2026-09-20 (Phase 11, Task 4, Step 3). `cfg.reindex`
+    # keeps its original bool meaning (True -> old per-column series.iloc[0] behaviour,
+    # False -> raw levels) but now also accepts the same anchor-policy strings as
+    # analysis.returns.normalise: "common" (first date where every column has data —
+    # computed once here, since it needs the WHOLE filtered_df, not one column) and
+    # "self" (unchanged: each column's own first valid observation). The old
+    # unconditional `series.iloc[0]` silently produced an all-NaN trace for any column
+    # that started NaN in the window — this is that same failure mode `_load` had.
+    if cfg.reindex in (True, "first_row"):
+        anchor_date = filtered_df.index[0]
+    elif cfg.reindex == "common":
+        common = filtered_df.dropna()
+        if common.empty:
+            coverage = ", ".join(
+                f"{c}: {filtered_df[c].first_valid_index()} to {filtered_df[c].last_valid_index()}"
+                for c in cfg.cols_of_interest
+            )
+            raise ValueError(
+                f"reindex='common' found no date where every series has data in this "
+                f"window. Per-series coverage: {coverage}"
+            )
+        anchor_date = common.index[0]
+    elif cfg.reindex == "self":
+        anchor_date = None  # resolved per-column below
+    elif isinstance(cfg.reindex, pd.Timestamp):
+        anchor_date = cfg.reindex
+    else:
+        anchor_date = False  # cfg.reindex is False: no reindexing at all
+
     transformed_series = {}
     for col in cfg.cols_of_interest:
         series = filtered_df[col]
-        first_value = series.iloc[0]  # anchor point for reindexing
 
-        if cfg.reindex:
-            # Divide each value by the first value and multiply by 100 so the
-            # series starts at 100 regardless of its original scale.
+        if anchor_date is False:
+            # Use raw values — useful when series are already on the same scale.
+            y = series
+        else:
+            if cfg.reindex == "self":
+                first_value = series.loc[series.first_valid_index()]
+            else:
+                first_value = series.loc[anchor_date]
+            # Divide each value by the anchor value and multiply by 100 so the
+            # series reads 100 at the anchor, regardless of its original scale.
             # This makes multiple series directly comparable on the same axis.
             y = (series / first_value) * 100
             y_axis_title_value = "Level (Base 100)"
-        else:
-            # Use raw values — useful when series are already on the same scale.
-            y = series
 
         transformed_series[col] = y
 
@@ -781,8 +819,13 @@ def _build_level_figure(df, cfg: TimeSeriesAppConfig, time_range=None):
         if cfg.overall_col is not None:
             # Use a dedicated column (e.g. a pre-computed aggregate).
             overall_series = filtered_df[cfg.overall_col]
-            if cfg.reindex:
-                first_value = overall_series.iloc[0]
+            if anchor_date is not False:
+                # Same anchor resolution as Step 4 above, so the overall line reads
+                # 100 at the same date every per-column trace does.
+                if cfg.reindex == "self":
+                    first_value = overall_series.loc[overall_series.first_valid_index()]
+                else:
+                    first_value = overall_series.loc[anchor_date]
                 overall_y = (overall_series / first_value) * 100
             else:
                 overall_y = overall_series
