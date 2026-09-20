@@ -46,7 +46,7 @@ from pipelines.option_probe_figures import (
 # where a rolled hedge would actually have been standing. The two answer
 # different questions and cell 8 is the one about payoff.
 #
-# Cell 10 (added by plan 16-03, 2026-09-19) goes one step further: the three
+# Cell 9 (added by plan 16-03, 2026-09-19) goes one step further: the three
 # hedge structures as simulator rules, ROLLED every 63 bars over the window,
 # valued as a whole book next to SPY alone.
 #
@@ -204,19 +204,9 @@ for m in MONEYNESS:
 print(f"\n(vol spike model: base = {BASE_VOL:.2f} + {VOL_BETA:.1f} x drawdown, "
       f"illustrative only — Phase 11 calibrates it)")
 
-# %% 9. Export the figures for the static site
+# %% 9. The three hedge structures, rolled, through the real simulator
 
-# 9. Export the figures for the static site
-
-# Renders every figure above to standalone interactive HTML under docs/figures/, which is what
-# GitHub Pages serves. Same builders, so the published page and the inline figure cannot
-# disagree. Also runnable from a terminal as:  python -m pipelines.option_probe_figures
-opf.main()
-
-
-# %% 10. The three hedge structures, rolled, through the real simulator
-
-# 10. The three hedge structures, rolled, through the real simulator
+# 9. The three hedge structures, rolled, through the real simulator
 
 # ============================================================================
 # FROM A SINGLE LEG TO A HEDGED BOOK (plan 16-03)
@@ -254,3 +244,14 @@ for name in OVERLAY_ORDER[1:]:
     print(f"\n{name}")
     print(ev[["ts", "action", "symbol", "qty", "price", "pnl_per_unit"]]
           .to_string(index=False, float_format=lambda v: f"{v:.3f}"))
+
+
+# %% 10. Export the figures AND the report page for the static site
+
+# 10. Export the figures AND the report page for the static site
+
+# LAST CELL ON PURPOSE. main() rebuilds every figure from scratch and writes docs/figures/*.html
+# plus the narrative report at docs/index.html, so it has to run AFTER the cells whose figures it
+# publishes — otherwise a figure change made in cell 9 would not reach the page until the next
+# run. Also runnable from a terminal as:  python -m pipelines.option_probe_figures
+opf.main()

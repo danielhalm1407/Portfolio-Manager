@@ -90,6 +90,10 @@ PRICE_PANEL = PROJECT_ROOT / "data" / "processed" / "prices_spy_kmlm.parquet"
 UNDERLYING = "SPY"
 DOCS_FIGURES = PROJECT_ROOT / "docs" / "figures"
 
+# Spacing for a figure with a secondary y-axis (legend x inline and on export, right margin,
+# y2 title standoff) lives in theme.py beside the palette, as SECONDARY_AXIS_* — those are the
+# numbers to hand-tune when a series name or an axis title changes.
+
 
 # ============================================================================
 # DATA PREP — every frame the figures need, built from the price panel alone.
@@ -230,7 +234,7 @@ def episode_paths(spot_path, peak, tenor=TENOR_YEARS, moneyness=MONEYNESS,
 _TRANSPARENT = dict(paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)")
 
 
-def _inline_theme(fig):
+def _inline_theme(fig, secondary_axis_spacing=None):
     # ============================================================================
     # INK + GRID FOR THE INLINE FIGURE, backgrounds left transparent.
     # Called as the last step of every fig_* builder. A transparent background
@@ -272,6 +276,16 @@ def _inline_theme(fig):
         # its text in `hovertext` with the name suppressed by <extra></extra>.
         namelength=-1,
     ))
+
+    # Clear the legend of any right-hand axis. theme.apply_secondary_axis_spacing carries the
+    # reasoning and the numbers; `secondary_axis_spacing` is passed straight through as its
+    # override, for a caller that knows the axis is nowhere near the legend.
+    theme.apply_secondary_axis_spacing(fig, enabled=secondary_axis_spacing)
+
+    # Responsive sizing (export path in theme.apply_export_spacing):
+    # no fixed pixel width, so a figure fills whatever container it lands in —
+    # the interactive window, or the report page's full-width figure block.
+    fig.update_layout(autosize=True)
     return theme.apply_export_theme(fig, paper=_TRANSPARENT["paper_bgcolor"],
                                     plot=_TRANSPARENT["plot_bgcolor"])
 
@@ -386,9 +400,19 @@ def fig_drawdown_episode(idx, strikes, mtm_flat, mtm_spike, spot_path, peak, tro
             name=f"{m:.2f}x  + vol spike (illustrative)", legendgroup=f"{m:.2f}",
             line=dict(color=colours[m], width=1.5, dash="dash"),
         ))
-    # Break-even: below this line the put is worth less than it cost.
+    # Break-even: below this line the put is worth less than it cost. The label is split over two
+    # lines with <br>, NOT "\n": Plotly renders annotation text as HTML, so a Python newline is
+    # collapsed like any whitespace in markup and "\\n" would print the characters themselves.
+    # The label sits in the right margin, on top of the y2 tick labels: it is a paper-space
+    # annotation, and the spot axis ticks land wherever the data puts them, so no amount of
+    # margin separates the two reliably (in the wide HTML render one tick landed under it).
+    # An opaque background the colour of the figure surface, plus a little padding, makes the
+    # label MASK whatever it covers instead of interleaving with it — annotations draw above
+    # tick labels, so the tick simply disappears behind the box.
     fig.add_hline(y=1.0, line=dict(color=theme.MUTED, width=1, dash="dot"),
-                  annotation_text="premium paid", annotation_position="right")
+                  annotation_text="premium<br>paid", annotation_position="right",
+                  annotation_bgcolor=theme.PAPER_BG, annotation_borderpad=3,
+                  annotation_font=dict(color=theme.INK))
     # Trough marker. The line and its label are added separately on purpose: add_vline's own
     # annotation_* arguments make Plotly average the line's x-coordinates with sum(), which pandas
     # Timestamps refuse ("Addition/subtraction of integers ... with Timestamp is no longer
@@ -553,8 +577,13 @@ def fig_overlay_values(runs, spot_path):
         ), row=1, col=1)
 
     # --- Middle: per-period hedge value. ----------------------------------------------------
+    # Whether the right-hand axis ends up carrying anything is a property of the DATA: a series
+    # lands there only when its period premium is not a positive number to divide by (a funded
+    # collar), so on most windows every series is a ratio and that axis stays empty.
+    used_secondary = False
     for name in OVERLAY_ORDER[1:]:
         xs, ys, is_ratio = _period_segments(runs[name]["rule"], index)
+        used_secondary = used_secondary or not is_ratio
         fig.add_trace(go.Scatter(
             x=xs, y=ys, mode="lines", legendgroup=name, showlegend=False,
             name=f"{name} ({'× premium' if is_ratio else 'P&L, price units, rhs'})",
@@ -590,14 +619,31 @@ def fig_overlay_values(runs, spot_path):
 
     fig.update_yaxes(title_text="value", row=1, col=1)
     fig.update_yaxes(title_text="× premium paid", row=2, col=1, secondary_y=False)
-    fig.update_yaxes(title_text="collar P&L / unit", row=2, col=1, secondary_y=True,
-                     showgrid=False)
+    # The right-hand axis is declared in `specs` before it is known whether any series needs it.
+    # When nothing lands on it, HIDE it: an axis with a title but no data draws no ticks, yet its
+    # title still reserves right margin on the whole figure — which was the wide empty gap between
+    # the panels and the legend. `visible=False` gives that width back to all three panels.
+    if used_secondary:
+        fig.update_yaxes(title_text="collar P&L / unit", row=2, col=1, secondary_y=True,
+                         showgrid=False)
+    else:
+        fig.update_yaxes(visible=False, row=2, col=1, secondary_y=True)
+        # AND give the panels their width back. Declaring `secondary_y` makes make_subplots shrink
+        # every shared x domain to (0, 0.94) to reserve a strip for the right axis, and it does
+        # that at construction time — before it can know whether any series will land there. That
+        # reserved 6% was the empty band between the plots and the legend; hiding the axis alone
+        # does not release it, because the domain is already written.
+        fig.update_xaxes(domain=[0.0, 1.0])
     fig.update_yaxes(title_text="premium", row=3, col=1)
     fig.update_layout(
         title=f"{UNDERLYING} with rolled hedges — 63-bar roll, v1 surface (payoffs are a floor)",
         height=900, hovermode="x unified", **_TRANSPARENT,
     )
-    return _inline_theme(fig)
+    # Reserve the legend strip only when the right-hand axis is actually in use, and even then it
+    # sits on the MIDDLE panel while the legend is anchored to the top of the figure beside panel
+    # 1 — so this passes the data-driven flag rather than letting the auto-detection see a declared
+    # but empty axis and narrow all three panels for nothing.
+    return _inline_theme(fig, secondary_axis_spacing=used_secondary)
 
 
 def overlay_table(runs, spot_path):
@@ -708,11 +754,21 @@ def main(out_dir=DOCS_FIGURES):
     figures = build_all()
     for name, fig in figures.items():
         theme.apply_export_theme(fig)
+        # Widen the legend gap for the wider render. See theme.apply_export_spacing.
+        theme.apply_export_spacing(fig)
         fig.write_html(out_dir / f"{name}.html", include_plotlyjs="directory")
-    # The index lives one level up, at docs/index.html, because that is what GitHub Pages serves
-    # as the site root when the source is set to the docs/ folder.
+    # The link-list index, kept as the fallback and as the home of FIGURE_CAPTIONS. It is written
+    # FIRST so that if the report build below fails, docs/ still has a working landing page rather
+    # than a stale one.
     write_index(out_dir, figures)
-    print(f"wrote {len(figures)} HTML figures to {out_dir} (+ index at {out_dir.parent / 'index.html'})")
+    # The narrative report (plan 10-01) replaces that index with the write-up plus these same
+    # figures inline. Imported HERE rather than at module scope because build_report imports this
+    # module's build_all — deferring breaks the cycle. The already-built (and already
+    # export-themed) figures are passed straight in, so nothing is priced or rendered twice.
+    from pipelines.build_report import build_report
+    report = build_report(figures=figures)
+    print(f"wrote {len(figures)} HTML figures to {out_dir}")
+    print(f"wrote the narrative report to {report} ({report.stat().st_size / 1024:.0f} KB)")
     return figures
 
 

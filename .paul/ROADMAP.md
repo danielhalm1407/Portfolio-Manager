@@ -61,13 +61,13 @@ Progress: [█████░░░░░] 50%
 | 7 | Staged live verification runbook | 2 | In progress | - |
 | 8 | Documentation hub | 1 | Complete | 2026-08-01 |
 | 9 | Research half — themes to tilts | TBD | Not started | - |
-| 10 | Deployment — web app | 2 | Not started | - |
+| 10 | Deployment — web app | 2 | In progress (Track A done 2026-09-20; Track B not started) | - |
 | 11 | Long-history data foundation | 2 | Planning | - |
 | 12 | Option overlay engine | TBD | Not started | - |
 | 13 | Walk-forward validation harness | TBD | Not started | - |
 | 14 | Regime labelling and scenario guardrails | TBD | Not started | - |
 | 15 | Conviction write-up — how much hedging is enough | TBD | Not started | - |
-| 16 | Strategy architecture consolidation | 7 | Planning (16-02, 16-03 created 2026-09-19) | - |
+| 16 | Strategy architecture consolidation | 7 | In progress (16-02, 16-03 complete 2026-09-20) | - |
 
 ## Phase Details
 
@@ -229,7 +229,13 @@ opposite dependencies, and bundling them gated a zero-risk showcase behind a liv
 runbook it has nothing to do with.
 
 *Track A — static showcase. No secrets, no TWS, no server. Depends on nothing.*
-- [~] 10-01: Pre-rendered Plotly figures published as a static site
+- [x] 10-01: Pre-rendered Plotly figures published as a static site
+  **Complete 2026-09-20** (`10-01-SUMMARY.md`): `docs/index.html` is now the option-probe
+  write-up rendered whole, with its five figures interactive and inline at the findings they
+  belong to — 366 KB, no server, no CDN, no build step. `src/pipelines/build_report.py` is
+  generic (a write-up path + a {heading: figure} map) and RAISES if a mapped heading no longer
+  matches. Still owed, unchanged by this plan: the same treatment for the `PanelBuilder` /
+  `_build_level_figure` figures, and enabling Pages in repository settings.
 
 **Seeded 2026-08-31, ahead of the plan.** The whole pattern now exists end to end, on the
 option-probe figures rather than on `PanelBuilder`'s: `src/pipelines/option_probe_figures.py`
@@ -273,7 +279,12 @@ piece of analysis. Requirements:
 - Same `theme.py` palette as the figures and the existing index
 - The existing per-figure pages stay: they are what the write-up's links point at
 This is 10-01's scope, not the option phase's — the option work produces the content, Track A
-publishes it.
+publishes it. **DONE 2026-09-20.**
+
+**Two things the published page still needs, neither of them code in this repo's sense:**
+- `GITHUB_BRANCH` in `build_report.py` is `feat/16-option-instruments`. On merge it must
+  become `master`, or every source link on the page 404s.
+- GitHub Pages has to be ENABLED in repository settings for `docs/` on the default branch.
 
 *Track B — gated live control. Server, secrets, TWS reachability.*
 **Depends on:** Phase 7 (the runbook must prove the stack before a browser is allowed to drive it)

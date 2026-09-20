@@ -21,7 +21,7 @@ rules into the order ledger). Phase 4 — reopened 2026-08-03 for plan 04-05 (ex
 ## Current Position
 
 Milestone: v0.4 Does hedging actually work? (added 2026-08-24) — v0.2 still in progress alongside
-Phase: 16 (Strategy architecture, Track A option work) — 16-02 and 16-03 COMPLETE; next is 10-01 (Phase 10 Track A). Phase 11 also in Planning
+Phase: 10 (Deployment — web app, Track A) — 10-01 COMPLETE 2026-09-20. Phase 16's 16-02/16-03 also complete. Phase 11 in Planning
 Plan: 16-02 and 16-03 created 2026-09-19, awaiting approval (16-03 depends on 16-02). Option
 instruments, then the three option rules run through PortfolioSimulator via an additive
 synthetic-marks hook, shown over the probe's SPY window. Needs no Phase 11 data (v1 surface).
@@ -30,7 +30,8 @@ sites (`cache_prices.py::_tidy` and `PanelBuilder._load`), and has a phase-level
 written above it. Also open: 02-02 and 02-03 (created 2026-08-23, awaiting approval), 04-05 (CONTEXT.md written,
 not yet planned), 07-02 (planned, not applied), and three scoped-but-unwritten plans: 10-01, 10-02,
 11-02.
-Status: 16-03 COMPLETE — checkpoint approved 2026-09-20, SUMMARY written. 167 passed, 1 known ARM_LIVE failure; 16 pipeline CSVs byte-identical. Ready to PLAN 10-01
+Status: 10-01 COMPLETE — checkpoint approved 2026-09-20, SUMMARY written. 167 passed, 1 known
+ARM_LIVE failure. `docs/index.html` is the published report (366 KB). No plan in flight
 Last activity: 2026-09-19 — created 16-02-PLAN.md and 16-03-PLAN.md. Same day, outside PAUL:
 fixed `option_probe_figures.py` (trough `add_vline` Timestamp TypeError; inline figures now
 get theme INK/GRID via `_inline_theme`, previously Plotly's default dark-blue text), and
@@ -91,7 +92,7 @@ Progress:
 Current loop state:
 ```
 PLAN ──▶ APPLY ──▶ UNIFY
-  ✓        ✓        ✓     [16-03 loop CLOSED 2026-09-20; 16-02 closed. Next: PLAN 10-01 (report page). 11-01 awaiting]
+  ✓        ✓        ✓     [10-01 loop CLOSED 2026-09-20; 16-02 and 16-03 closed. No plan in flight. 11-01 awaiting]
 ```
 
 Phases 1-6 and 8 were completed **before** PAUL was adopted. Their SUMMARY files are
@@ -142,6 +143,8 @@ shipped, not as evidence the loop was followed.
 | 2026-09-19 | 16-02/16-03 proceed WITHOUT 16-01's full stage skeleton; showcase sizing is 1 option per underlying unit | The option work needs only `instruments/` and `schedule.py`; the rest of the skeleton serves the weight-native rules (16-04/16-05). Per-unit sizing keeps values in SPY price units, comparable to the probe; 12-01's notional/overhedge question stays open for Phase 13 |
 | 2026-09-20 | The collar's net cash is the EXPIRING pair's settlement ONLY, not settlement minus the replacement premium | 12-01's Task 1 text and its own AC-6 contradict each other: a 0.90 put costs far more than a 1.28 call earns, so subtracting the new pair's premium makes every quiet up-quarter read negative and sell underlying to "fund" the hedge — while AC-6 requires a +3% period to CARRY. The AC is the testable contract and wins. The replacement premium is still paid, as its own opening fill in the Book |
 | 2026-09-20 | `cap = 1.28` and a monetisation trigger move to PHASE 13; the cap default is NOT changed unilaterally | Both are parameter/policy questions and Phase 13 is the parameter phase. Measured: the 1.28x call is 3.76 sd out on a 63-bar tenor, prices at 0.0083 and funds 0.16% of the floor over four rolls, so the collar equals the protective put to three digits. 12-01's amendment record explains why 1.28 was chosen over 1.05, so changing it silently would discard a recorded decision; it becomes a swept parameter instead |
+| 2026-09-20 | The report page renders `option_overlay_probe.md` and never retypes it; a mapped heading that stops matching RAISES | One implementation, one copy of the prose — the same rule the figure builders follow. Publishing a figure under the wrong finding silently is worse than failing the build. `markdown-it-py` is DECLARED in `pyproject.toml` rather than used transitively, per the objection `pricing.py` records about scipy; tables are exactly where a hand-rolled converter breaks |
+| 2026-09-20 | Figure spacing is the ONLY thing that differs between the interactive window and the published page, and it lives in `theme.py` | Everything else (ink, grid, hover box) is stamped on inside the builder, so the two cannot drift. Spacing must differ because `legend.x` is a fraction of the PLOT AREA's width while the margin is pixels, and the page renders much wider — hence inline 1.04 and export 1.10, swapped by `theme.apply_export_spacing` on the export paths only. `apply_export_theme` does NOT do the swap, because `_inline_theme` calls it too |
 | 2026-08-23 | Trade rationale originates at the RULE, not derived post-hoc from the blotter | A post-hoc deriver would be guessing. `ConstantMixRule.propose` already computes equity, drift (`actual_w`, discarded outside the tolerance branch) and holds the `book`, so it can state at proposal time whether a sale crystallises a gain or a loss. A leg sold because it FELL LESS than the book can book a realised loss — only the rule knows that |
 | 2026-08-23 | `propose()`'s signature and return type stay unchanged; rationale rides a same-bar `last_rationale` attribute | Changing the return type would touch kts.py and both parity suites for zero accounting benefit |
 | 2026-08-23 | The JSON order ledger is reused, not reinvented | `Order.to_dict()` and the `orders/dummy_orders.json` schema already exist and are complete; the offline path simply never wired them up. The wide DataFrame became the de-facto record by omission, not by decision |
@@ -193,19 +196,23 @@ shipped, not as evidence the loop was followed.
 
 ## Session Continuity
 
-Last session: 2026-09-19
-Stopped at: 16-03 loop closed (SUMMARY: .paul/phases/16-strategy-architecture/16-03-SUMMARY.md).
-Next action: **/paul:plan 10-01** — the narrative report page: ONE static HTML page carrying the
-`research/option_overlay_probe.md` write-up with the five figures inline. Scope is in the
-ROADMAP's Phase 10 Track A section, added 2026-09-20.
-(11-01 remains approved-pending: /paul:apply .paul/phases/11-long-history-data/11-01-PLAN.md)
-Resume file: .paul/phases/16-strategy-architecture/16-03-SUMMARY.md
+Last session: 2026-09-20
+Stopped at: 10-01 loop closed (SUMMARY: .paul/phases/10-deployment-web-app/10-01-SUMMARY.md).
+NO plan is in flight — the next session starts clean.
+Next action: pick one. **/paul:apply .paul/phases/11-long-history-data/11-01-PLAN.md** is the
+approved-pending plan and the one that unblocks the whole of v0.4 (every cached panel is still 250
+rows over one regime). The alternatives already scoped: 02-02/02-03 (trade rationale), 07-02,
+04-05, 11-02, and Phase 13's two new parameter questions (the `cap = 1.28` sweep and a monetisation
+trigger — see the ROADMAP's Phase 13 scope for the measured numbers behind both).
+Resume file: .paul/phases/10-deployment-web-app/10-01-SUMMARY.md
 
-**Resolved 2026-09-20.** 16-03's checkpoint was approved and the loop closed. The collar question
-was answered and MEASURED (the 1.28x call is 3.76 sd out, prices at 0.0083, funds 0.16% of the
-floor across four rolls) and, together with the monetisation-trigger rule, moved into **Phase 13**'s
-scope in the ROADMAP. Work sits on branch `feat/16-option-instruments`; the USER opens the PR to
-main.
+**Branch state, 2026-09-20.** Three loops closed on `feat/16-option-instruments` (16-02, 16-03,
+10-01), committed and pushed. The USER opens the PR to master. TWO things must happen around that
+merge, neither of them caught by any test:
+1. `GITHUB_BRANCH` in `src/pipelines/build_report.py` is `feat/16-option-instruments`. On merge it
+   becomes `master`, or every source link on the published page 404s.
+2. GitHub Pages must be ENABLED in repository settings, serving `docs/` off the default branch.
+   Until then the report exists but is not served.
 
 **v0.4 context (2026-08-24).** The milestone asks whether portfolio insurance actually pays and how
 much of it a retail investor needs. The hedge structures are catalogued in the Obsidian vault at

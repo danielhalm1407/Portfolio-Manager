@@ -155,7 +155,7 @@ the 3.53% ATM cost figure is the wrong thing to design around.
 
 ## Finding 7 — rolled for real, the hedges gained mid-period and then gave it all back
 
-**Added 2026-09-19 (plan 16-03), cell 10.** The first six findings price legs. This one runs a
+**Added 2026-09-19 (plan 16-03), cell 9.** The first six findings price legs. This one runs a
 hedged BOOK. Each structure is a rule in `PortfolioSimulator`: it holds one SPY unit bought on bar
 0, opens its hedge on bar 1 at one option per unit, and rolls every 63 bars off the spot at that
 moment. That restriking is what Finding 4 said was missing. v1 surface, and dividend yield 0.
@@ -260,7 +260,7 @@ All five figures render to standalone interactive HTML under [`docs/`](../docs/R
 the GitHub Pages root:
 
 ```bash
-python -m pipelines.option_probe_figures      # or cell 9 of the script
+python -m pipelines.option_probe_figures      # or cell 10 of the script
 ```
 
 The builders live in
