@@ -16,6 +16,10 @@ dependencies = [
     "gunicorn",
     "playwright",
     "scikit-learn",
+    # Markdown -> HTML for the static report page (pipelines/build_report.py, plan 10-01).
+    # Declared rather than relied on transitively: the same objection pricing.py records about
+    # scipy applies to any package this repo uses but does not name.
+    "markdown-it-py",
 ]
 
 [tool.setuptools.packages.find]

@@ -15,20 +15,18 @@ status = "in_progress"
 phases = 5
 
 [phase]
-number = 11
-name = "Long-history data foundation"
-status = "planning"
-plans_completed = 0
+number = 10
+name = "Deployment — web app"
+status = "in_progress"
+plans_completed = 1
 
 [loop]
-position = "PLAN"
-plan = "11-01"
-plan_path = "phases/11-long-history-data/11-01-PLAN.md"
+position = "IDLE"
 
 [satellite]
 groom = true
 
 [stats]
-total_plans = 17
+total_plans = 22
 total_phases = 15
-last_activity = "2026-08-24T00:00:00Z"
+last_activity = "2026-09-20T00:00:00Z"

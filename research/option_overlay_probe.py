@@ -10,9 +10,10 @@ import pandas as pd
 
 import pipelines.option_probe_figures as opf
 from pipelines.option_probe_figures import (
-    BASE_VOL, DIV_YIELD, MONEYNESS, RATE, TENOR_YEARS, UNDERLYING, VOL_BETA,
-    build_ladder, episode_paths, fig_drawdown_episode, fig_iv_paths, fig_put_paths, fig_smirk,
-    iv_paths, load_spot_path, put_paths, worst_drawdown_episode,
+    BASE_VOL, DIV_YIELD, MONEYNESS, OVERLAY_ORDER, RATE, TENOR_YEARS, UNDERLYING, VOL_BETA,
+    build_ladder, episode_paths, fig_drawdown_episode, fig_iv_paths, fig_overlay_values,
+    fig_put_paths, fig_smirk, iv_paths, load_spot_path, overlay_runs, overlay_table, put_paths,
+    worst_drawdown_episode,
 )
 from portutils.strategies.instruments.pricing import black_scholes_put
 from portutils.strategies.instruments.vol import synthetic_iv_surface
@@ -25,8 +26,9 @@ from portutils.strategies.instruments.vol import synthetic_iv_surface
 # actually get iterated on in a session; the two instrument modules underneath them are stable.
 importlib.reload(opf)
 from pipelines.option_probe_figures import (
-    build_ladder, episode_paths, fig_drawdown_episode, fig_iv_paths, fig_put_paths, fig_smirk,
-    iv_paths, load_spot_path, put_paths, worst_drawdown_episode,
+    build_ladder, episode_paths, fig_drawdown_episode, fig_iv_paths, fig_overlay_values,
+    fig_put_paths, fig_smirk, iv_paths, load_spot_path, overlay_runs, overlay_table, put_paths,
+    worst_drawdown_episode,
 )
 
 # %% 2. What this script is
@@ -43,6 +45,10 @@ from pipelines.option_probe_figures import (
 # the correction to that: a ladder struck at the drawdown's PEAK, which is
 # where a rolled hedge would actually have been standing. The two answer
 # different questions and cell 8 is the one about payoff.
+#
+# Cell 9 (added by plan 16-03, 2026-09-19) goes one step further: the three
+# hedge structures as simulator rules, ROLLED every 63 bars over the window,
+# valued as a whole book next to SPY alone.
 #
 # The figures themselves are built by pipelines/option_probe_figures.py, which
 # also renders them to docs/figures/ for the static site. One implementation
@@ -198,11 +204,54 @@ for m in MONEYNESS:
 print(f"\n(vol spike model: base = {BASE_VOL:.2f} + {VOL_BETA:.1f} x drawdown, "
       f"illustrative only — Phase 11 calibrates it)")
 
-# %% 9. Export the figures for the static site
+# %% 9. The three hedge structures, rolled, through the real simulator
 
-# 9. Export the figures for the static site
+# 9. The three hedge structures, rolled, through the real simulator
 
-# Renders every figure above to standalone interactive HTML under docs/figures/, which is what
-# GitHub Pages serves. Same builders, so the published page and the inline figure cannot
-# disagree. Also runnable from a terminal as:  python -m pipelines.option_probe_figures
+# ============================================================================
+# FROM A SINGLE LEG TO A HEDGED BOOK (plan 16-03)
+# Cells 5-8 price legs; nothing there holds a portfolio or rolls. Here each
+# structure is a rule in PortfolioSimulator: one SPY unit bought on bar 0, its
+# hedge opened on bar 1 (the first bar SPY is held) and rolled every 63 bars
+# off the then-current spot — the restriking that finding 4 said was missing.
+#
+# Reading the figure:
+#   top    — total value, 1 SPY unit plus its hedge, against SPY alone
+#   middle — each hedge's value as a multiple of what it cost, RESETTING at every
+#            roll; above 1.0 the hedge has gained since it was bought, and the
+#            last point of each segment is what it actually settled at
+#   bottom — cumulative net premium paid
+# Hover the triangles on the top panel for each roll's per-leg detail.
+#
+# v1 surface throughout (base 0.16 frozen), so every hedge payoff is a FLOOR
+# (finding 6), and this is ONE window — one observation, not a result.
+# ============================================================================
+
+runs = overlay_runs(spot_path)
+fig_overlay_values(runs, spot_path).show()
+
+# The summary the figure is read against. "premium %/yr" is net premium paid per year as a share
+# of the average spot — the measured version of finding 3's single-put estimate.
+table = overlay_table(runs, spot_path)
+print(table.to_string(formatters={
+    "final value": "{:.2f}".format, "return": "{:+.1%}".format,
+    "max drawdown": "{:.1%}".format, "premium %/yr": "{:.2%}".format,
+}))
+
+# The roll log per structure — what each rule actually did, straight from its events.
+for name in OVERLAY_ORDER[1:]:
+    ev = runs[name]["rule"].events_frame()
+    print(f"\n{name}")
+    print(ev[["ts", "action", "symbol", "qty", "price", "pnl_per_unit"]]
+          .to_string(index=False, float_format=lambda v: f"{v:.3f}"))
+
+
+# %% 10. Export the figures AND the report page for the static site
+
+# 10. Export the figures AND the report page for the static site
+
+# LAST CELL ON PURPOSE. main() rebuilds every figure from scratch and writes docs/figures/*.html
+# plus the narrative report at docs/index.html, so it has to run AFTER the cells whose figures it
+# publishes — otherwise a figure change made in cell 9 would not reach the page until the next
+# run. Also runnable from a terminal as:  python -m pipelines.option_probe_figures
 opf.main()

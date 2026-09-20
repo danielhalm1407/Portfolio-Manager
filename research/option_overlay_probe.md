@@ -153,11 +153,102 @@ actually buy.
 This is the sharpest argument yet for Phase 11 being the gate on the *result* — and it also says
 the 3.53% ATM cost figure is the wrong thing to design around.
 
+## Finding 7 — rolled for real, the hedges gained mid-period and then gave it all back
+
+**Added 2026-09-19 (plan 16-03), cell 9.** The first six findings price legs. This one runs a
+hedged BOOK. Each structure is a rule in `PortfolioSimulator`: it holds one SPY unit bought on bar
+0, opens its hedge on bar 1 at one option per unit, and rolls every 63 bars off the spot at that
+moment. That restriking is what Finding 4 said was missing. v1 surface, and dividend yield 0.
+
+| strategy | final value | return | max drawdown | net premium, %/yr of spot |
+|---|---|---|---|---|
+| SPY only | 738.93 | +16.0% | 9.1% | — |
+| + protective put (0.90) | 715.87 | +12.4% | 8.4% | 3.39% |
+| + put spread (0.90 / 0.80) | 720.76 | +13.2% | 8.3% | 2.67% |
+| + collar (0.90 / 1.28) | 715.91 | +12.4% | 8.4% | 3.38% |
+
+The rolls fell on 2025-07-29, 2025-10-27, **2026-01-28** and 2026-04-29. The third roll is the one
+that matters. It struck one bar after the drawdown's 2026-01-27 peak, at 695.42, so the 0.90 put's
+strike (625.88) sat in front of the whole fall. **By the 2026-03-30 trough, the put was worth 1.97×
+what it cost, and the spread 2.38×.** Those are the same monetisation numbers cell 8 found, now
+measured inside a rolling book.
+
+**It still expired worthless.** SPY recovered to 711.58 by the 2026-04-29 roll, so the put settled
+at 0. The rules hold every leg to expiry, so a hedge that nearly doubled mid-period contributed
+nothing. The book paid ≈3.4% a year of drag to cut max drawdown by 0.7 points. Three observations:
+
+1. **A roll-only rule does not monetise.** The payoff exists (the middle panel shows it), but no
+   rule takes it. A monetisation trigger is the natural next rule. It is a policy question for
+   Phase 13's sweep, not a pricing one: for example, close and re-strike when a hedge reaches N×
+   its premium, or when spot is X% below the strike-time spot.
+2. **The wide collar here is a protective put with a rounding error.** A 1.28 call struck 90 days
+   out on a 16% base vol is worth ≈0.009, so it funds almost nothing. That is 12-01's cap working as
+   intended: +28% a quarter is what the source ran, and it is chosen to rarely bind. On this window
+   it never did, so no collar redeploy or funding ever fired. All three rolls logged "collar
+   carry".
+3. **The put spread was the cheapest and did best.** Its net premium was ≈21% lower. The sold 0.80
+   put was never reached, so the credit was kept in full.
+
+The usual caveats apply, and they apply more strongly here. The vol level is frozen, so every
+mid-period multiple above is a floor (Finding 6). And this is one window with one drawdown: one
+observation, not evidence that hedging does or does not pay.
+
+## How a collar leg is actually priced — the call chain, and why the call is worth ~0.009
+
+**Added 2026-09-20.** Finding 7's numbers are only readable if the path from figure to formula is
+explicit. It is four hops, and nothing in it is a second implementation of anything:
+
+| # | Where | What happens |
+|---|---|---|
+| 1 | [`option_probe_figures.overlay_runs`](../src/pipelines/option_probe_figures.py) | Builds one `PortfolioSimulator` per strategy: `BuyAndHoldRule({"SPY": 1.0})` plus the option rule, starting capital = the first close, so the book holds exactly one SPY unit. |
+| 2 | [`PortfolioSimulator.run`](../src/portutils/portfolio/simulator.py#L47) | Per bar: `propose` → **synthetic marks** (`:72`) → fill → mark the book. The marks step is 16-03's hook; without it a leg has no price and can neither fill nor be valued. |
+| 3 | [`OptionOverlayRule.propose`](../src/portutils/strategies/rules/options.py#L136) | Only acts on a ROLL bar. Closes the expiring legs, asks the subclass's `_leg_spec()` for the new ones, and prices each at birth — that price becomes the premium. `RollingCollarRule._leg_spec` (`:282`) returns `[("P", 0.90, +1), ("C", 1.28, -1)]`. |
+| 4 | [`OptionOverlayRule._price`](../src/portutils/strategies/rules/options.py#L104) | The only place a number is produced: `vol_fn(strike, tau, spot_ref)` → `OptionLeg.price` → `black_scholes_put` / `black_scholes_call`. On the expiry bar it returns `intrinsic(spot)` instead. |
+
+Between rolls `propose` returns `{}` and only `synthetic_marks` (`:202`) runs, repricing each open
+leg at that bar's spot and shorter `tau`. **That is the whole dynamic:** within a period the legs
+move through SPOT and TIME DECAY alone. The vol they are priced at is fixed per leg at birth (v1:
+`base = 0.16`, moneyness measured against the strike-time spot), so nothing in this engine re-prices
+a leg because the market got scared.
+
+### Why the collar is a protective put with a rounding error
+
+Measured at the first roll (spot 635.26, τ = 0.25):
+
+| leg | strike | IV from the smirk | distance from spot | premium |
+|---|---|---|---|---|
+| long put 0.90× | 571.73 | 21.9% | **0.91 sd** | 5.3701 |
+| short put 0.80× (spread) | 508.21 | 25.8% | 1.55 sd | 1.1391 |
+| short call 1.28× (collar) | 813.13 | 14.9% | **3.76 sd** | 0.0083 |
+
+Totals over the window's four rolls, per SPY unit:
+
+| structure | paid for longs | received for shorts | net | shorts offset |
+|---|---|---|---|---|
+| put spread | 23.06 | 4.89 | 18.17 | **21.2%** |
+| collar | 23.06 | 0.04 | 23.02 | **0.16%** |
+
+So the collar's short call funds one part in six hundred of its floor, and the +12.4% it returns is
+the protective put's number to three digits. Two independent reasons, and the second dominates:
+
+1. **Skew.** The call sits on the low side of the smirk (14.9%) and the put on the high side
+   (21.9%), so equal distance would already be worth less.
+2. **Distance.** 1.28× is **3.76 standard deviations** away over a 63-day tenor at that vol, while
+   0.90× is 0.91 sd. Almost all of the gap is here, not in the skew.
+
+This is 12-01's cap working exactly as specified — `HEDGE_UPSIDE_CAP = 0.28` is deliberately wide,
+chosen so it rarely binds — but a cap that never binds also never pays. **Whether 1.28 is the right
+default for a 63-BAR roll is an open question:** the source applies +28% to its own horizon, and at
+a quarterly reset the same number is nearly four sigma out. A cap nearer 1.05-1.10 (≈0.7-1.4 sd)
+would fund a visible share of the floor and would genuinely cap upside — a different structure, and
+exactly the kind of parameter Phase 13 should sweep rather than assume.
+
 ## What this does not cover — and who owns it
 
 | gap | owner |
 |---|---|
-| Rolling / restriking, theta decay within a period | 16-02 `RollCalendar`, 16-03 |
+| ~~Rolling / restriking, theta decay within a period~~ | **Done 2026-09-19** — 16-02 `RollCalendar`, 16-03 rules (Finding 7) |
+| Monetising a hedge before expiry (take-profit / re-strike triggers) | Phase 13 policy sweep; a new rule |
 | Delta, theta, `OptionLeg` as an object | 16-02 |
 | Put spreads, collars, funding branch | 16-03 |
 | Dividend yield (left at 0.0 to match the plan's worked examples; SPY is ~1.2%) | 16-02 |
@@ -165,11 +256,11 @@ the 3.53% ATM cost figure is the wrong thing to design around.
 
 ## Published figures
 
-All four figures render to standalone interactive HTML under [`docs/`](../docs/README.md), which is
+All five figures render to standalone interactive HTML under [`docs/`](../docs/README.md), which is
 the GitHub Pages root:
 
 ```bash
-python -m pipelines.option_probe_figures      # or cell 9 of the script
+python -m pipelines.option_probe_figures      # or cell 10 of the script
 ```
 
 The builders live in

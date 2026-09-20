@@ -62,6 +62,20 @@ class PortfolioSimulator:
                 for sym, qty in rule.propose(ts, marks, self.book).items():
                     deltas[sym] = deltas.get(sym, 0.0) + qty
 
+            # 1b) Synthetic marks. Instruments with no panel column (option legs) are priced by
+            #     the rule that holds them, and merged into this bar's marks so step 2 can fill
+            #     them and step 3 can value them. After propose, because a leg struck on THIS bar
+            #     only gets its symbol inside propose; before execute, because its fill needs the
+            #     price. Rules that hold nothing synthetic return {} — the default in
+            #     RebalanceRule — so existing runs see the exact same marks dict as before.
+            for rule in self.rules:
+                for sym, px in rule.synthetic_marks(ts, marks, self.book).items():
+                    # A model price must never overwrite a market price: a collision means a
+                    # synthetic symbol was named like a real ticker, which is a bug, not a merge.
+                    if sym in marks:
+                        raise ValueError(f"synthetic mark for {sym!r} collides with an existing mark")
+                    marks[sym] = float(px)
+
             # 2) Execute. Sorted for determinism: two runs of the same scenario must produce
             #    byte-identical order ids, which matters when diffing two exports.
             #    Turnover is accumulated here, at the only place a fill actually happens, so

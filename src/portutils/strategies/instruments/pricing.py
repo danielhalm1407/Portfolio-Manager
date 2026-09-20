@@ -123,3 +123,86 @@ def black_scholes_put(
     # Return a plain float when every input was scalar, so call sites doing arithmetic on the
     # result are not silently handed a 0-d array.
     return float(result) if result.ndim == 0 else result
+
+
+# ============================================================================
+# SHARED BSM TERMS — for the call and the delta added by 16-02.
+# black_scholes_put above is deliberately NOT rewritten to use this helper: it
+# is the function the probe's four 12-01 anchors were verified against, and a
+# refactor of verified code buys nothing but risk. The helper repeats the put's
+# sanitised-denominator construction line for line, so all three functions
+# agree on d1/d2 by construction rather than by coincidence.
+# ============================================================================
+
+def _bsm_terms(spot, strike, tau, vol, rate, div_yield):
+    # Arrays in, so every caller broadcasts the same way the put does.
+    spot = np.asarray(spot, dtype=float)
+    strike = np.asarray(strike, dtype=float)
+    tau = np.asarray(tau, dtype=float)
+    vol = np.asarray(vol, dtype=float)
+    # Discounted strike and dividend-discounted spot — the two legs of any European payoff.
+    disc_strike = strike * np.exp(-rate * tau)
+    disc_spot = spot * np.exp(-div_yield * tau)
+    # Expired or zero-vol legs have sigma*sqrt(tau) = 0; flagged so d1 never divides by zero.
+    degenerate = (tau <= 0.0) | (vol <= 0.0)
+    # Sanitised denominator: 1.0 wherever degenerate, never used there, suppresses NaN warnings.
+    sigma_sqrt_tau = np.where(degenerate, 1.0, vol * np.sqrt(np.maximum(tau, 0.0)))
+    # Standard BSM d1/d2 on the discounted forward, exactly as black_scholes_put computes them.
+    d1 = (np.log(disc_spot / disc_strike) + 0.5 * vol ** 2 * tau) / sigma_sqrt_tau
+    d2 = d1 - sigma_sqrt_tau
+    return disc_spot, disc_strike, degenerate, d1, d2, tau
+
+
+def _scalar_or_array(result):
+    # Same convention as the put: a plain float when every input was scalar.
+    return float(result) if result.ndim == 0 else result
+
+
+# ============================================================================
+# EUROPEAN CALL — the collar's short leg. Mirror image of the put.
+# ============================================================================
+
+def black_scholes_call(spot, strike, tau, vol, rate=0.02, div_yield=0.0):
+    """Return the European call value.
+
+    Same signature, broadcasting and degenerate handling as ``black_scholes_put``. Never below
+    the discounted intrinsic ``S*e^-qT - K*e^-rT``, and never below zero — by put-call parity
+    (``call - put = S*e^-qT - K*e^-rT``) that holds without a clamp, for the same reason the
+    put's floor does.
+    """
+    disc_spot, disc_strike, degenerate, d1, d2, _ = _bsm_terms(
+        spot, strike, tau, vol, rate, div_yield)
+    # The call: S*e^-qT * N(d1) - K*e^-rT * N(d2). No clamp, as for the put.
+    priced = disc_spot * _norm_cdf(d1) - disc_strike * _norm_cdf(d2)
+    # Discounted intrinsic, floored at zero — the degenerate value, continuous with the limit.
+    intrinsic = np.maximum(disc_spot - disc_strike, 0.0)
+    return _scalar_or_array(np.where(degenerate, intrinsic, priced))
+
+
+# ============================================================================
+# DELTA — first-order spot sensitivity, put or call.
+# Used by OptionLeg for sizing/rationale, and checked in the tests against a
+# central finite difference of the price, which is what makes it trustworthy.
+# ============================================================================
+
+def black_scholes_delta(spot, strike, tau, vol, right, rate=0.02, div_yield=0.0):
+    """Return dV/dS for a European ``right`` ("P" or "C").
+
+    Call: ``e^-qT N(d1)``. Put: ``e^-qT (N(d1) - 1)``. Degenerate legs (expired, or zero vol)
+    return the STEP delta of the discounted payoff: -e^-qT / +e^-qT when in the money, else 0.
+    """
+    if right not in ("P", "C"):
+        # A typo'd right must fail loudly, never silently price the wrong side of the book.
+        raise ValueError(f"right must be 'P' or 'C', got {right!r}")
+    disc_spot, disc_strike, degenerate, d1, _, tau = _bsm_terms(
+        spot, strike, tau, vol, rate, div_yield)
+    # Dividend discount on the spot sensitivity — with q = 0 this is 1.
+    carry = np.exp(-div_yield * tau)
+    if right == "C":
+        smooth = carry * _norm_cdf(d1)
+        # In the money at the degenerate limit iff the discounted spot exceeds discounted strike.
+        step = np.where(disc_spot > disc_strike, carry, 0.0)
+    else:
+        smooth = carry * (_norm_cdf(d1) - 1.0)
+        step = np.where(disc_strike > disc_spot, -carry, 0.0)
+    return _scalar_or_array(np.where(degenerate, step, smooth))

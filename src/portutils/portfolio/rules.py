@@ -82,6 +82,28 @@ class RebalanceRule:
         # rule can read current units and mark-to-market equity before deciding.
         raise NotImplementedError
 
+    def synthetic_marks(self, ts, prices, book):
+        # ============================================================================
+        # MARKS FOR INSTRUMENTS THE PRICE PANEL CANNOT QUOTE (added by 16-03).
+        # Called by PortfolioSimulator.run() every bar, AFTER every rule's propose and
+        # BEFORE any fill. Returns {symbol: price} for synthetic contracts this rule
+        # holds or is trading this bar (e.g. an option leg "SPY P 625.94 @b63").
+        #
+        # Why the rule, and not the panel: a synthetic leg has no column in the
+        # prices frame, and the simulator never fills or values a symbol without a
+        # mark. The rule that CHOSE the strike is the only object that can price it
+        # consistently — pre-computing option columns elsewhere would put the strike
+        # logic in two places that could silently disagree.
+        #
+        # Why after propose: on a roll bar the new leg's strike is decided INSIDE
+        # propose, so its symbol does not exist until then — yet it must be bought at
+        # a price on that same bar.
+        #
+        # Default: nothing. Every existing (panel-priced) rule inherits this, which is
+        # what keeps their simulations byte-identical to before the hook existed.
+        # ============================================================================
+        return {}
+
 
 class TradeListRule(RebalanceRule):
     """Replay a hand-specified trade list — the fully manual half of the harness.

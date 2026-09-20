@@ -9,8 +9,8 @@ without touching a single rule.
 Current contents:
 
 * ``vol.py``     — ``synthetic_iv_surface``: implied vol as a function of strike and tenor.
-* ``pricing.py`` — ``black_scholes_put``: the European put that consumes that vol.
-
-Planned by 16-02: ``options.py`` — ``SyntheticContract`` and ``OptionLeg`` (delta, theta, and a
-``price()`` that calls ``pricing.black_scholes_put``).
+* ``pricing.py`` — ``black_scholes_put``: the European put that consumes that vol. 16-02 added
+  ``black_scholes_call`` (the collar's short leg) and ``black_scholes_delta``.
+* ``options.py`` — ``SyntheticContract`` and ``OptionLeg`` (delta, theta, and a ``price()`` that
+  calls ``pricing.black_scholes_put`` / ``black_scholes_call``). Added by 16-02, as planned.
 """

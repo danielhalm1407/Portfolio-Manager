@@ -21,14 +21,22 @@ rules into the order ledger). Phase 4 — reopened 2026-08-03 for plan 04-05 (ex
 ## Current Position
 
 Milestone: v0.4 Does hedging actually work? (added 2026-08-24) — v0.2 still in progress alongside
-Phase: 11 of 15 (Long-history data foundation) — Planning
+Phase: 10 (Deployment — web app, Track A) — 10-01 COMPLETE 2026-09-20. Phase 16's 16-02/16-03 also complete. Phase 11 in Planning
+Plan: 16-02 and 16-03 created 2026-09-19, awaiting approval (16-03 depends on 16-02). Option
+instruments, then the three option rules run through PortfolioSimulator via an additive
+synthetic-marks hook, shown over the probe's SPY window. Needs no Phase 11 data (v1 surface).
 Plan: 11-01 created 2026-08-24, awaiting approval — now also carries the ragged-history fix at BOTH
 sites (`cache_prices.py::_tidy` and `PanelBuilder._load`), and has a phase-level `CONTEXT.md`
 written above it. Also open: 02-02 and 02-03 (created 2026-08-23, awaiting approval), 04-05 (CONTEXT.md written,
 not yet planned), 07-02 (planned, not applied), and three scoped-but-unwritten plans: 10-01, 10-02,
 11-02.
-Status: PLAN created and amended, awaiting approval
-Last activity: 2026-08-31 (latest, second pass) — the probe CORRECTED and its figures published.
+Status: 10-01 COMPLETE — checkpoint approved 2026-09-20, SUMMARY written. 167 passed, 1 known
+ARM_LIVE failure. `docs/index.html` is the published report (366 KB). No plan in flight
+Last activity: 2026-09-19 — created 16-02-PLAN.md and 16-03-PLAN.md. Same day, outside PAUL:
+fixed `option_probe_figures.py` (trough `add_vline` Timestamp TypeError; inline figures now
+get theme INK/GRID via `_inline_theme`, previously Plotly's default dark-blue text), and
+deleted the untracked `research/option_overlay_probe_dan_qs.*` byte-identical copies.
+Prior: 2026-08-31 (second pass) — the probe CORRECTED and its figures published.
 Cell 8 added: a ladder struck at the drawdown's PEAK rather than the window start, carrying one
 option through its full 63-day life. Result: **0.90x +107%, 0.95x +161%, 1.00x +156%** on the
 window's −9.1% dip, so the monetisation mechanic is demonstrated, not merely plausible. The 0.80x
@@ -84,7 +92,7 @@ Progress:
 Current loop state:
 ```
 PLAN ──▶ APPLY ──▶ UNIFY
-  ✓        ○        ○     [11-01 created, awaiting approval]
+  ✓        ✓        ✓     [10-01 loop CLOSED 2026-09-20; 16-02 and 16-03 closed. No plan in flight. 11-01 awaiting]
 ```
 
 Phases 1-6 and 8 were completed **before** PAUL was adopted. Their SUMMARY files are
@@ -131,6 +139,12 @@ shipped, not as evidence the loop was followed.
 | 2026-08-31 | The case for Phase 11 is now the vol LEVEL, not the window length | Measured: the same put on the same path returns −46.9% with `base` frozen at 0.16 and +317.0% under an illustrative level response (0.16 → 0.34 across the drawdown). Deep-OTM protection is almost entirely vega, so v1 cannot price what the option is bought for, and the understatement is WORST on the cheapest strikes — the ones a retail hedge actually buys. Every payoff figure the probe reports is therefore a floor, not an estimate |
 | 2026-08-31 | Published figures go to `docs/`, not `outputs/`, and carry a vendored `plotly.min.js` | `outputs/` is gitignored (`.gitignore:37`) and a published page must be committed to be served. `docs/` is also the one folder GitHub Pages serves off the default branch with no workflow, and `.github/` has none. `include_plotlyjs="directory"` (10-01's stated choice) costs **4.1 MB committed once**, shared by every figure at 24-107 KB each; `"cdn"` is a one-word fallback taking `docs/` to ~270 KB if the vendored copy is judged too heavy |
 | 2026-08-31 | Figure builders live in `pipelines/option_probe_figures.py` and are imported by the research script | One implementation serves the inline `# %%` figure and the published page, so they cannot drift. This is the arrangement `viz/theme.py` already documents for `rebalance_study.py` / `rebalance_realisation.py`, and the reason `apply_export_theme` is a post-hoc stamp rather than a `theme=` argument threaded through every signature |
+| 2026-09-19 | `PortfolioSimulator` gains an additive synthetic-marks hook (16-03), overriding 12-01's DO-NOT-CHANGE on `simulator.py` | User's choice over a standalone runner. `run()` marks and fills only from panel columns (`marks.get(sym)`, simulator.py:75), so a synthetic option leg could never fill. `RebalanceRule.synthetic_marks` defaults to `{}` and marks merge after propose, before execute; gated on byte-identical `rebalance_study` / `drawdown_rotation_sim` output. Option Fills carry no rationale until 02-02 lands; rules keep an `events` log meanwhile |
+| 2026-09-19 | 16-02/16-03 proceed WITHOUT 16-01's full stage skeleton; showcase sizing is 1 option per underlying unit | The option work needs only `instruments/` and `schedule.py`; the rest of the skeleton serves the weight-native rules (16-04/16-05). Per-unit sizing keeps values in SPY price units, comparable to the probe; 12-01's notional/overhedge question stays open for Phase 13 |
+| 2026-09-20 | The collar's net cash is the EXPIRING pair's settlement ONLY, not settlement minus the replacement premium | 12-01's Task 1 text and its own AC-6 contradict each other: a 0.90 put costs far more than a 1.28 call earns, so subtracting the new pair's premium makes every quiet up-quarter read negative and sell underlying to "fund" the hedge — while AC-6 requires a +3% period to CARRY. The AC is the testable contract and wins. The replacement premium is still paid, as its own opening fill in the Book |
+| 2026-09-20 | `cap = 1.28` and a monetisation trigger move to PHASE 13; the cap default is NOT changed unilaterally | Both are parameter/policy questions and Phase 13 is the parameter phase. Measured: the 1.28x call is 3.76 sd out on a 63-bar tenor, prices at 0.0083 and funds 0.16% of the floor over four rolls, so the collar equals the protective put to three digits. 12-01's amendment record explains why 1.28 was chosen over 1.05, so changing it silently would discard a recorded decision; it becomes a swept parameter instead |
+| 2026-09-20 | The report page renders `option_overlay_probe.md` and never retypes it; a mapped heading that stops matching RAISES | One implementation, one copy of the prose — the same rule the figure builders follow. Publishing a figure under the wrong finding silently is worse than failing the build. `markdown-it-py` is DECLARED in `pyproject.toml` rather than used transitively, per the objection `pricing.py` records about scipy; tables are exactly where a hand-rolled converter breaks |
+| 2026-09-20 | Figure spacing is the ONLY thing that differs between the interactive window and the published page, and it lives in `theme.py` | Everything else (ink, grid, hover box) is stamped on inside the builder, so the two cannot drift. Spacing must differ because `legend.x` is a fraction of the PLOT AREA's width while the margin is pixels, and the page renders much wider — hence inline 1.04 and export 1.10, swapped by `theme.apply_export_spacing` on the export paths only. `apply_export_theme` does NOT do the swap, because `_inline_theme` calls it too |
 | 2026-08-23 | Trade rationale originates at the RULE, not derived post-hoc from the blotter | A post-hoc deriver would be guessing. `ConstantMixRule.propose` already computes equity, drift (`actual_w`, discarded outside the tolerance branch) and holds the `book`, so it can state at proposal time whether a sale crystallises a gain or a loss. A leg sold because it FELL LESS than the book can book a realised loss — only the rule knows that |
 | 2026-08-23 | `propose()`'s signature and return type stay unchanged; rationale rides a same-bar `last_rationale` attribute | Changing the return type would touch kts.py and both parity suites for zero accounting benefit |
 | 2026-08-23 | The JSON order ledger is reused, not reinvented | `Order.to_dict()` and the `orders/dummy_orders.json` schema already exist and are complete; the offline path simply never wired them up. The wide DataFrame became the de-facto record by omission, not by decision |
@@ -182,11 +196,23 @@ shipped, not as evidence the loop was followed.
 
 ## Session Continuity
 
-Last session: 2026-08-24
-Stopped at: Plan 11-01 created (milestone v0.4 opened).
-Next action: Review and approve, then run
-**/paul:apply .paul/phases/11-long-history-data/11-01-PLAN.md**
-Resume file: .paul/phases/11-long-history-data/11-01-PLAN.md
+Last session: 2026-09-20
+Stopped at: 10-01 loop closed (SUMMARY: .paul/phases/10-deployment-web-app/10-01-SUMMARY.md).
+NO plan is in flight — the next session starts clean.
+Next action: pick one. **/paul:apply .paul/phases/11-long-history-data/11-01-PLAN.md** is the
+approved-pending plan and the one that unblocks the whole of v0.4 (every cached panel is still 250
+rows over one regime). The alternatives already scoped: 02-02/02-03 (trade rationale), 07-02,
+04-05, 11-02, and Phase 13's two new parameter questions (the `cap = 1.28` sweep and a monetisation
+trigger — see the ROADMAP's Phase 13 scope for the measured numbers behind both).
+Resume file: .paul/phases/10-deployment-web-app/10-01-SUMMARY.md
+
+**Branch state, 2026-09-20.** Three loops closed on `feat/16-option-instruments` (16-02, 16-03,
+10-01), committed and pushed. The USER opens the PR to master. TWO things must happen around that
+merge, neither of them caught by any test:
+1. `GITHUB_BRANCH` in `src/pipelines/build_report.py` is `feat/16-option-instruments`. On merge it
+   becomes `master`, or every source link on the published page 404s.
+2. GitHub Pages must be ENABLED in repository settings, serving `docs/` off the default branch.
+   Until then the report exists but is not served.
 
 **v0.4 context (2026-08-24).** The milestone asks whether portfolio insurance actually pays and how
 much of it a retail investor needs. The hedge structures are catalogued in the Obsidian vault at

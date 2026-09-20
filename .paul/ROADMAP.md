@@ -61,13 +61,13 @@ Progress: [█████░░░░░] 50%
 | 7 | Staged live verification runbook | 2 | In progress | - |
 | 8 | Documentation hub | 1 | Complete | 2026-08-01 |
 | 9 | Research half — themes to tilts | TBD | Not started | - |
-| 10 | Deployment — web app | 2 | Not started | - |
+| 10 | Deployment — web app | 2 | In progress (Track A done 2026-09-20; Track B not started) | - |
 | 11 | Long-history data foundation | 2 | Planning | - |
 | 12 | Option overlay engine | TBD | Not started | - |
 | 13 | Walk-forward validation harness | TBD | Not started | - |
 | 14 | Regime labelling and scenario guardrails | TBD | Not started | - |
 | 15 | Conviction write-up — how much hedging is enough | TBD | Not started | - |
-| 16 | Strategy architecture consolidation | TBD | Scoping | - |
+| 16 | Strategy architecture consolidation | 7 | In progress (16-02, 16-03 complete 2026-09-20) | - |
 
 ## Phase Details
 
@@ -229,7 +229,13 @@ opposite dependencies, and bundling them gated a zero-risk showcase behind a liv
 runbook it has nothing to do with.
 
 *Track A — static showcase. No secrets, no TWS, no server. Depends on nothing.*
-- [~] 10-01: Pre-rendered Plotly figures published as a static site
+- [x] 10-01: Pre-rendered Plotly figures published as a static site
+  **Complete 2026-09-20** (`10-01-SUMMARY.md`): `docs/index.html` is now the option-probe
+  write-up rendered whole, with its five figures interactive and inline at the findings they
+  belong to — 366 KB, no server, no CDN, no build step. `src/pipelines/build_report.py` is
+  generic (a write-up path + a {heading: figure} map) and RAISES if a mapped heading no longer
+  matches. Still owed, unchanged by this plan: the same treatment for the `PanelBuilder` /
+  `_build_level_figure` figures, and enabling Pages in repository settings.
 
 **Seeded 2026-08-31, ahead of the plan.** The whole pattern now exists end to end, on the
 option-probe figures rather than on `PanelBuilder`'s: `src/pipelines/option_probe_figures.py`
@@ -259,6 +265,26 @@ not a code change).
   `animation_indices` / `add_in_frames` / `play_button` survive unchanged, and
   `_build_level_figure_with_plotly_mode_buttons` (`dash_timeseries_app.py:898`) is already the
   `updatemenus` pattern that replaces most simple callbacks
+
+**Added 2026-09-20 — a narrative REPORT page, not just a figure index.** What `docs/` serves
+today is five standalone figure pages plus a link list. The user wants one static HTML page
+carrying the `research/option_overlay_probe.md` write-up WITH the figures inline between the
+sections they belong to — the findings, the pricing call-chain section, the caveats and the
+scoped-but-unbuilt next steps — so the page stands on its own as the project's first public
+piece of analysis. Requirements:
+- One page, figures embedded in narrative order, sharing the single vendored `plotly.min.js`
+- Prose sourced FROM the write-up rather than retyped, so the two cannot drift (the same
+  one-implementation rule the figure builders already follow); a Markdown -> HTML step is
+  needed, and it must not add a build system or a runtime dependency the repo does not have
+- Same `theme.py` palette as the figures and the existing index
+- The existing per-figure pages stay: they are what the write-up's links point at
+This is 10-01's scope, not the option phase's — the option work produces the content, Track A
+publishes it. **DONE 2026-09-20.**
+
+**Two things the published page still needs, neither of them code in this repo's sense:**
+- `GITHUB_BRANCH` in `build_report.py` is `feat/16-option-instruments`. On merge it must
+  become `master`, or every source link on the page 404s.
+- GitHub Pages has to be ENABLED in repository settings for `docs/` on the default branch.
 
 *Track B — gated live control. Server, secrets, TWS reachability.*
 **Depends on:** Phase 7 (the runbook must prove the stack before a browser is allowed to drive it)
@@ -449,6 +475,23 @@ window that followed, repeat across many origins.
 - Out-of-sample scoring through `PerformanceSummary`, with in-sample-versus-out-of-sample degradation
   reported as a first-class output, not a footnote
 
+**Moved here 2026-09-20 from Phase 16's CONTEXT — both are PARAMETER / POLICY questions, which is
+what this phase exists for.** Full numbers: the "How a collar leg is actually priced" section of
+`research/option_overlay_probe.md`.
+
+- **`cap = 1.28` is almost certainly wrong for a 63-BAR roll.** Measured at 16-03's first roll
+  (spot 635.26, tau 0.25): the 1.28x call sits **3.76 standard deviations** out at 14.9% IV and
+  prices at **0.0083**. Across four rolls the short call returned 0.04 against 23.06 paid for the
+  puts — it funds **0.16%** of the floor, so the collar's total value equals the protective put's
+  to three digits. The 0.90x put is 0.91 sd out. 12-01 took 1.28 from `HEDGE_UPSIDE_CAP = 0.28`
+  (`bse.py:3941`), which is the source's own horizon, not a quarterly one. A cap near 1.05-1.10
+  (~0.7-1.4 sd) would fund a visible share AND would actually cap upside. Do NOT change the
+  default silently — 12-01's amendment record explains why 1.28 was chosen over 1.05. Sweep it.
+- **A monetisation trigger is the missing rule.** 16-03's Finding 7: the put struck at the
+  2026-01-27 peak reached **1.97x** premium at the trough and expired worthless, because every
+  rule holds to expiry. Close or re-strike on N x premium, or on spot X% through the strike — a
+  policy to sweep, not a pricing change.
+
 **Plans:**
 - [ ] 13-01: To be defined during `/paul:plan`
 
@@ -534,8 +577,14 @@ Track B migrates working code and is separately gated and individually skippable
   wrapping the pricer), `RollCalendar`. See the "Landed ahead of the plans" section of
   `.paul/phases/16-strategy-architecture/CONTEXT.md` and
   `research/option_overlay_probe.md`
-- [ ] 16-03: Option rules — `rules/options.py`, the three structures plus theta drag.
-  Economics spec: 12-01 AC-3 through AC-6
+  **Complete 2026-09-19** (`16-02-SUMMARY.md`): `black_scholes_call`/`black_scholes_delta`,
+  `SyntheticContract`/`OptionLeg`, `RollCalendar`, 28 offline tests; built without the rest of 16-01's skeleton
+- [x] 16-03: Option rules — `rules/options.py`, the three structures plus theta drag.
+  Economics spec: 12-01 AC-3 through AC-6.
+  **Complete 2026-09-20** (`16-03-SUMMARY.md`): the three structures run and ROLL through
+  `PortfolioSimulator` via an additive synthetic-marks hook (16 pipeline CSVs byte-identical),
+  10 offline tests, `fig_overlay_values` + Finding 7. Theta drag is reported as measured premium
+  in cell 10 rather than as a `PerformanceSummary` field — that part of 12-01 AC-4 stays open
 - [ ] 16-04: `ConstrainedWeightRule` written fresh against stages 2-3, tested standalone.
   kts.py untouched
 

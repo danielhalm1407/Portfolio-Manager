@@ -13,8 +13,10 @@ It serves TWO consumers with one implementation:
 That is exactly the arrangement ``viz/theme.py`` documents for ``pipelines/rebalance_study.py``
 and ``research/rebalance_realisation.py``, and the reason ``apply_export_theme`` exists as a
 post-hoc stamp rather than a ``theme=`` argument threaded through every signature. The builders
-below therefore return UNTHEMED figures with transparent backgrounds — correct inline — and only
-``main()`` stamps the dark palette on, immediately before writing.
+below therefore return figures with transparent backgrounds — correct inline — but with the
+theme's INK text and GRID lines already applied (``_inline_theme``), because a transparent figure
+with no font colour falls back to Plotly's default dark-blue text and white grid. Only ``main()``
+stamps the opaque dark backgrounds on, immediately before writing.
 
 It lives in ``pipelines/`` and not ``portutils/`` for the same reason ``rebalance_study.py``
 does: it has side effects (it writes files), and ``src/CLAUDE.md`` puts side effects here. The
@@ -28,6 +30,8 @@ WHAT THE FIGURES SHOW
 3. ``fig_put_paths``        the same ladder valued, with spot on a secondary axis
 4. ``fig_drawdown_episode`` a put struck AT THE PEAK and held through the drawdown — the figure
                             that shows monetisation rather than carry
+5. ``fig_overlay_values``   (16-03) protective put, put spread and collar ROLLED every 63 bars
+                            through PortfolioSimulator, next to SPY alone, rolls marked
 
 Run as a script to export:  ``python -m pipelines.option_probe_figures``
 """
@@ -36,8 +40,11 @@ import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
 
+from portutils.portfolio.rules import BuyAndHoldRule
+from portutils.portfolio.simulator import PortfolioSimulator
 from portutils.strategies.instruments.pricing import black_scholes_put
 from portutils.strategies.instruments.vol import synthetic_iv_surface
+from portutils.strategies.rules.options import ProtectivePutRule, PutSpreadRule, RollingCollarRule
 from portutils.utils.config import PROJECT_ROOT
 from portutils.viz import theme
 
@@ -82,6 +89,10 @@ SMIRK_TENORS = {"1 month": 21 / 252, "3 months": 63 / 252, "6 months": 126 / 252
 PRICE_PANEL = PROJECT_ROOT / "data" / "processed" / "prices_spy_kmlm.parquet"
 UNDERLYING = "SPY"
 DOCS_FIGURES = PROJECT_ROOT / "docs" / "figures"
+
+# Spacing for a figure with a secondary y-axis (legend x inline and on export, right margin,
+# y2 title standoff) lives in theme.py beside the palette, as SECONDARY_AXIS_* — those are the
+# numbers to hand-tune when a series name or an axis title changes.
 
 
 # ============================================================================
@@ -211,8 +222,9 @@ def episode_paths(spot_path, peak, tenor=TENOR_YEARS, moneyness=MONEYNESS,
 
 
 # ============================================================================
-# FIGURE BUILDERS — each returns an UNTHEMED figure with transparent
-# backgrounds. Correct as-is inline; main() stamps the export palette on.
+# FIGURE BUILDERS — each returns a figure with transparent backgrounds and
+# the theme's ink/grid colours (_inline_theme). Correct as-is inline; main()
+# stamps the opaque export backgrounds on.
 # ============================================================================
 
 # Transparent rather than a dark template. theme.py is explicit that the dark palette applies
@@ -220,6 +232,62 @@ def episode_paths(spot_path, peak, tenor=TENOR_YEARS, moneyness=MONEYNESS,
 # VS Code's own theme through a transparent background and already reads correctly. Baking
 # plotly_dark in here would fix the export case by breaking the inline one.
 _TRANSPARENT = dict(paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)")
+
+
+def _inline_theme(fig, secondary_axis_spacing=None):
+    # ============================================================================
+    # INK + GRID FOR THE INLINE FIGURE, backgrounds left transparent.
+    # Called as the last step of every fig_* builder. A transparent background
+    # alone is NOT enough inline: with no font colour set, Plotly falls back to
+    # its default "plotly" template — dark-blue #2a3f5f text and white gridlines
+    # — which reads as muted blue-grey on VS Code's dark surface and glares where
+    # the grid crosses the data. The HTML export never showed this because main()
+    # stamps theme.INK / theme.GRID on via apply_export_theme before write_html.
+    #
+    # Reusing apply_export_theme with the backgrounds overridden to transparent
+    # gives the inline figure the SAME text and grid colours as the published
+    # page, while still letting VS Code's own background show through — so the
+    # rule in theme.py (no opaque background inline) still holds. main()'s later
+    # call then only swaps the backgrounds to opaque for the saved document.
+    #
+    # HOVER BOX (added 2026-09-19). apply_export_theme does not set `hoverlabel`,
+    # so Plotly derives the box itself: from the opaque paper colour in the export
+    # (dark box — correct) but, inline, from a TRANSPARENT paper, where it falls
+    # back to a white box while the text is already INK off-white — light text on
+    # white, unreadable. Set explicitly here, so inline and export show the same
+    # dark box. apply_export_theme never overwrites hoverlabel, so main()'s later
+    # call keeps it.
+    #
+    # Deliberately NOT theme.HOVER_FG / HOVER_BG: those encode an INVERTED tooltip
+    # (black on white) for the Dash app. The dark box matching the figure surface
+    # is the one preferred for these probe figures.
+    # ============================================================================
+    fig.update_layout(hoverlabel=dict(
+        # The figure's own dark surface, so the tooltip reads as part of the chart.
+        bgcolor=theme.PAPER_BG,
+        # Same off-white as every other piece of text in the figure.
+        font=dict(color=theme.INK),
+        # Grid tone for the border — without it the dark box has no edge on the dark chart.
+        bordercolor=theme.GRID,
+        # Show the WHOLE series name. Plotly truncates it to 15 characters by default, which
+        # turns "+ protective put" into "+ protective..." in the unified box — the series the
+        # reader is trying to identify is exactly the part that gets cut. -1 disables the limit,
+        # and the box widens to fit. The roll-marker hover never showed this because it carries
+        # its text in `hovertext` with the name suppressed by <extra></extra>.
+        namelength=-1,
+    ))
+
+    # Clear the legend of any right-hand axis. theme.apply_secondary_axis_spacing carries the
+    # reasoning and the numbers; `secondary_axis_spacing` is passed straight through as its
+    # override, for a caller that knows the axis is nowhere near the legend.
+    theme.apply_secondary_axis_spacing(fig, enabled=secondary_axis_spacing)
+
+    # Responsive sizing (export path in theme.apply_export_spacing):
+    # no fixed pixel width, so a figure fills whatever container it lands in —
+    # the interactive window, or the report page's full-width figure block.
+    fig.update_layout(autosize=True)
+    return theme.apply_export_theme(fig, paper=_TRANSPARENT["paper_bgcolor"],
+                                    plot=_TRANSPARENT["plot_bgcolor"])
 
 
 def _strike_colours(moneyness=MONEYNESS):
@@ -249,7 +317,7 @@ def fig_smirk(spot=SMIRK_SPOT, tenors=SMIRK_TENORS, grid=SMIRK_MONEYNESS_GRID, b
         xaxis_title="moneyness K / S", yaxis_title="implied vol",
         yaxis_tickformat=".0%", hovermode="x unified", **_TRANSPARENT,
     )
-    return fig
+    return _inline_theme(fig)
 
 
 def fig_iv_paths(iv_v1, iv_v2, spot_ref, tenor=TENOR_YEARS):
@@ -274,7 +342,7 @@ def fig_iv_paths(iv_v1, iv_v2, spot_ref, tenor=TENOR_YEARS):
         xaxis_title="date", yaxis_title="implied vol", yaxis_tickformat=".0%",
         hovermode="x unified", **_TRANSPARENT,
     )
-    return fig
+    return _inline_theme(fig)
 
 
 def fig_put_paths(put_v1, put_v2, spot_path, tenor=TENOR_YEARS, symbol=UNDERLYING):
@@ -305,7 +373,7 @@ def fig_put_paths(put_v1, put_v2, spot_path, tenor=TENOR_YEARS, symbol=UNDERLYIN
         yaxis2=dict(title=f"{symbol} spot", overlaying="y", side="right", showgrid=False),
         hovermode="x unified", **_TRANSPARENT,
     )
-    return fig
+    return _inline_theme(fig)
 
 
 def fig_drawdown_episode(idx, strikes, mtm_flat, mtm_spike, spot_path, peak, trough,
@@ -332,9 +400,19 @@ def fig_drawdown_episode(idx, strikes, mtm_flat, mtm_spike, spot_path, peak, tro
             name=f"{m:.2f}x  + vol spike (illustrative)", legendgroup=f"{m:.2f}",
             line=dict(color=colours[m], width=1.5, dash="dash"),
         ))
-    # Break-even: below this line the put is worth less than it cost.
+    # Break-even: below this line the put is worth less than it cost. The label is split over two
+    # lines with <br>, NOT "\n": Plotly renders annotation text as HTML, so a Python newline is
+    # collapsed like any whitespace in markup and "\\n" would print the characters themselves.
+    # The label sits in the right margin, on top of the y2 tick labels: it is a paper-space
+    # annotation, and the spot axis ticks land wherever the data puts them, so no amount of
+    # margin separates the two reliably (in the wide HTML render one tick landed under it).
+    # An opaque background the colour of the figure surface, plus a little padding, makes the
+    # label MASK whatever it covers instead of interleaving with it — annotations draw above
+    # tick labels, so the tick simply disappears behind the box.
     fig.add_hline(y=1.0, line=dict(color=theme.MUTED, width=1, dash="dot"),
-                  annotation_text="premium paid", annotation_position="right")
+                  annotation_text="premium<br>paid", annotation_position="right",
+                  annotation_bgcolor=theme.PAPER_BG, annotation_borderpad=3,
+                  annotation_font=dict(color=theme.INK))
     # Trough marker. The line and its label are added separately on purpose: add_vline's own
     # annotation_* arguments make Plotly average the line's x-coordinates with sum(), which pandas
     # Timestamps refuse ("Addition/subtraction of integers ... with Timestamp is no longer
@@ -352,7 +430,238 @@ def fig_drawdown_episode(idx, strikes, mtm_flat, mtm_spike, spot_path, peak, tro
         yaxis2=dict(title=f"{symbol} spot", overlaying="y", side="right", showgrid=False),
         hovermode="x unified", **_TRANSPARENT,
     )
-    return fig
+    return _inline_theme(fig)
+
+
+# ============================================================================
+# STRATEGY OVERLAYS (16-03) — the three hedge structures run through the real
+# PortfolioSimulator over the probe window, next to SPY alone. Unlike cells 5-8,
+# these ROLL: every 63 bars the expiring legs settle and new ones are struck off
+# the then-current spot, which is exactly the correction finding 4 called for.
+# ============================================================================
+
+# Display order and colour index. SPY alone is the benchmark every hedge is read against.
+OVERLAY_ORDER = ("SPY only", "+ protective put", "+ put spread", "+ collar")
+
+
+def _overlay_rules():
+    # One fresh rule instance per run — rules carry state, and sharing an instance across runs
+    # would leak the previous run's legs and events. Every parameter comes from the module
+    # constants above, so the overlays and the probe cells price with the same carry and vol.
+    kw = dict(underlying=UNDERLYING, rate=RATE, div_yield=DIV_YIELD, base_vol=BASE_VOL)
+    return {
+        "SPY only": None,
+        "+ protective put": ProtectivePutRule(floor=0.90, **kw),
+        "+ put spread": PutSpreadRule(floor=0.90, spread_width=0.80, **kw),
+        "+ collar": RollingCollarRule(floor=0.90, cap=1.28, **kw),
+    }
+
+
+def overlay_runs(spot_path):
+    """Run each strategy through ``PortfolioSimulator``. Returns ``{name: {"state", "rule", "sim"}}``.
+
+    Starting capital is the first close, so ``BuyAndHoldRule`` buys exactly ONE unit of SPY and
+    every figure below reads in SPY price units — directly comparable to cells 5-8. The option
+    rules hedge that unit one-for-one (the 2026-09-19 sizing decision).
+    """
+    prices = spot_path.to_frame(UNDERLYING)
+    runs = {}
+    for name, rule in _overlay_rules().items():
+        rules = [BuyAndHoldRule({UNDERLYING: 1.0})] + ([rule] if rule is not None else [])
+        sim = PortfolioSimulator(prices, rules, starting_capital=float(spot_path.iloc[0]))
+        state = sim.run()
+        # Guard: an option rule that decided to trade but whose legs never FILLED means the
+        # simulator never received their marks — almost always a stale PortfolioSimulator
+        # (pre-16-03, no synthetic-marks hook) cached in an interactive kernel. Without this the
+        # hedged line silently equals "SPY only" and reads as a result. Fail loudly instead.
+        if rule is not None and rule.events and not any(
+                f.symbol.startswith(f"{UNDERLYING} ") and f.symbol != UNDERLYING
+                for f in sim.fills):
+            raise RuntimeError(
+                f"{name}: option legs were proposed but never filled. PortfolioSimulator has no "
+                "synthetic-marks hook in this session — restart the kernel and re-run.")
+        runs[name] = {"state": state, "rule": rule, "sim": sim}
+    return runs
+
+
+def _premium_paid(rule, index):
+    # Cumulative NET premium paid for opened legs, as a step series on the bar index: long legs
+    # cost, short legs are credits. Settlements are NOT netted in — this is the gross drag.
+    if rule is None:
+        return pd.Series(0.0, index=index)
+    ev = rule.events_frame()
+    opens = ev[ev["action"] == "open"]
+    per_bar = (opens["qty"] * opens["price"]).groupby(opens["ts"]).sum()
+    return per_bar.reindex(index, fill_value=0.0).cumsum()
+
+
+def _period_segments(rule, index):
+    # The middle panel's series: per period, the position's value relative to what it cost,
+    # restarting at each roll. Returns (x, y) lists with None breaks between periods so one trace
+    # draws disjoint segments. The last point of each segment is the SETTLEMENT value on the roll
+    # bar — what the expiring legs actually closed at — before the next period restarts.
+    hist = pd.DataFrame(rule.history.values()).sort_values("bar")
+    use_ratio = (hist["net_premium"] > 1e-9).all()
+    xs, ys = [], []
+    for _, grp in hist.groupby("period_start_bar", sort=True):
+        prem = grp["net_premium"].iloc[0]
+        vals = grp["net_value"].to_numpy()
+        ts = [index[b] for b in grp["bar"]]
+        # Ratio for debit structures (put, spread); P&L in price units where the net premium can
+        # be ~0 or negative (the collar), because a multiple of ~0 is meaningless.
+        seg = (vals / prem) if use_ratio else (vals - prem)
+        xs += ts
+        ys += list(seg)
+        # The settlement point sits on the NEXT period's first bar, where settle_value is stored.
+        nxt = hist[hist["bar"] == grp["bar"].iloc[-1] + 1]
+        if len(nxt) and nxt["settle_value"].iloc[0] is not None \
+                and not pd.isna(nxt["settle_value"].iloc[0]):
+            settle = float(nxt["settle_value"].iloc[0])
+            xs.append(index[int(nxt["bar"].iloc[0])])
+            ys.append(settle / prem if use_ratio else settle - prem)
+        xs.append(None)
+        ys.append(None)
+    return xs, ys, use_ratio
+
+
+def _roll_hover(runs, ts):
+    # Hover text for one roll bar: per structure, each leg closed (strike, premium, settlement,
+    # P&L per unit) and opened (strike, premium), plus the collar's redeploy / funding decision.
+    # Read straight from each rule's events log — nothing re-derived here.
+    lines = [f"<b>roll {pd.Timestamp(ts).date()}</b>"]
+    for name in OVERLAY_ORDER:
+        rule = runs[name]["rule"]
+        if rule is None:
+            continue
+        ev = [e for e in rule.events if e["ts"] == ts]
+        if not ev:
+            continue
+        lines.append(f"<b>{name}</b>")
+        for e in ev:
+            side = "long" if e["qty"] > 0 else "short"
+            if e["action"] == "close":
+                lines.append(f"  close {e['symbol'].split(' @')[0]}: paid {e['premium']:.2f} "
+                             f"→ settled {e['price']:.2f}  (P&L {e['pnl_per_unit']:+.2f}/unit)")
+            elif e["action"] == "open":
+                lines.append(f"  open {side} {e['symbol'].split(' @')[0]} at {e['price']:.2f}")
+            else:
+                lines.append(f"  {e['reason']}: net cash {e['net_cash']:+.2f}, "
+                             f"period {e['period_return']:+.1%}, SPY units {e['qty']:+.4f}")
+    return "<br>".join(lines)
+
+
+def fig_overlay_values(runs, spot_path):
+    """Three stacked panels over the probe window, with every roll bar marked.
+
+    Top: total value of each strategy (1 SPY unit + its hedge). Middle: each hedge's value per
+    period relative to what it cost, restarting at every roll. Bottom: cumulative net premium paid.
+    """
+    from plotly.subplots import make_subplots
+
+    index = spot_path.index
+    colours = {name: theme.CATEGORICAL[i] for i, name in enumerate(OVERLAY_ORDER)}
+    fig = make_subplots(
+        rows=3, cols=1, shared_xaxes=True, vertical_spacing=0.06, row_heights=[0.45, 0.33, 0.22],
+        specs=[[{}], [{"secondary_y": True}], [{}]],
+        subplot_titles=("Total value — 1 SPY unit plus its hedge (price units)",
+                        "Hedge value per roll period (resets at each roll)",
+                        "Cumulative net premium paid"),
+    )
+
+    # --- Top: equity per strategy. ---------------------------------------------------------
+    for name in OVERLAY_ORDER:
+        fig.add_trace(go.Scatter(
+            x=index, y=runs[name]["state"]["equity"].to_numpy(), mode="lines", name=name,
+            legendgroup=name, line=dict(color=colours[name], width=2 if name != "SPY only" else 1.5,
+                                        dash="dot" if name == "SPY only" else "solid"),
+        ), row=1, col=1)
+
+    # --- Middle: per-period hedge value. ----------------------------------------------------
+    # Whether the right-hand axis ends up carrying anything is a property of the DATA: a series
+    # lands there only when its period premium is not a positive number to divide by (a funded
+    # collar), so on most windows every series is a ratio and that axis stays empty.
+    used_secondary = False
+    for name in OVERLAY_ORDER[1:]:
+        xs, ys, is_ratio = _period_segments(runs[name]["rule"], index)
+        used_secondary = used_secondary or not is_ratio
+        fig.add_trace(go.Scatter(
+            x=xs, y=ys, mode="lines", legendgroup=name, showlegend=False,
+            name=f"{name} ({'× premium' if is_ratio else 'P&L, price units, rhs'})",
+            line=dict(color=colours[name], width=1.8, dash="solid" if is_ratio else "dash"),
+        ), row=2, col=1, secondary_y=not is_ratio)
+    # Break-even for the ratio series: above 1.0 the hedge is worth more than it cost.
+    fig.add_hline(y=1.0, line=dict(color=theme.MUTED, width=1, dash="dot"), row=2, col=1)
+
+    # --- Bottom: cumulative premium. ---------------------------------------------------------
+    for name in OVERLAY_ORDER[1:]:
+        fig.add_trace(go.Scatter(
+            x=index, y=_premium_paid(runs[name]["rule"], index).to_numpy(), mode="lines",
+            legendgroup=name, showlegend=False, name=f"{name} premium",
+            line=dict(color=colours[name], width=1.5, shape="hv"),
+        ), row=3, col=1)
+
+    # --- Roll markers. -----------------------------------------------------------------------
+    # Roll bars are read from the events (every option rule rolls on the same schedule). Lines are
+    # added WITHOUT add_vline's annotation_* arguments — those average Timestamps with sum() and
+    # raise (the bug fixed 2026-09-19).
+    roll_ts = sorted({e["ts"] for name in OVERLAY_ORDER[1:]
+                      for e in runs[name]["rule"].events if e["action"] == "open"})
+    for ts in roll_ts:
+        fig.add_vline(x=ts, line=dict(color=theme.MUTED, width=1, dash="dash"), row="all", col=1)
+    # One visible marker per roll on the top panel, carrying the per-leg detail as hover text.
+    top = runs["SPY only"]["state"]["equity"]
+    fig.add_trace(go.Scatter(
+        x=roll_ts, y=[float(top.loc[ts]) for ts in roll_ts], mode="markers", name="roll (hover)",
+        marker=dict(symbol="triangle-down", size=11, color=theme.MUTED),
+        hovertext=[_roll_hover(runs, ts) for ts in roll_ts],
+        hovertemplate="%{hovertext}<extra></extra>",
+    ), row=1, col=1)
+
+    fig.update_yaxes(title_text="value", row=1, col=1)
+    fig.update_yaxes(title_text="× premium paid", row=2, col=1, secondary_y=False)
+    # The right-hand axis is declared in `specs` before it is known whether any series needs it.
+    # When nothing lands on it, HIDE it: an axis with a title but no data draws no ticks, yet its
+    # title still reserves right margin on the whole figure — which was the wide empty gap between
+    # the panels and the legend. `visible=False` gives that width back to all three panels.
+    if used_secondary:
+        fig.update_yaxes(title_text="collar P&L / unit", row=2, col=1, secondary_y=True,
+                         showgrid=False)
+    else:
+        fig.update_yaxes(visible=False, row=2, col=1, secondary_y=True)
+        # AND give the panels their width back. Declaring `secondary_y` makes make_subplots shrink
+        # every shared x domain to (0, 0.94) to reserve a strip for the right axis, and it does
+        # that at construction time — before it can know whether any series will land there. That
+        # reserved 6% was the empty band between the plots and the legend; hiding the axis alone
+        # does not release it, because the domain is already written.
+        fig.update_xaxes(domain=[0.0, 1.0])
+    fig.update_yaxes(title_text="premium", row=3, col=1)
+    fig.update_layout(
+        title=f"{UNDERLYING} with rolled hedges — 63-bar roll, v1 surface (payoffs are a floor)",
+        height=900, hovermode="x unified", **_TRANSPARENT,
+    )
+    # Reserve the legend strip only when the right-hand axis is actually in use, and even then it
+    # sits on the MIDDLE panel while the legend is anchored to the top of the figure beside panel
+    # 1 — so this passes the data-driven flag rather than letting the auto-detection see a declared
+    # but empty axis and narrow all three panels for nothing.
+    return _inline_theme(fig, secondary_axis_spacing=used_secondary)
+
+
+def overlay_table(runs, spot_path):
+    """Per-strategy summary: final value, return, max drawdown, annualised net premium (% of spot)."""
+    years = (len(spot_path) - 1) / 252.0
+    rows = {}
+    for name in OVERLAY_ORDER:
+        st = runs[name]["state"]
+        prem = float(_premium_paid(runs[name]["rule"], spot_path.index).iloc[-1])
+        rows[name] = {
+            "final value": float(st["equity"].iloc[-1]),
+            "return": float(st["equity"].iloc[-1] / st["equity"].iloc[0] - 1),
+            "max drawdown": float(st["drawdown"].max()),
+            # Net premium paid per year as a share of the AVERAGE spot — the drag figure the probe's
+            # finding 3 estimated for a single ATM put, here measured on the actual rolls.
+            "premium %/yr": prem / float(spot_path.mean()) / years,
+        }
+    return pd.DataFrame(rows).T
 
 
 # ============================================================================
@@ -375,6 +684,7 @@ def build_all():
         "put_paths": fig_put_paths(put_v1, put_v2, spot_path),
         "drawdown_episode": fig_drawdown_episode(idx, strikes, mtm_flat, mtm_spike,
                                                  spot_path, peak, trough),
+        "overlay_values": fig_overlay_values(overlay_runs(spot_path), spot_path),
     }
 
 
@@ -385,6 +695,7 @@ FIGURE_CAPTIONS = {
     "iv_paths": "Implied vol per ladder strike through time — v1 frozen vs v2 current-spot",
     "put_paths": "The ladder valued through time, against spot",
     "drawdown_episode": "Puts struck at the peak and carried through the drawdown",
+    "overlay_values": "Protective put, put spread and collar, rolled every 63 bars, vs SPY alone",
 }
 
 
@@ -443,11 +754,21 @@ def main(out_dir=DOCS_FIGURES):
     figures = build_all()
     for name, fig in figures.items():
         theme.apply_export_theme(fig)
+        # Widen the legend gap for the wider render. See theme.apply_export_spacing.
+        theme.apply_export_spacing(fig)
         fig.write_html(out_dir / f"{name}.html", include_plotlyjs="directory")
-    # The index lives one level up, at docs/index.html, because that is what GitHub Pages serves
-    # as the site root when the source is set to the docs/ folder.
+    # The link-list index, kept as the fallback and as the home of FIGURE_CAPTIONS. It is written
+    # FIRST so that if the report build below fails, docs/ still has a working landing page rather
+    # than a stale one.
     write_index(out_dir, figures)
-    print(f"wrote {len(figures)} HTML figures to {out_dir} (+ index at {out_dir.parent / 'index.html'})")
+    # The narrative report (plan 10-01) replaces that index with the write-up plus these same
+    # figures inline. Imported HERE rather than at module scope because build_report imports this
+    # module's build_all — deferring breaks the cycle. The already-built (and already
+    # export-themed) figures are passed straight in, so nothing is priced or rendered twice.
+    from pipelines.build_report import build_report
+    report = build_report(figures=figures)
+    print(f"wrote {len(figures)} HTML figures to {out_dir}")
+    print(f"wrote the narrative report to {report} ({report.stat().st_size / 1024:.0f} KB)")
     return figures
 
 

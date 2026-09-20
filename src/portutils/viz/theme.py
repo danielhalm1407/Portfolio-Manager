@@ -171,6 +171,96 @@ RESIDUAL_COLOUR = MUTED
 # EXPORT THEMING
 # ============================================================================
 
+# ---------------------------------------------------------------------------
+# SPACING ON A FIGURE THAT CARRIES A SECONDARY (RIGHT-HAND) Y-AXIS.
+# Moved here from pipelines/option_probe_figures.py on 2026-09-20: these are
+# presentation numbers, and presentation numbers belong beside the palette they
+# are tuned against rather than in whichever pipeline needed them first.
+#
+# One builder serves BOTH the interactive window and the published page, and the
+# page renders the figure much wider. `legend.x` is a fraction of the PLOT AREA's
+# width while the margin is in pixels, so a single legend x cannot be right in
+# both: 1.04 is the correct gap inline and too tight once the page stretches the
+# plot. Hence two legend values — `apply_secondary_axis_spacing` sets the inline
+# one during construction, `apply_export_spacing` swaps in the export one.
+# ---------------------------------------------------------------------------
+
+# Legend's left edge INLINE, as a fraction of the plot area's width (1.0 = the plot's right edge).
+SECONDARY_AXIS_LEGEND_X = 1.04
+
+# Legend's left edge in the EXPORTED figure (standalone page and report page). Applied only by
+# `apply_export_spacing`, so changing it cannot affect what the interactive window shows.
+SECONDARY_AXIS_LEGEND_X_EXPORT = 1.10
+
+# Right margin in pixels — the strip the y2 ticks, the y2 title and the legend share.
+SECONDARY_AXIS_MARGIN_R = 340
+
+# Gap in pixels between the y2 tick labels and the rotated y2 title.
+SECONDARY_AXIS_TITLE_STANDOFF = 24
+
+
+def _is_secondary_axis(fig, key):
+    # `overlaying` names whichever axis is underneath, which is "y" on a single-panel figure but
+    # "y3" for a secondary axis inside a subplot row — so test that it is SET, not that it is "y".
+    return (key.startswith("yaxis") and key != "yaxis"
+            and getattr(fig.layout, key).overlaying not in (None, ""))
+
+
+def apply_secondary_axis_spacing(fig, *, enabled=None):
+    """Clear the legend of a right-hand axis, in place, and return the figure.
+
+    Plotly puts the legend immediately right of the plot area and does NOT count a right-hand axis
+    as something to clear, so on a two-axis figure the y2 tick labels and its title render straight
+    through the legend text. Pushing the legend further right, reserving margin for it and pushing
+    the y2 title clear of its own ticks separates the three.
+
+    Called during construction, so the interactive window and the export agree on everything but
+    the one value `apply_export_spacing` changes.
+
+    ``enabled`` overrides the auto-detection, which asks only WHETHER a secondary axis exists, not
+    whether it is anywhere near the legend: on a stacked subplot the legend is anchored to the top
+    of the figure, so a secondary axis in a lower row never reaches it and the reserved strip would
+    only steal width from every panel. ``pipelines.option_probe_figures.fig_overlay_values`` passes
+    its own data-driven flag for exactly that reason.
+    """
+    has_secondary = (any(_is_secondary_axis(fig, key) for key in fig.layout)
+                     if enabled is None else enabled)
+    if not has_secondary:
+        return fig
+
+    fig.update_layout(
+        # Fraction of the PLOT AREA's width, not pixels. Anchored left so the legend grows
+        # rightwards into the margin reserved below.
+        legend=dict(x=SECONDARY_AXIS_LEGEND_X, xanchor="left", y=1.0, yanchor="top"),
+        # The margin, in PIXELS, that the legend now lives in. Too small and the legend is
+        # clipped; this is the number to raise if a longer series name is ever cut off.
+        margin=dict(r=SECONDARY_AXIS_MARGIN_R),
+    )
+    # Push the y2 TITLE clear of its own tick labels. Plotly's default standoff assumes there is
+    # nothing to its right, so on a wide render the rotated title drifts into the legend.
+    for key in fig.layout:
+        if _is_secondary_axis(fig, key):
+            fig.layout[key].title.standoff = SECONDARY_AXIS_TITLE_STANDOFF
+    return fig
+
+
+def apply_export_spacing(fig):
+    """Widen the legend gap for a figure about to be SAVED, in place, and return it.
+
+    The one layout difference between what the interactive window shows and what is published.
+    Every colour, font and grid line is already identical because both go through
+    ``apply_export_theme``; spacing has to differ because ``legend.x`` is a fraction of the plot
+    area's width, so the same number is a narrower gap inline than on the full-width page.
+
+    Only figures that went through ``apply_secondary_axis_spacing`` carry a legend x at all, which
+    is exactly the set this needs to touch — hence the identity test against the inline constant
+    rather than a flag threaded through every caller. Idempotent.
+    """
+    if fig.layout.legend.x == SECONDARY_AXIS_LEGEND_X:
+        fig.update_layout(legend=dict(x=SECONDARY_AXIS_LEGEND_X_EXPORT))
+    return fig
+
+
 def apply_export_theme(fig, *, ink=INK, grid=GRID, paper=PAPER_BG, plot=PLOT_BG):
     """Stamp the dark palette onto a FINISHED figure, in place, and return it.
 
