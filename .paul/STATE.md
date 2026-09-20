@@ -21,7 +21,7 @@ rules into the order ledger). Phase 4 — reopened 2026-08-03 for plan 04-05 (ex
 ## Current Position
 
 Milestone: v0.4 Does hedging actually work? (added 2026-08-24) — v0.2 still in progress alongside
-Phase: 16 (Strategy architecture, Track A option work) — Planning; Phase 11 also in Planning
+Phase: 16 (Strategy architecture, Track A option work) — 16-02 and 16-03 COMPLETE; next is 10-01 (Phase 10 Track A). Phase 11 also in Planning
 Plan: 16-02 and 16-03 created 2026-09-19, awaiting approval (16-03 depends on 16-02). Option
 instruments, then the three option rules run through PortfolioSimulator via an additive
 synthetic-marks hook, shown over the probe's SPY window. Needs no Phase 11 data (v1 surface).
@@ -30,7 +30,7 @@ sites (`cache_prices.py::_tidy` and `PanelBuilder._load`), and has a phase-level
 written above it. Also open: 02-02 and 02-03 (created 2026-08-23, awaiting approval), 04-05 (CONTEXT.md written,
 not yet planned), 07-02 (planned, not applied), and three scoped-but-unwritten plans: 10-01, 10-02,
 11-02.
-Status: 16-03 APPLY — tasks 1-3 PASS (167 passed, 1 known ARM_LIVE failure; 16 pipeline CSVs byte-identical), awaiting the figure checkpoint
+Status: 16-03 COMPLETE — checkpoint approved 2026-09-20, SUMMARY written. 167 passed, 1 known ARM_LIVE failure; 16 pipeline CSVs byte-identical. Ready to PLAN 10-01
 Last activity: 2026-09-19 — created 16-02-PLAN.md and 16-03-PLAN.md. Same day, outside PAUL:
 fixed `option_probe_figures.py` (trough `add_vline` Timestamp TypeError; inline figures now
 get theme INK/GRID via `_inline_theme`, previously Plotly's default dark-blue text), and
@@ -91,7 +91,7 @@ Progress:
 Current loop state:
 ```
 PLAN ──▶ APPLY ──▶ UNIFY
-  ✓        ◐        ○     [16-03 APPLY: tasks 1-3 PASS, paused at human-verify checkpoint; 16-02 closed; 11-01 awaiting]
+  ✓        ✓        ✓     [16-03 loop CLOSED 2026-09-20; 16-02 closed. Next: PLAN 10-01 (report page). 11-01 awaiting]
 ```
 
 Phases 1-6 and 8 were completed **before** PAUL was adopted. Their SUMMARY files are
@@ -140,6 +140,8 @@ shipped, not as evidence the loop was followed.
 | 2026-08-31 | Figure builders live in `pipelines/option_probe_figures.py` and are imported by the research script | One implementation serves the inline `# %%` figure and the published page, so they cannot drift. This is the arrangement `viz/theme.py` already documents for `rebalance_study.py` / `rebalance_realisation.py`, and the reason `apply_export_theme` is a post-hoc stamp rather than a `theme=` argument threaded through every signature |
 | 2026-09-19 | `PortfolioSimulator` gains an additive synthetic-marks hook (16-03), overriding 12-01's DO-NOT-CHANGE on `simulator.py` | User's choice over a standalone runner. `run()` marks and fills only from panel columns (`marks.get(sym)`, simulator.py:75), so a synthetic option leg could never fill. `RebalanceRule.synthetic_marks` defaults to `{}` and marks merge after propose, before execute; gated on byte-identical `rebalance_study` / `drawdown_rotation_sim` output. Option Fills carry no rationale until 02-02 lands; rules keep an `events` log meanwhile |
 | 2026-09-19 | 16-02/16-03 proceed WITHOUT 16-01's full stage skeleton; showcase sizing is 1 option per underlying unit | The option work needs only `instruments/` and `schedule.py`; the rest of the skeleton serves the weight-native rules (16-04/16-05). Per-unit sizing keeps values in SPY price units, comparable to the probe; 12-01's notional/overhedge question stays open for Phase 13 |
+| 2026-09-20 | The collar's net cash is the EXPIRING pair's settlement ONLY, not settlement minus the replacement premium | 12-01's Task 1 text and its own AC-6 contradict each other: a 0.90 put costs far more than a 1.28 call earns, so subtracting the new pair's premium makes every quiet up-quarter read negative and sell underlying to "fund" the hedge — while AC-6 requires a +3% period to CARRY. The AC is the testable contract and wins. The replacement premium is still paid, as its own opening fill in the Book |
+| 2026-09-20 | `cap = 1.28` and a monetisation trigger move to PHASE 13; the cap default is NOT changed unilaterally | Both are parameter/policy questions and Phase 13 is the parameter phase. Measured: the 1.28x call is 3.76 sd out on a 63-bar tenor, prices at 0.0083 and funds 0.16% of the floor over four rolls, so the collar equals the protective put to three digits. 12-01's amendment record explains why 1.28 was chosen over 1.05, so changing it silently would discard a recorded decision; it becomes a swept parameter instead |
 | 2026-08-23 | Trade rationale originates at the RULE, not derived post-hoc from the blotter | A post-hoc deriver would be guessing. `ConstantMixRule.propose` already computes equity, drift (`actual_w`, discarded outside the tolerance branch) and holds the `book`, so it can state at proposal time whether a sale crystallises a gain or a loss. A leg sold because it FELL LESS than the book can book a realised loss — only the rule knows that |
 | 2026-08-23 | `propose()`'s signature and return type stay unchanged; rationale rides a same-bar `last_rationale` attribute | Changing the return type would touch kts.py and both parity suites for zero accounting benefit |
 | 2026-08-23 | The JSON order ledger is reused, not reinvented | `Order.to_dict()` and the `orders/dummy_orders.json` schema already exist and are complete; the offline path simply never wired them up. The wide DataFrame became the de-facto record by omission, not by decision |
@@ -192,23 +194,18 @@ shipped, not as evidence the loop was followed.
 ## Session Continuity
 
 Last session: 2026-09-19
-Stopped at: 16-02 loop closed (SUMMARY: .paul/phases/16-strategy-architecture/16-02-SUMMARY.md).
-Next action: approve and run
-**/paul:apply .paul/phases/16-strategy-architecture/16-03-PLAN.md**
+Stopped at: 16-03 loop closed (SUMMARY: .paul/phases/16-strategy-architecture/16-03-SUMMARY.md).
+Next action: **/paul:plan 10-01** — the narrative report page: ONE static HTML page carrying the
+`research/option_overlay_probe.md` write-up with the five figures inline. Scope is in the
+ROADMAP's Phase 10 Track A section, added 2026-09-20.
 (11-01 remains approved-pending: /paul:apply .paul/phases/11-long-history-data/11-01-PLAN.md)
-Resume file: .paul/phases/16-strategy-architecture/16-03-PLAN.md
+Resume file: .paul/phases/16-strategy-architecture/16-03-SUMMARY.md
 
-**REMIND THE USER FIRST THING (left 2026-09-19 evening):**
-1. 16-03 is PAUSED at its human-verify checkpoint (tasks 1-3 PASS, uncommitted on branch
-   `feat/16-option-instruments`). The user is reviewing the code and figure; after "approved" run
-   UNIFY (16-03-SUMMARY, STATE/ROADMAP, commit + push). Log the collar net-cash deviation
-   (settlement-only, per AC-6) and the 2026-09-19 hover-label fix in `_inline_theme`.
-2. Open question from the user, NOT yet investigated: protective put and collar come out almost
-   identical (+12.4% both). Starting point, unverified: the 1.28 call is ~28% OTM on a 63-bar
-   tenor at ~15% IV (~3.3 sd), so it prices at ~0.009 and funds almost nothing; the 0.90 put is
-   ~1.2 sd. Check the numbers, and whether cap 1.28 is the right default for a quarterly roll.
-3. The user's main focus is Phase 13 (walk-forward), reached incrementally. Finding 7 already
-   points at it: roll-only rules never monetise (the put hit 1.97x at the trough, expired at 0).
+**Resolved 2026-09-20.** 16-03's checkpoint was approved and the loop closed. The collar question
+was answered and MEASURED (the 1.28x call is 3.76 sd out, prices at 0.0083, funds 0.16% of the
+floor across four rolls) and, together with the monetisation-trigger rule, moved into **Phase 13**'s
+scope in the ROADMAP. Work sits on branch `feat/16-option-instruments`; the USER opens the PR to
+main.
 
 **v0.4 context (2026-08-24).** The milestone asks whether portfolio insurance actually pays and how
 much of it a retail investor needs. The hedge structures are catalogued in the Obsidian vault at

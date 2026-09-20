@@ -243,6 +243,20 @@ class ProtectivePutRule(OptionOverlayRule):
     def __init__(self, floor=0.90, **kw):
         # 0.90 = 10% OTM, matching HEDGE_FLOOR_LOSS = 0.10 at bse.py:3940.
         self.floor = float(floor)
+        # ------------------------------------------------------------------
+        # Hand the SHARED parameters up to OptionOverlayRule.__init__ (`**kw` is
+        # whatever the caller passed of underlying / reset_bars / rate / div_yield /
+        # base_vol / vol_fn / hedge_ratio). That base constructor is what builds the
+        # RollCalendar, installs the default v1 vol_fn and calls reset() to create
+        # the bar counter, the empty leg list and the events log — so without this
+        # line the rule would have no schedule, no vol and no state, and propose()
+        # would fail on the first bar.
+        #
+        # Called LAST, after this subclass's strike parameters are set, because
+        # reset() runs inside it: every attribute the rule needs must already exist
+        # by then. The strike fields are subclass-only (the base never reads them);
+        # they reach the base solely through _leg_spec(), which it calls on a roll.
+        # ------------------------------------------------------------------
         super().__init__(**kw)
 
     def _leg_spec(self):
@@ -258,6 +272,20 @@ class PutSpreadRule(OptionOverlayRule):
         if not spread_width < floor:
             raise ValueError(f"spread_width {spread_width} must be below floor {floor}")
         self.floor, self.spread_width = float(floor), float(spread_width)
+        # ------------------------------------------------------------------
+        # Hand the SHARED parameters up to OptionOverlayRule.__init__ (`**kw` is
+        # whatever the caller passed of underlying / reset_bars / rate / div_yield /
+        # base_vol / vol_fn / hedge_ratio). That base constructor is what builds the
+        # RollCalendar, installs the default v1 vol_fn and calls reset() to create
+        # the bar counter, the empty leg list and the events log — so without this
+        # line the rule would have no schedule, no vol and no state, and propose()
+        # would fail on the first bar.
+        #
+        # Called LAST, after this subclass's strike parameters are set, because
+        # reset() runs inside it: every attribute the rule needs must already exist
+        # by then. The strike fields are subclass-only (the base never reads them);
+        # they reach the base solely through _leg_spec(), which it calls on a roll.
+        # ------------------------------------------------------------------
         super().__init__(**kw)
 
     def _leg_spec(self):
@@ -277,6 +305,20 @@ class RollingCollarRule(OptionOverlayRule):
         self.redeploy_trigger = float(redeploy_trigger)
         # Fraction of that cash converted into more underlying (1.0 = all of it).
         self.redeploy_rate = float(redeploy_rate)
+        # ------------------------------------------------------------------
+        # Hand the SHARED parameters up to OptionOverlayRule.__init__ (`**kw` is
+        # whatever the caller passed of underlying / reset_bars / rate / div_yield /
+        # base_vol / vol_fn / hedge_ratio). That base constructor is what builds the
+        # RollCalendar, installs the default v1 vol_fn and calls reset() to create
+        # the bar counter, the empty leg list and the events log — so without this
+        # line the rule would have no schedule, no vol and no state, and propose()
+        # would fail on the first bar.
+        #
+        # Called LAST, after this subclass's strike parameters are set, because
+        # reset() runs inside it: every attribute the rule needs must already exist
+        # by then. The strike fields are subclass-only (the base never reads them);
+        # they reach the base solely through _leg_spec(), which it calls on a roll.
+        # ------------------------------------------------------------------
         super().__init__(**kw)
 
     def _leg_spec(self):

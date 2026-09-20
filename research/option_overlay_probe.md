@@ -193,6 +193,56 @@ The usual caveats apply, and they apply more strongly here. The vol level is fro
 mid-period multiple above is a floor (Finding 6). And this is one window with one drawdown: one
 observation, not evidence that hedging does or does not pay.
 
+## How a collar leg is actually priced — the call chain, and why the call is worth ~0.009
+
+**Added 2026-09-20.** Finding 7's numbers are only readable if the path from figure to formula is
+explicit. It is four hops, and nothing in it is a second implementation of anything:
+
+| # | Where | What happens |
+|---|---|---|
+| 1 | [`option_probe_figures.overlay_runs`](../src/pipelines/option_probe_figures.py) | Builds one `PortfolioSimulator` per strategy: `BuyAndHoldRule({"SPY": 1.0})` plus the option rule, starting capital = the first close, so the book holds exactly one SPY unit. |
+| 2 | [`PortfolioSimulator.run`](../src/portutils/portfolio/simulator.py#L47) | Per bar: `propose` → **synthetic marks** (`:72`) → fill → mark the book. The marks step is 16-03's hook; without it a leg has no price and can neither fill nor be valued. |
+| 3 | [`OptionOverlayRule.propose`](../src/portutils/strategies/rules/options.py#L136) | Only acts on a ROLL bar. Closes the expiring legs, asks the subclass's `_leg_spec()` for the new ones, and prices each at birth — that price becomes the premium. `RollingCollarRule._leg_spec` (`:282`) returns `[("P", 0.90, +1), ("C", 1.28, -1)]`. |
+| 4 | [`OptionOverlayRule._price`](../src/portutils/strategies/rules/options.py#L104) | The only place a number is produced: `vol_fn(strike, tau, spot_ref)` → `OptionLeg.price` → `black_scholes_put` / `black_scholes_call`. On the expiry bar it returns `intrinsic(spot)` instead. |
+
+Between rolls `propose` returns `{}` and only `synthetic_marks` (`:202`) runs, repricing each open
+leg at that bar's spot and shorter `tau`. **That is the whole dynamic:** within a period the legs
+move through SPOT and TIME DECAY alone. The vol they are priced at is fixed per leg at birth (v1:
+`base = 0.16`, moneyness measured against the strike-time spot), so nothing in this engine re-prices
+a leg because the market got scared.
+
+### Why the collar is a protective put with a rounding error
+
+Measured at the first roll (spot 635.26, τ = 0.25):
+
+| leg | strike | IV from the smirk | distance from spot | premium |
+|---|---|---|---|---|
+| long put 0.90× | 571.73 | 21.9% | **0.91 sd** | 5.3701 |
+| short put 0.80× (spread) | 508.21 | 25.8% | 1.55 sd | 1.1391 |
+| short call 1.28× (collar) | 813.13 | 14.9% | **3.76 sd** | 0.0083 |
+
+Totals over the window's four rolls, per SPY unit:
+
+| structure | paid for longs | received for shorts | net | shorts offset |
+|---|---|---|---|---|
+| put spread | 23.06 | 4.89 | 18.17 | **21.2%** |
+| collar | 23.06 | 0.04 | 23.02 | **0.16%** |
+
+So the collar's short call funds one part in six hundred of its floor, and the +12.4% it returns is
+the protective put's number to three digits. Two independent reasons, and the second dominates:
+
+1. **Skew.** The call sits on the low side of the smirk (14.9%) and the put on the high side
+   (21.9%), so equal distance would already be worth less.
+2. **Distance.** 1.28× is **3.76 standard deviations** away over a 63-day tenor at that vol, while
+   0.90× is 0.91 sd. Almost all of the gap is here, not in the skew.
+
+This is 12-01's cap working exactly as specified — `HEDGE_UPSIDE_CAP = 0.28` is deliberately wide,
+chosen so it rarely binds — but a cap that never binds also never pays. **Whether 1.28 is the right
+default for a 63-BAR roll is an open question:** the source applies +28% to its own horizon, and at
+a quarterly reset the same number is nearly four sigma out. A cap nearer 1.05-1.10 (≈0.7-1.4 sd)
+would fund a visible share of the floor and would genuinely cap upside — a different structure, and
+exactly the kind of parameter Phase 13 should sweep rather than assume.
+
 ## What this does not cover — and who owns it
 
 | gap | owner |

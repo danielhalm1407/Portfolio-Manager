@@ -349,6 +349,35 @@ research cells and the exporter, following the arrangement `viz/theme.py` docume
 `rebalance_study.py` / `rebalance_realisation.py`. That is also the first working instance of
 Phase 10 Track A's pattern; see the ROADMAP's 10-01 entry.
 
+## Raised 2026-09-20, after 16-03's figure was reviewed
+
+**MOVED TO PHASE 13 on 2026-09-20 (user's call): items 1 and 2 are parameter / policy questions,
+and Phase 13 is the parameter phase.** The ROADMAP's Phase 13 scope now carries them with their
+measured numbers; what remains here is the record of where they were found. Item 3 was always
+Phase 10 Track A's.
+
+The structures run and roll; these are the questions the first read of the output produced. None
+blocks 16-03's UNIFY.
+
+1. **`cap = 1.28` is probably wrong for a 63-BAR roll, and the evidence is now measured.** At the
+   first roll (spot 635.26, tau 0.25) the 1.28x call sits **3.76 standard deviations** out at 14.9%
+   IV and prices at **0.0083**; across the window's four rolls the short call returned 0.04 against
+   23.06 paid for the puts — it funds **0.16%** of the floor, so the collar's total value matches
+   the protective put's to three digits. The 0.90x put by contrast is 0.91 sd out. 12-01 took the
+   cap from `HEDGE_UPSIDE_CAP = 0.28` at `bse.py:3941`, which is the source's own horizon, not a
+   quarterly one. A cap near 1.05-1.10 (~0.7-1.4 sd) would fund a visible share and would actually
+   cap upside. **Do not silently change the default** — 12-01's amendment record explains why 1.28
+   was chosen over 1.05. Make it a swept parameter (Phase 13) or an explicit, recorded re-decision.
+   Full numbers: the "How a collar leg is actually priced" section of
+   `research/option_overlay_probe.md`.
+2. **A monetisation rule.** Finding 7: the put struck at the 2026-01-27 peak reached **1.97x** its
+   premium at the trough and expired worthless, because every rule here holds to expiry. A rule
+   that closes (or re-strikes) a hedge on a take-profit trigger — N x premium, or spot X% through
+   the strike — is the missing structure, and it is a POLICY question for Phase 13's sweep rather
+   than a pricing one.
+3. **Where the HTML report lives:** Phase 10 Track A (10-01), not here. See the ROADMAP note of
+   2026-09-20. The option work produces the content; Track A publishes it.
+
 ## Out of scope
 
 - Rewriting `QuantileRiskControlStrategy`'s maths — it moves, it does not change

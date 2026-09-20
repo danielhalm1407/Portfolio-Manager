@@ -265,6 +265,12 @@ def _inline_theme(fig):
         font=dict(color=theme.INK),
         # Grid tone for the border — without it the dark box has no edge on the dark chart.
         bordercolor=theme.GRID,
+        # Show the WHOLE series name. Plotly truncates it to 15 characters by default, which
+        # turns "+ protective put" into "+ protective..." in the unified box — the series the
+        # reader is trying to identify is exactly the part that gets cut. -1 disables the limit,
+        # and the box widens to fit. The roll-marker hover never showed this because it carries
+        # its text in `hovertext` with the name suppressed by <extra></extra>.
+        namelength=-1,
     ))
     return theme.apply_export_theme(fig, paper=_TRANSPARENT["paper_bgcolor"],
                                     plot=_TRANSPARENT["plot_bgcolor"])
