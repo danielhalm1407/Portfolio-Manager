@@ -224,3 +224,79 @@ def test_single_asset_record_path_still_works():
     led.record(pd.Timestamp("2020-01-03"), book, 101.0)
     assert len(led.df) == 2
     assert "position" in led.df.columns
+
+
+# ============================================================================
+# 13-01.1 FINDING 2 — THE DEAD-LEG WALK IN `Book`
+# The narrow ledger removed the per-leg COLUMNS. What was left is a different
+# object: `Book` auto-creates a Position per symbol and never retires one, so
+# `Book.unrealised`, `Book.gross_exposure` and this ledger's own loop each
+# re-walked every leg ever traded, on every bar. They now skip flat positions.
+# These tests pin the INVARIANT that licenses the skip — a flat leg contributes
+# exactly zero — rather than the speed, for the reason given in this module's
+# docstring: a wall-clock assertion in CI is a flaky test.
+# ============================================================================
+
+def _book_with_dead_legs(n_dead):
+    """A live underlying plus `n_dead` closed-and-expired option legs carrying realised P&L."""
+    from portutils.portfolio.fills import Fill
+    book = Book(default_symbol=UNDERLYING, base_equity=1000.0)
+    book.apply_fill(Fill(order_id=1, side=1, qty=10.0, price=100.0, ts="t0", symbol=UNDERLYING))
+    for i in range(n_dead):
+        sym = f"{UNDERLYING}_P_DEAD_{i}"
+        # Bought then sold in full: the Position is left at qty 0 with realised P&L on it,
+        # which is exactly the state a rolled or monetised option leg leaves behind.
+        book.apply_fill(Fill(order_id=10 + i, side=1, qty=1.0, price=5.0, ts="t0", symbol=sym))
+        book.apply_fill(Fill(order_id=50 + i, side=-1, qty=1.0, price=7.0, ts="t1", symbol=sym))
+    # Retire the per-bar counters, so these legs are dead from an EARLIER bar rather than
+    # closed on the bar under test. Without this they still carry closed_this_bar and are
+    # legitimately counted in TOTAL_closed_units — which is the distinction
+    # test_a_leg_closed_on_this_bar_still_reports_its_closed_units exists to pin.
+    book.reset_bar_counters()
+    return book
+
+
+def test_dead_legs_change_no_mark_to_market_number():
+    # The invariant the skip rests on. Marks are supplied ONLY for the live symbol, which is
+    # what the simulator does — an expired option has no quote — so if a dead leg could reach
+    # the arithmetic at all it would do so through the entry-price fallback and show up here.
+    marks = {UNDERLYING: 105.0}
+    clean, dirty = _book_with_dead_legs(0), _book_with_dead_legs(200)
+    assert dirty.unrealised(marks) == pytest.approx(clean.unrealised(marks))
+    assert dirty.gross_exposure(marks) == pytest.approx(clean.gross_exposure(marks))
+    # realised is deliberately NOT expected to match: the dead legs really did book P&L, and
+    # skipping them there would LOSE it. That asymmetry is why the fix is a skip in the two
+    # mark-to-market walks and not a retirement of the Position.
+    assert dirty.realised > clean.realised
+
+
+def test_dead_legs_change_no_ledger_row_field():
+    # Same invariant one layer up, across every TOTAL_ field record_book writes — the fields a
+    # caller of the narrow ledger actually reads back.
+    marks = {UNDERLYING: 105.0}
+    clean_row = NarrowLedger().record_book(pd.Timestamp("2020-01-02"),
+                                           _book_with_dead_legs(0), marks)
+    dirty_row = NarrowLedger().record_book(pd.Timestamp("2020-01-02"),
+                                           _book_with_dead_legs(200), marks)
+    assert set(clean_row) == set(dirty_row)
+    for k in clean_row:
+        if k in ("TOTAL_realised_pnl", "TOTAL_total_pnl", "TOTAL_portfolio_value"):
+            # These three legitimately DIFFER, for the reason above: the dead legs' realised
+            # P&L is real money and stays in the book.
+            continue
+        assert dirty_row[k] == pytest.approx(clean_row[k]), f"{k} moved when dead legs were added"
+
+
+def test_a_leg_closed_on_this_bar_still_reports_its_closed_units():
+    # THE TRAP in the skip. A leg closed on THIS bar is already flat by the time record_book
+    # runs, so a guard on qty alone would drop the very units the turnover series is built
+    # from. The guard tests qty AND closed_this_bar; this is what keeps it honest.
+    from portutils.portfolio.fills import Fill
+    led = NarrowLedger()
+    book = Book(default_symbol=UNDERLYING, base_equity=0.0)
+    sym = f"{UNDERLYING}_P_JUSTCLOSED"
+    book.apply_fill(Fill(order_id=1, side=1, qty=3.0, price=5.0, ts="t0", symbol=sym))
+    book.apply_fill(Fill(order_id=2, side=-1, qty=3.0, price=8.0, ts="t0", symbol=sym))
+    assert book.position(sym).qty == 0.0, "the fixture must leave the leg FLAT"
+    row = led.record_book(pd.Timestamp("2020-01-02"), book, {UNDERLYING: 100.0})
+    assert row["TOTAL_closed_units"] == pytest.approx(3.0)

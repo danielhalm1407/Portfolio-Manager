@@ -170,6 +170,15 @@ class NarrowLedger(StateLedger):
         # use internally; going through the public position() would repeat the dict lookup per
         # symbol per bar for no benefit, on the one loop this class exists to keep cheap.
         for sym, pos in book._positions.items():
+            # Skip legs that are flat AND had no closing activity this bar, mirroring
+            # Book.unrealised's skip for the same reason. entry_cost, mark_value and
+            # unrealised are each multiplied by qty, so a flat leg adds exactly zero to
+            # them — but closed_this_bar is NOT gated on qty, and a leg closed on THIS bar
+            # is already flat by the time this runs. Skipping on qty alone would silently
+            # drop the closed units the turnover series is built from, which is why the
+            # guard tests both.
+            if not pos.qty and not pos.closed_this_bar:
+                continue
             # The RAW resolved mark — may be None on a warm-up bar or for a symbol with no quote
             # today. Position.unrealised already treats that (and a zero qty) as 0.0, which is
             # exactly what Book.unrealised does, so unrealised matches the parent bar for bar.

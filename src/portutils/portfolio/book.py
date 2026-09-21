@@ -235,8 +235,15 @@ class Book:
     def unrealised(self, prices):
         # Whole-book mark-to-market on open units. `prices` may be a {symbol: price}
         # mapping (multi-asset) or a bare scalar (single-asset, kts.py style).
+        # FLAT positions are skipped. Position.unrealised already returns 0.0 the moment qty
+        # is 0, so this is the identical sum reached without paying _resolve_price for a
+        # symbol that cannot contribute. It matters because position() auto-creates and
+        # nothing ever retires: a full-history option run carries one dead leg per roll
+        # (~82 over 2006-2026, several hundred when the rules monetise), and this walk runs
+        # on every one of 5,201 bars — 13-01.1's finding 2, the residual timing term the
+        # narrow ledger left behind in the book.
         return sum(p.unrealised(_resolve_price(sym, prices))
-                   for sym, p in self._positions.items())
+                   for sym, p in self._positions.items() if p.qty)
 
     def total_pnl(self, prices):
         # realised + unrealised — the figure the portfolio widget and the P&L plot show.
@@ -253,6 +260,12 @@ class Book:
         # basket nets out in net exposure but not here).
         total = 0.0
         for sym, p in self._positions.items():
+            # Same skip as unrealised, and here it is strictly SAFER as well as cheaper:
+            # abs(p.qty * px) is zero for a flat position only while px stays finite, so a
+            # dead leg carrying a NaN avg_entry could poison the whole total through the
+            # fallback below. Skipping makes that unreachable.
+            if not p.qty:
+                continue
             # Fall back to the entry price when no mark is available — a stale-but-real
             # valuation beats silently dropping the leg from the exposure total.
             px = _resolve_price(sym, prices, default=p.avg_entry)
