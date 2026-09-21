@@ -491,6 +491,21 @@ class OptionOverlayRule(RebalanceRule):
         # A NEW period starts here, so the next roll is reset_bars from THIS bar, not from
         # whenever the monetised period began.
         self._period_start_bar, self._period_start_spot = self._bar, spot
+        # The DRAWDOWN REFERENCE restarts here too, for the same reason the period and the
+        # premium below do. _drawdown_now measures against _peak, and until this line _peak
+        # only ever ratcheted UP (see propose), so it survived the monetise that just
+        # happened. That is what made the rule monetise and reopen on CONSECUTIVE BARS:
+        # after a real crash the market sits below its old peak for years, so the drawdown
+        # condition stayed true, re-fired on the next bar the IV gate allowed, and the full
+        # history logged 281 monetisations against 48 rolls.
+        # Resetting to THIS spot also makes the trigger commensurate with the rest of the
+        # state. The legs just struck are referenced to this spot (floor x spot), and
+        # _long_premium below resets for exactly the same reason: a peak the new put never
+        # saw cannot describe the loss event the new put is being bought to insure.
+        # Deliberately NOT reset on a roll — a roll continues the same hedge programme,
+        # and resetting every reset_bars would stop the trigger ever firing on a slow
+        # grind down. Decision recorded 2026-09-21.
+        self._peak = spot
         self._long_premium = sum(e["premium"] for e in new_legs if e["qty"] > 0)
         self._state = "HEDGED"
         self._flat_since_bar = None

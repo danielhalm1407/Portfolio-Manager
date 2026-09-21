@@ -212,9 +212,64 @@ def test_drawdown_trigger_closes_on_the_bar_the_threshold_is_crossed():
     depth_before = (peak - float(spot_path.iloc[bar - 1])) / peak
     assert depth_at >= 0.10
     assert depth_before < 0.10
-    # And the rule is now FLAT with no legs.
-    assert rule._state == "FLAT"
-    assert rule._legs == []
+    # And the rule went FLAT on that bar with its legs cleared. The "monetise" marker is
+    # logged from the FLAT branch AFTER self._legs = [], so its presence on the close bar is
+    # the state assertion — the state object itself has moved on by the time this runs.
+    #
+    # The rule's state at the END of the path is HEDGED, not FLAT, and that is correct. This
+    # configuration arms no reentry_iv, so _gate_open() returns True unconditionally and the
+    # rule reopens on the bar after each monetise. Before the 2026-09-21 _peak reset the
+    # stale peak let it re-monetise immediately, so it alternated monetise/reopen for the
+    # rest of the path (14 monetisations here) and ended FLAT only because the last bar
+    # happened to be a monetise. It now takes a further 10% fall to re-fire.
+    monetised = [e for e in _events(rule, "monetise") if e["bar"] == bar]
+    assert monetised, "no monetise marker on the bar the close fired"
+    assert monetised[0]["trigger"] == "drawdown"
+
+
+def test_a_reopen_resets_the_drawdown_reference_so_the_trigger_cannot_refire_next_bar():
+    """The monetise/reopen thrash, and the _peak reset that fixes it (13-01.1 finding 1).
+
+    _drawdown_now measures against _peak, which only ever ratchets UP. Before the reopen
+    reset, a monetise left _peak at the PRE-CRASH high, so the drawdown condition was still
+    true on the very next bar: the rule re-struck into a market still below that old peak
+    and fired again immediately. Over the full 2006-2026 history that was 281 monetisations
+    against 48 rolls; on the 43-bar fixture below it was 14, on alternating bars.
+
+    The property that must hold: a reopen strikes a fresh hedge at THIS spot, so the market
+    has to fall monetise_drawdown AGAIN, from there, before the trigger may fire.
+    """
+    spot_path = _flat_then_fall(3, 40, start=100.0, end=70.0)
+    rule = ProtectivePutRule(floor=0.90, underlying=UNDERLYING, reset_bars=63,
+                             monetise_drawdown=0.10)
+    _run(rule, spot_path)
+
+    monetise_bars = [e["bar"] for e in _events(rule, "monetise")]
+    reopen_bars = [e["bar"] for e in _events(rule, "reopen")]
+    assert monetise_bars, "the drawdown trigger never fired"
+    assert reopen_bars, "the fixture must reopen at least once or it proves nothing"
+
+    # THE REGRESSION GUARD. No monetise may land on the bar straight after a reopen: that
+    # adjacency IS the thrash, and it is the one thing this test exists to keep out.
+    for r in reopen_bars:
+        assert r + 1 not in monetise_bars, (
+            f"monetised on bar {r + 1}, one bar after reopening on bar {r} — the drawdown "
+            f"reference did not reset on reopen")
+
+    # And the economics behind that guard: every monetise after the first must sit a full
+    # monetise_drawdown below the spot the PRECEDING reopen struck at, so the triggers walk
+    # down a staircase instead of firing against a peak the current hedge never saw.
+    for m in monetise_bars:
+        prior = [r for r in reopen_bars if r < m]
+        if not prior:
+            # The first monetise is referenced to the path's own running peak, not to a
+            # reopen — there has not been one yet. Nothing to check.
+            continue
+        entry = float(spot_path.iloc[max(prior)])
+        depth = (entry - float(spot_path.iloc[m])) / entry
+        assert depth >= 0.10, (
+            f"monetised at bar {m} only {depth:.4f} below the reopen spot at bar "
+            f"{max(prior)} — the reference is stale")
 
 
 def test_multiple_trigger_closes_and_is_labelled_as_such():
