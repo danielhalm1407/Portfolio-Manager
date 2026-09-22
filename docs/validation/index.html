@@ -1,0 +1,77 @@
+<!doctype html>
+<html><head><meta charset='utf-8'><title>13-01 — option monetisation over the GFC</title><style>body{font-family:system-ui,sans-serif;max-width:60rem;margin:3rem auto;padding:0 1rem;line-height:1.6}table{border-collapse:collapse}td,th{border:1px solid #ccc;padding:.35rem .6rem;text-align:right}th:first-child,td:first-child{text-align:left}</style></head><body>
+<h1>Option monetisation over the GFC</h1>
+<p>2007-10-01 to 2009-03-31. <b>IN-SAMPLE</b>, illustrative hand-picked parameters, fills at the model mark with no bid/ask or slippage. Not a parameter study — see 13-01's amendment of 2026-09-22.</p>
+<ul>
+    <li><a href="protective_put.html">Protective put — monetise at 10% drawdown, re-enter under 0.18 IV</a></li>
+    <li><a href="put_spread.html">Put spread 0.90/0.80 — same monetisation policy</a></li>
+    <li><a href="collar.html">Rolling collar 0.90/1.28 — same monetisation policy</a></li>
+    <li><a href="blind_roll_control.html">Protective put, BLIND ROLL — no monetisation (the control)</a></li>
+</ul>
+<table border="1" class="dataframe">
+  <thead>
+    <tr style="text-align: right;">
+      <th></th>
+      <th>final_value</th>
+      <th>return</th>
+      <th>max_drawdown</th>
+      <th>rolls</th>
+      <th>monetisations</th>
+      <th>best_multiple</th>
+      <th>flat_share</th>
+    </tr>
+    <tr>
+      <th>configuration</th>
+      <th></th>
+      <th></th>
+      <th></th>
+      <th></th>
+      <th></th>
+      <th></th>
+      <th></th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <th>protective_put</th>
+      <td>86.722</td>
+      <td>-0.4379</td>
+      <td>-0.5134</td>
+      <td>1</td>
+      <td>3</td>
+      <td>5.26</td>
+      <td>0.6472</td>
+    </tr>
+    <tr>
+      <th>put_spread</th>
+      <td>84.494</td>
+      <td>-0.4523</td>
+      <td>-0.5302</td>
+      <td>1</td>
+      <td>3</td>
+      <td>5.26</td>
+      <td>0.6472</td>
+    </tr>
+    <tr>
+      <th>collar</th>
+      <td>83.387</td>
+      <td>-0.4595</td>
+      <td>-0.5417</td>
+      <td>1</td>
+      <td>3</td>
+      <td>5.26</td>
+      <td>0.6472</td>
+    </tr>
+    <tr>
+      <th>blind_roll_control</th>
+      <td>75.950</td>
+      <td>-0.5077</td>
+      <td>-0.5138</td>
+      <td>5</td>
+      <td>0</td>
+      <td>NaN</td>
+      <td>0.0000</td>
+    </tr>
+  </tbody>
+</table>
+</body></html>

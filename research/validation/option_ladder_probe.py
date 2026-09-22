@@ -34,7 +34,8 @@ from portutils.portfolio.book import Book
 from portutils.portfolio.narrow_ledger import NarrowLedger
 from portutils.portfolio.rules import BuyAndHoldRule
 from portutils.portfolio.simulator import PortfolioSimulator
-from portutils.strategies.rules.options import ProtectivePutRule
+from portutils.strategies.rules.options import (ProtectivePutRule, PutSpreadRule,
+                                                RollingCollarRule)
 from portutils.viz import theme
 
 import portutils.strategies.scoring as scoring
@@ -76,11 +77,13 @@ GFC = ("2007-10-01", "2009-03-31")
 
 # 3. run_one
 
-def run_one(start=None, end=None, **rule_kwargs):
+def run_one(start=None, end=None, rule_cls=ProtectivePutRule, **rule_kwargs):
     """One configuration over one window. Returns everything needed to draw it.
 
     Every rung of the ladder calls THIS function with different arguments. A rung that worked
-    through a different code path would prove nothing about the rung above it.
+    through a different code path would prove nothing about the rung above it. `rule_cls` is the
+    same argument in that spirit: the three structures are compared by swapping ONE parameter,
+    never by three separate harnesses that could drift apart in their sizing or their capital.
 
     Returns ``(state, blotter, history, rule, elapsed)``:
       * ``state``   — the NARROW per-bar frame (equity and the TOTAL_* aggregates, ~15 columns
@@ -108,7 +111,7 @@ def run_one(start=None, end=None, **rule_kwargs):
     kw = dict(underlying=UNDERLYING, reset_bars=RESET_BARS, rate=RATE, div_yield=DIV_YIELD,
               vol_mode="v2", iv_series=iv)
     kw.update(rule_kwargs)
-    rule = ProtectivePutRule(**kw)
+    rule = rule_cls(**kw)
 
     # ------------------------------------------------------------------------
     # A FRESH Book and a FRESH NarrowLedger every call. PortfolioSimulator.run() resets rules but
@@ -473,3 +476,124 @@ print(f"\nSINGLE-RUN CONSTANT: {elapsed_d:.2f}s over {len(state_d):,} bars "
 fig_ladder(state_d, blot_d, hist_d,
            title="RUNG 3d — the same configuration, 2006-2026 (IN-SAMPLE)").show()
 print(classify_option_events(blot_d, UNDERLYING)["event"].value_counts().to_string())
+
+# %% 9. RUNG 3e — the three structures over the GFC, and the figures written out
+
+# 9. RUNG 3e — THE ANALYSIS
+
+# ============================================================================
+# THE AMENDED DELIVERABLE (13-01, amendment 2026-09-22). The GFC window is the
+# headline and the full history the appendix, because a table of final values
+# over twenty years cannot show a policy DECIDING and fifteen months of picture
+# can. Every structure is run through the SAME run_one with one parameter
+# changed — the rule class — so a difference between two panels is a difference
+# between two structures and not between two harnesses.
+#
+# The monetisation policy is held FIXED across all three at 13-01's illustrative
+# levels. This is deliberately NOT a parameter study: the levels were hand-picked,
+# they are in-sample, and the moment anyone starts choosing between these rows on
+# these numbers they are doing 13-02's work on evidence that cannot support it.
+# What the comparison CAN say is whether the mechanism behaves sensibly on a
+# structure that is not a plain long put.
+#
+# Writes one self-contained HTML per configuration plus an index, so the analysis
+# can be opened in a browser without a kernel. include_plotlyjs="cdn" keeps each
+# file at tens of KB rather than the ~3.5 MB an inlined bundle would cost; the
+# pages therefore need a network connection to render.
+# ============================================================================
+
+# Resolved from the batch pipeline rather than recomputed from __file__: this script is
+# executed cell by cell in a session, where __file__ may not be defined at all, and the
+# batch already owns the one definition of where the project root is.
+DOCS_DIR = omb.PROJECT_ROOT / "docs" / "validation"
+
+# The illustrative policy, one definition shared by every structure below so they cannot drift.
+GFC_POLICY = dict(monetise_drawdown=0.10, reentry_iv=0.18, max_flat_bars=126)
+
+# floor=0.90 throughout. spread_width and cap are 12-01's defaults, carried as-is: this plan
+# makes no claim about them, and choosing them here would be the parameter study it is not.
+GFC_CONFIGS = {
+    "protective_put": dict(
+        rule_cls=ProtectivePutRule, floor=0.90, **GFC_POLICY,
+        _label="Protective put — monetise at 10% drawdown, re-enter under 0.18 IV"),
+    "put_spread": dict(
+        rule_cls=PutSpreadRule, floor=0.90, spread_width=0.80, **GFC_POLICY,
+        _label="Put spread 0.90/0.80 — same monetisation policy"),
+    "collar": dict(
+        rule_cls=RollingCollarRule, floor=0.90, cap=1.28, **GFC_POLICY,
+        _label="Rolling collar 0.90/1.28 — same monetisation policy"),
+    # The control. Same structure as the first row with NO policy armed, so the difference
+    # between these two panels is the monetisation and nothing else.
+    "blind_roll_control": dict(
+        rule_cls=ProtectivePutRule, floor=0.90,
+        _label="Protective put, BLIND ROLL — no monetisation (the control)"),
+}
+
+
+def export_gfc_analysis(out_dir=DOCS_DIR, window=GFC, show=False):
+    """Run every GFC configuration, write a figure per configuration plus an index.
+
+    Returns the summary frame it also prints, so a session can keep working with it.
+    """
+    out_dir.mkdir(parents=True, exist_ok=True)
+    summary, written = [], []
+    for name, cfg in GFC_CONFIGS.items():
+        cfg = dict(cfg)
+        label = cfg.pop("_label")
+        state, blot, hist, rule, elapsed = run_one(*window, **cfg)
+
+        # The gates are passed to the figure ONLY where the configuration armed them, so a
+        # panel never draws a threshold the run did not test.
+        fig = fig_ladder(state, blot, hist, title=f"{label}  ·  GFC {window[0]} to {window[1]}",
+                         reentry_iv=cfg.get("reentry_iv"),
+                         monetise_multiple=cfg.get("monetise_multiple"))
+        if show:
+            fig.show()
+        path = out_dir / f"{name}.html"
+        fig.write_html(path, include_plotlyjs="cdn")
+        written.append((name, label, path))
+
+        ev = classify_option_events(blot, UNDERLYING)["event"].value_counts()
+        mons = [e for e in rule.events if e["action"] == "monetise"]
+        eq = state["equity"]
+        summary.append({
+            "configuration": name,
+            # Final value in SPY price units, against buy-and-hold over the same window.
+            "final_value": round(float(eq.iloc[-1]), 3),
+            "return": round(float(eq.iloc[-1] / eq.iloc[0] - 1), 4),
+            "max_drawdown": round(float((eq / eq.cummax() - 1).min()), 4),
+            "rolls": int(ev.get(ROLL, 0)),
+            "monetisations": len(mons),
+            # The number the amended plan is read for: how far above its cost the hedge was
+            # when the policy took the money.
+            "best_multiple": (round(max(m["multiple"] for m in mons), 2) if mons else None),
+            # How much of the window it spent with no hedge on, which is the cost of waiting.
+            "flat_share": round(float((hist["state"] == "FLAT").mean()), 4) if len(hist) else 0.0,
+        })
+
+    table = pd.DataFrame(summary).set_index("configuration")
+
+    # A plain index page, so the four figures are one click apart rather than four file paths.
+    links = "\n".join(
+        f'    <li><a href="{n}.html">{lab}</a></li>' for n, lab, _ in written)
+    (out_dir / "index.html").write_text(
+        "<!doctype html>\n<html><head><meta charset='utf-8'>"
+        "<title>13-01 — option monetisation over the GFC</title>"
+        "<style>body{font-family:system-ui,sans-serif;max-width:60rem;margin:3rem auto;"
+        "padding:0 1rem;line-height:1.6}table{border-collapse:collapse}"
+        "td,th{border:1px solid #ccc;padding:.35rem .6rem;text-align:right}"
+        "th:first-child,td:first-child{text-align:left}</style></head><body>\n"
+        f"<h1>Option monetisation over the GFC</h1>\n"
+        f"<p>{window[0]} to {window[1]}. <b>IN-SAMPLE</b>, illustrative hand-picked "
+        "parameters, fills at the model mark with no bid/ask or slippage. "
+        "Not a parameter study — see 13-01's amendment of 2026-09-22.</p>\n"
+        f"<ul>\n{links}\n</ul>\n"
+        f"{table.to_html()}\n</body></html>", encoding="utf-8")
+
+    print(f"\nwritten to {out_dir}:")
+    for n, _, path in written:
+        print(f"  {path.name}")
+    print("  index.html")
+    print()
+    print(table.to_string())
+    return table
