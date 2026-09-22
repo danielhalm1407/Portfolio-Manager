@@ -187,6 +187,14 @@ class OptionOverlayRule(RebalanceRule):
         # HEDGED or FLAT. Starts HEDGED: with no trigger armed the rule never leaves it, which is
         # what makes every pre-13-01 caller behave identically.
         self._state = "HEDGED"
+        # The trigger quantities AS AT THE DECISION, stashed on a monetise bar only. The
+        # monetise branch clears _legs and zeroes _long_premium, so by the time synthetic_marks
+        # records the bar's history row _drawdown_now still answers but _multiple_now returns
+        # None — the position it is a ratio of no longer exists. Without this the history series
+        # breaks at exactly the bar the policy acted on, and a figure plotting it shows the
+        # multiple topping out at whatever the PREVIOUS bar reached (3.73x across Lehman) rather
+        # than the 5.26x the rule actually took. Cleared at the top of every propose.
+        self._monetise_readout = None
         # Bar the rule went flat on, for max_flat_bars. None while hedged.
         self._flat_since_bar = None
         # Running peak of the underlying, for the drawdown trigger. Tracked from the rule's first
@@ -325,6 +333,8 @@ class OptionOverlayRule(RebalanceRule):
         # Remembered so hooks called from inside propose (the collar's _on_roll) can stamp events.
         self._ts = ts
         self._closing, self._opening = [], []
+        # Last bar's decision read-out must not leak into this one.
+        self._monetise_readout = None
         spot = prices.get(self.underlying)
         # Gate 1: no spot, no decision. Never strike or settle off a missing mark.
         if spot is None or not np.isfinite(spot) or spot <= 0:
@@ -466,6 +476,9 @@ class OptionOverlayRule(RebalanceRule):
         if units_closed > 0:
             self._on_roll(spot, closed_value, 0.0, units_closed, book, deltas)
 
+        # Stashed BEFORE _long_premium is zeroed below, so the history row for this bar carries
+        # the numbers the decision was made on rather than the numbers left behind by it.
+        self._monetise_readout = {"drawdown": depth, "multiple": mult}
         self._state = "FLAT"
         self._flat_since_bar = self._bar
         self._long_premium = 0.0
@@ -581,8 +594,13 @@ class OptionOverlayRule(RebalanceRule):
                 # bars something happened, because the figure needs the whole path to show the
                 # ribbon and the threshold crossings.
                 "state": self._state,
-                "drawdown": self._drawdown_now(spot),
-                "multiple": self._multiple_now(spot),
+                # On a monetise bar these come from the stash — the values the trigger fired on.
+                # On every other bar they are computed live. `or {}` rather than a branch so the
+                # common path stays one expression.
+                "drawdown": (self._monetise_readout or {}).get(
+                    "drawdown", self._drawdown_now(spot)),
+                "multiple": (self._monetise_readout or {}).get(
+                    "multiple", self._multiple_now(spot)),
                 "iv": self._iv_now() if self.vol_mode == "v2" else None,
                 # The re-entry gate's own verdict, recorded beside the IV it was computed from.
                 # The gate is a comparison between a LEVEL and a SERIES, and reading the two

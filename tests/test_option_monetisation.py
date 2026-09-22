@@ -540,3 +540,39 @@ def test_every_event_carries_the_drawdown_and_the_iv_that_decided_it():
     # against the preceding monetise's depth IS the 2026-09-21 fix, visible on the blotter.
     for e in _events(rule, "reopen"):
         assert e["drawdown"] == pytest.approx(0.0)
+
+
+def test_the_monetise_bar_records_the_multiple_the_trigger_fired_on():
+    """The series a figure plots must agree with the event log on the bar that matters.
+
+    The monetise branch clears _legs and zeroes _long_premium, so by the time synthetic_marks
+    writes the bar's history row, _multiple_now returns None — the position it is a ratio of is
+    gone. The read-out is therefore stashed at the decision and preferred here, otherwise the
+    multiple series breaks at exactly the bar the policy acted on and a panel plotting it tops
+    out at whatever the PREVIOUS bar reached.
+    """
+    rule, _ = _gfc_shaped_rule()
+    monetisations = _events(rule, "monetise")
+    assert monetisations, "the fixture must monetise or it proves nothing"
+    for e in monetisations:
+        row = rule.history[e["bar"]]
+        assert row["multiple"] == pytest.approx(e["multiple"]), (
+            f"bar {e['bar']}: event says {e['multiple']}, history says {row['multiple']}")
+        assert row["drawdown"] == pytest.approx(e["drawdown"])
+        # And it must be a real ratio, not the None that _multiple_now would return post-close.
+        assert row["multiple"] is not None and row["multiple"] > 0
+
+
+def test_the_decision_readout_does_not_leak_into_the_following_bar():
+    # The stash is cleared at the top of every propose. If it were not, every bar after a
+    # monetise would report that monetise's drawdown and multiple for the rest of the run.
+    rule, _ = _gfc_shaped_rule()
+    monetise_bars = [e["bar"] for e in _events(rule, "monetise")]
+    assert monetise_bars
+    for b in monetise_bars:
+        nxt = rule.history.get(b + 1)
+        if nxt is None:
+            continue
+        # The bar after a monetise is FLAT: no legs, so no premium, so no ratio.
+        assert nxt["state"] == "FLAT"
+        assert nxt["multiple"] is None, "the monetise bar's multiple leaked forward"

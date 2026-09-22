@@ -161,7 +161,7 @@ _EVENT_STYLE = {
 }
 
 
-def fig_ladder(state, blotter, history, title="", reentry_iv=None):
+def fig_ladder(state, blotter, history, title="", reentry_iv=None, monetise_multiple=None):
     """SPY and strategy equity rebased to the window's first bar, with every fill marked.
 
     Four things have to be readable off ONE picture, which is why they are not four figures:
@@ -176,8 +176,18 @@ def fig_ladder(state, blotter, history, title="", reentry_iv=None):
     shown "the gate is nearly always open" at a glance. The lower panel shares the upper's
     x-axis, so a monetise marker lines up vertically with the vol that permitted it.
 
-    ``reentry_iv`` is optional: pass the rung's level to draw the gate, omit it on a rung that
-    arms no gate and the panel shows the IV path alone.
+    And a SIXTH, which is the point of the whole exercise rather than a diagnostic: the long
+    legs' value as a MULTIPLE OF THE PREMIUM PAID, in the middle panel. Finding 7 is the case
+    where a put reached 1.97x and expired worthless; this panel is that ratio through time, so
+    "the policy monetised at 5.3x" is read off a curve rather than taken on trust from a table.
+    A reader can check a marker's hover against the series underneath it at the same x.
+
+    Three panels, one shared x-axis, in the order a question is actually asked: what did the
+    strategy do (equity), was the hedge worth anything when it acted (multiple), and was
+    insurance cheap enough to replace (iv).
+
+    ``reentry_iv`` and ``monetise_multiple`` are optional: pass the rung's levels to draw the
+    gates, omit them on a rung that arms none and the panels show the paths alone.
     """
     # ------------------------------------------------------------------------
     # REBASE both series to 1.0 at the window's first bar. Without this, equity (which starts at
@@ -188,12 +198,16 @@ def fig_ladder(state, blotter, history, title="", reentry_iv=None):
     spot_rb = spot / float(spot.iloc[0])
     eq_rb = state["equity"] / float(state["equity"].iloc[0])
 
-    # Two rows, ONE shared x-axis. row_heights favours the equity panel 7:3 — the IV panel is
-    # read as context for a marker above it, never on its own, so it needs to be legible rather
-    # than large. shared_xaxes couples the zoom, which is what makes "line up the monetise with
-    # the vol" a physical act rather than an act of memory.
-    fig = make_subplots(rows=2, cols=1, shared_xaxes=True,
-                        row_heights=[0.7, 0.3], vertical_spacing=0.06)
+    # Three rows, ONE shared x-axis. row_heights favours the equity panel — the lower two are
+    # read as context for a marker above them, never on their own, so they need to be legible
+    # rather than large. shared_xaxes couples the zoom, which is what makes "line up the
+    # monetise with the multiple it fired at and the vol that let it back in" a physical act
+    # rather than an act of memory.
+    fig = make_subplots(rows=3, cols=1, shared_xaxes=True,
+                        row_heights=[0.52, 0.24, 0.24], vertical_spacing=0.05,
+                        subplot_titles=("equity and the market",
+                                        "long-leg value as a multiple of premium paid",
+                                        "implied vol and the re-entry gate"))
     fig.add_trace(go.Scatter(
         x=spot_rb.index, y=spot_rb.to_numpy(), name=f"{UNDERLYING} (rebased)",
         line=dict(color=theme.CATEGORICAL[0], width=1.6),
@@ -253,7 +267,55 @@ def fig_ladder(state, blotter, history, title="", reentry_iv=None):
                 "<extra></extra>")), row=1, col=1)
 
     # ------------------------------------------------------------------------
-    # PANEL 2 — THE RE-ENTRY GATE, 13-01.1's finding 3. The IV the rule actually priced and
+    # PANEL 2 — WHAT THE HEDGE WAS WORTH, as a multiple of what it cost. This is the panel that
+    # turns the policy from an assertion into something checkable: a monetise marker in panel 1
+    # is a dot, but the same bar read against this curve says "it closed at 5.3x premium".
+    #
+    # The series is the rule's own `multiple` (_long_value / _long_premium), NOT recomputed
+    # here. Recomputing would let the figure and the trigger disagree about the one number the
+    # trigger fires on — and a figure that disagrees with the thing it depicts is worse than no
+    # figure. It is None while FLAT (no premium has been paid, so the ratio is undefined rather
+    # than zero), which plots as a GAP: the breaks in this curve are the unhedged stretches, and
+    # they should line up with the FLAT band in the panel below.
+    # ------------------------------------------------------------------------
+    mult_path = pd.to_numeric(history["multiple"], errors="coerce") if "multiple" in history \
+        else None
+    if mult_path is not None and mult_path.notna().any():
+        fig.add_trace(go.Scatter(
+            x=mult_path.index, y=mult_path.to_numpy(), name="value / premium",
+            line=dict(color=theme.CATEGORICAL[5], width=1.5), connectgaps=False,
+            hovertemplate="%{x|%Y-%m-%d}<br>%{y:.2f}x premium<extra></extra>"), row=2, col=1)
+        # BREAK-EVEN. Above this line the legs are worth more than they cost; below it the
+        # premium is not yet earned back. Drawn on every rung because it is a property of the
+        # ratio, not of any configuration's parameters.
+        fig.add_hline(y=1.0, row=2, col=1,
+                      line=dict(color=theme.INK, width=1.0, dash="dash"),
+                      annotation_text="break-even (1.0x)", annotation_position="top left")
+        # The multiple TRIGGER level, where one is armed. On a drawdown-triggered rung this is
+        # absent by design: drawing a threshold the rung never tested would invite the reader to
+        # explain the marks with a rule that was not running.
+        if monetise_multiple is not None:
+            fig.add_hline(y=float(monetise_multiple), row=2, col=1,
+                          line=dict(color=theme.CATEGORICAL[4], width=1.2, dash="dot"),
+                          annotation_text=f"monetise_multiple {float(monetise_multiple):.2f}x",
+                          annotation_position="bottom left")
+        # The monetise bars marked ON this curve as well as on equity. The question this panel
+        # answers is "how far above its cost was the hedge when the policy took the money", and
+        # that is a point on this line, not on the equity line above.
+        mon = events[events["event"] == MONETISE] if len(events) else events
+        if len(mon):
+            mts = pd.DatetimeIndex(mon["ts"])
+            fig.add_trace(go.Scatter(
+                x=mts, y=mult_path.reindex(mts).to_numpy(), mode="markers",
+                name="monetised at", showlegend=False,
+                marker=dict(color=_EVENT_STYLE[MONETISE]["colour"],
+                            symbol=_EVENT_STYLE[MONETISE]["symbol"], size=9,
+                            line=dict(color=theme.INK, width=0.6)),
+                hovertemplate="monetised %{x|%Y-%m-%d}<br>%{y:.2f}x premium<extra></extra>"),
+                row=2, col=1)
+
+    # ------------------------------------------------------------------------
+    # PANEL 3 — THE RE-ENTRY GATE, 13-01.1's finding 3. The IV the rule actually priced and
     # decided with, taken from the rule's own history rather than re-read from the IV parquet:
     # a panel drawn from a different source than the rule used could disagree with it, and a
     # figure that disagrees with the thing it depicts is worse than no figure.
@@ -263,7 +325,7 @@ def fig_ladder(state, blotter, history, title="", reentry_iv=None):
         fig.add_trace(go.Scatter(
             x=iv_path.index, y=iv_path.to_numpy(), name="real IV",
             line=dict(color=theme.CATEGORICAL[2], width=1.4),
-            hovertemplate="%{x|%Y-%m-%d}<br>iv %{y:.3f}<extra></extra>"), row=2, col=1)
+            hovertemplate="%{x|%Y-%m-%d}<br>iv %{y:.3f}<extra></extra>"), row=3, col=1)
 
         # The FLAT stretches, drawn as a filled band across the IV panel. This is the answer to
         # "why is it not hedged here", and it has to be a REGION rather than two markers: the
@@ -279,12 +341,12 @@ def fig_ladder(state, blotter, history, title="", reentry_iv=None):
                 x=iv_path.index, y=band, name="FLAT (unhedged)",
                 mode="lines", line=dict(color=theme.CATEGORICAL[3], width=6),
                 opacity=0.35, connectgaps=False,
-                hovertemplate="%{x|%Y-%m-%d}<br>unhedged<extra></extra>"), row=2, col=1)
+                hovertemplate="%{x|%Y-%m-%d}<br>unhedged<extra></extra>"), row=3, col=1)
 
         # The gate LEVEL. Drawn only when one is armed — a dashed line at a level the rung never
         # tested would invite the reader to explain the path with a rule that was not running.
         if reentry_iv is not None:
-            fig.add_hline(y=float(reentry_iv), row=2, col=1,
+            fig.add_hline(y=float(reentry_iv), row=3, col=1,
                           line=dict(color=theme.CATEGORICAL[4], width=1.2, dash="dot"),
                           annotation_text=f"reentry_iv {float(reentry_iv):.3f}",
                           annotation_position="top left")
@@ -294,8 +356,13 @@ def fig_ladder(state, blotter, history, title="", reentry_iv=None):
         hovermode="closest",
         legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0))
     fig.update_yaxes(title_text="rebased to window start (1.0)", row=1, col=1)
-    fig.update_yaxes(title_text="implied vol", row=2, col=1)
-    fig.update_xaxes(title_text=None, row=2, col=1)
+    fig.update_yaxes(title_text="x premium paid", row=2, col=1)
+    fig.update_yaxes(title_text="implied vol", row=3, col=1)
+    fig.update_xaxes(title_text=None, row=3, col=1)
+    # Subplot titles are annotations, so they do not inherit the axis font. Sized down here so
+    # they read as panel labels rather than three competing headlines under the real title.
+    for ann in fig.layout.annotations:
+        ann.font.size = 11
     # Ink and grid applied inline, backgrounds left transparent — the standing convention, so the
     # figure reads correctly in the interactive window without baking a dark template into it.
     _inline_theme(fig)
