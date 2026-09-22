@@ -28,6 +28,7 @@ import time
 import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
+from plotly.subplots import make_subplots
 
 from portutils.portfolio.book import Book
 from portutils.portfolio.narrow_ledger import NarrowLedger
@@ -160,13 +161,23 @@ _EVENT_STYLE = {
 }
 
 
-def fig_ladder(state, blotter, history, title=""):
+def fig_ladder(state, blotter, history, title="", reentry_iv=None):
     """SPY and strategy equity rebased to the window's first bar, with every fill marked.
 
     Four things have to be readable off ONE picture, which is why they are not four figures:
     what the strategy earned, what the market did, WHEN the hedge traded, and what the rule was
     thinking on the bar it traded. The first two are lines, the third is the markers, and the
     fourth is the hovertemplate.
+
+    A FIFTH thing needs a panel of its own (13-01.1 finding 3). The re-entry gate is a
+    comparison between a LEVEL (``reentry_iv``) and a SERIES (the real IV path), and a
+    comparison is a picture, not a tooltip: the monetise/reopen thrash was diagnosed by reading
+    fifteen hover boxes one at a time, when ``reentry_iv`` drawn across the IV path would have
+    shown "the gate is nearly always open" at a glance. The lower panel shares the upper's
+    x-axis, so a monetise marker lines up vertically with the vol that permitted it.
+
+    ``reentry_iv`` is optional: pass the rung's level to draw the gate, omit it on a rung that
+    arms no gate and the panel shows the IV path alone.
     """
     # ------------------------------------------------------------------------
     # REBASE both series to 1.0 at the window's first bar. Without this, equity (which starts at
@@ -177,15 +188,20 @@ def fig_ladder(state, blotter, history, title=""):
     spot_rb = spot / float(spot.iloc[0])
     eq_rb = state["equity"] / float(state["equity"].iloc[0])
 
-    fig = go.Figure()
+    # Two rows, ONE shared x-axis. row_heights favours the equity panel 7:3 — the IV panel is
+    # read as context for a marker above it, never on its own, so it needs to be legible rather
+    # than large. shared_xaxes couples the zoom, which is what makes "line up the monetise with
+    # the vol" a physical act rather than an act of memory.
+    fig = make_subplots(rows=2, cols=1, shared_xaxes=True,
+                        row_heights=[0.7, 0.3], vertical_spacing=0.06)
     fig.add_trace(go.Scatter(
         x=spot_rb.index, y=spot_rb.to_numpy(), name=f"{UNDERLYING} (rebased)",
         line=dict(color=theme.CATEGORICAL[0], width=1.6),
-        hovertemplate="%{x|%Y-%m-%d}<br>SPY %{y:.3f}<extra></extra>"))
+        hovertemplate="%{x|%Y-%m-%d}<br>SPY %{y:.3f}<extra></extra>"), row=1, col=1)
     fig.add_trace(go.Scatter(
         x=eq_rb.index, y=eq_rb.to_numpy(), name="hedged equity (rebased)",
         line=dict(color=theme.CATEGORICAL[1], width=1.8),
-        hovertemplate="%{x|%Y-%m-%d}<br>equity %{y:.3f}<extra></extra>"))
+        hovertemplate="%{x|%Y-%m-%d}<br>equity %{y:.3f}<extra></extra>"), row=1, col=1)
 
     # ------------------------------------------------------------------------
     # THE MARKERS. Classified through scoring.classify_option_events — the SHARED definition, so
@@ -206,9 +222,12 @@ def fig_ladder(state, blotter, history, title=""):
         # THE HOVERTEXT is the whole point of persisting the rule history alongside the blotter.
         # Without it a marker is a dot on a line; with it the same dot reads "monetised at an
         # 11.4% drawdown with IV at 0.41", which is what makes a rung inspectable at all.
-        # `reindex` rather than a join: an event bar always has a history row (the rule only
-        # trades on bars where it holds legs), but reindex degrades to NaN instead of dropping
-        # the marker if that ever stops being true.
+        # `reindex` rather than a join: every bar has a history row, so an event bar always
+        # resolves — but reindex degrades to NaN instead of dropping the marker if that ever
+        # stops being true. It did once: until 2026-09-22 the rule recorded history only on bars
+        # holding legs, so the MONETISE bar (which clears its legs before the record runs) had
+        # no row and these markers hovered "drawdown NaN, iv NaN" — on exactly the events the
+        # figure exists to explain.
         # ----------------------------------------------------------------
         h = history.reindex(ts) if len(history) else pd.DataFrame(index=ts)
         custom = np.column_stack([
@@ -231,13 +250,52 @@ def fig_ladder(state, blotter, history, title=""):
                 "drawdown %{customdata[5]:.1%}<br>"
                 "multiple %{customdata[6]:.2f}x<br>"
                 "iv %{customdata[7]:.3f}"
-                "<extra></extra>")))
+                "<extra></extra>")), row=1, col=1)
+
+    # ------------------------------------------------------------------------
+    # PANEL 2 — THE RE-ENTRY GATE, 13-01.1's finding 3. The IV the rule actually priced and
+    # decided with, taken from the rule's own history rather than re-read from the IV parquet:
+    # a panel drawn from a different source than the rule used could disagree with it, and a
+    # figure that disagrees with the thing it depicts is worse than no figure.
+    # ------------------------------------------------------------------------
+    iv_path = pd.to_numeric(history["iv"], errors="coerce") if "iv" in history else None
+    if iv_path is not None and iv_path.notna().any():
+        fig.add_trace(go.Scatter(
+            x=iv_path.index, y=iv_path.to_numpy(), name="real IV",
+            line=dict(color=theme.CATEGORICAL[2], width=1.4),
+            hovertemplate="%{x|%Y-%m-%d}<br>iv %{y:.3f}<extra></extra>"), row=2, col=1)
+
+        # The FLAT stretches, drawn as a filled band across the IV panel. This is the answer to
+        # "why is it not hedged here", and it has to be a REGION rather than two markers: the
+        # eye reads a shaded span as a duration, which is what a wait is.
+        if "state" in history:
+            flat = (history["state"] == "FLAT").to_numpy()
+            lo, hi = float(np.nanmin(iv_path)), float(np.nanmax(iv_path))
+            # Plotted as a masked series at the panel's top edge rather than as N shapes: one
+            # trace with NaN gaps costs one legend entry and one draw, where a shape per stretch
+            # would add an unbounded number of layout objects on a 5,201-bar run.
+            band = np.where(flat, hi, np.nan)
+            fig.add_trace(go.Scatter(
+                x=iv_path.index, y=band, name="FLAT (unhedged)",
+                mode="lines", line=dict(color=theme.CATEGORICAL[3], width=6),
+                opacity=0.35, connectgaps=False,
+                hovertemplate="%{x|%Y-%m-%d}<br>unhedged<extra></extra>"), row=2, col=1)
+
+        # The gate LEVEL. Drawn only when one is armed — a dashed line at a level the rung never
+        # tested would invite the reader to explain the path with a rule that was not running.
+        if reentry_iv is not None:
+            fig.add_hline(y=float(reentry_iv), row=2, col=1,
+                          line=dict(color=theme.CATEGORICAL[4], width=1.2, dash="dot"),
+                          annotation_text=f"reentry_iv {float(reentry_iv):.3f}",
+                          annotation_position="top left")
 
     fig.update_layout(
         title=title or "Option ladder probe — every fill marked",
-        xaxis_title=None, yaxis_title="rebased to window start (1.0)",
         hovermode="closest",
         legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0))
+    fig.update_yaxes(title_text="rebased to window start (1.0)", row=1, col=1)
+    fig.update_yaxes(title_text="implied vol", row=2, col=1)
+    fig.update_xaxes(title_text=None, row=2, col=1)
     # Ink and grid applied inline, backgrounds left transparent — the standing convention, so the
     # figure reads correctly in the interactive window without baking a dark template into it.
     _inline_theme(fig)

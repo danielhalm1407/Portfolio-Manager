@@ -463,3 +463,80 @@ def test_gate_rolls_delays_an_ordinary_expiry_roll():
 
     assert len(_events(ungated, "open")) > len(_events(gated, "open")), \
         "gate_rolls did not delay any roll"
+
+
+# ============================================================================
+# THE DECISION RECORD — history on every bar, and the two numbers on every event
+# 13-01.1 finding 3's underlying cause. The probe figure reads its hovertext from
+# rule.history, and until 2026-09-22 that dict was written under `if self._legs:`
+# — so the MONETISE bar (whose branch clears the legs before the record runs) and
+# every FLAT bar of the wait had no row at all. The markers the figure exists to
+# explain hovered "drawdown NaN, iv NaN", and there was no IV path across the
+# unhedged stretch to compare against the re-entry gate.
+# ============================================================================
+
+def _gfc_shaped_rule():
+    """A configuration that monetises, waits out a forced flat stretch, and reopens."""
+    spot_path = _flat_then_fall(5, 80, start=100.0, end=55.0)
+    iv = pd.Series(0.40, index=spot_path.index)   # pinned above the gate: every reopen forced
+    rule = ProtectivePutRule(floor=0.90, underlying=UNDERLYING, reset_bars=63,
+                             monetise_drawdown=0.10, reentry_iv=0.15, max_flat_bars=10,
+                             vol_mode="v2", iv_series=iv)
+    _run(rule, spot_path)
+    return rule, spot_path
+
+
+def test_history_covers_every_bar_including_the_monetise_and_the_wait():
+    rule, spot_path = _gfc_shaped_rule()
+    assert len(rule.history) == len(spot_path), (
+        f"history has {len(rule.history)} rows for {len(spot_path)} bars")
+
+    monetise_bars = [e["bar"] for e in _events(rule, "monetise")]
+    assert monetise_bars, "the fixture must monetise or it proves nothing"
+    # The specific bars that used to be missing: the monetise itself, and the flat stretch after.
+    for b in monetise_bars:
+        assert b in rule.history, f"no history row on monetise bar {b}"
+        assert rule.history[b]["state"] == "FLAT"
+
+    flat_rows = [h for h in rule.history.values() if h["state"] == "FLAT"]
+    assert flat_rows, "the fixture must spend bars FLAT"
+    # drawdown and iv are the two numbers the figure and the blotter are read for. They must be
+    # present THROUGH the wait, not just where legs happen to be held.
+    assert all(h["drawdown"] is not None for h in flat_rows)
+    assert all(h["iv"] is not None for h in flat_rows)
+    # The leg-dependent fields degrade to 0.0 rather than vanishing, so the frame keeps one
+    # schema and a consumer never branches on whether a row exists.
+    assert all(h["net_value"] == 0.0 and h["net_premium"] == 0.0 for h in flat_rows)
+
+
+def test_the_gate_verdict_is_recorded_beside_the_iv_it_was_computed_from():
+    # The re-entry gate is a comparison between a LEVEL and a SERIES. Persisting only `iv` left
+    # every reader to re-derive the verdict — and re-deriving it with a different rounding or a
+    # different window is how a figure comes to disagree with the rule it depicts.
+    rule, _ = _gfc_shaped_rule()
+    flat_rows = [h for h in rule.history.values() if h["state"] == "FLAT"]
+    assert flat_rows
+    assert all(isinstance(h["gate_open"], bool) for h in flat_rows)
+    # IV is pinned at 0.40 against a 0.15 gate, so it is shut for the whole wait and every
+    # reopen in this fixture is forced by max_flat_bars.
+    assert not any(h["gate_open"] for h in flat_rows)
+    assert all(e["forced"] for e in _events(rule, "reopen"))
+    # While HEDGED the gate is not consulted, and a True/False there would read as a decision
+    # the rule never made.
+    assert all(h["gate_open"] is None
+               for h in rule.history.values() if h["state"] == "HEDGED")
+
+
+def test_every_event_carries_the_drawdown_and_the_iv_that_decided_it():
+    # A fill is only explainable beside the state that produced it. Rolls needed this as much as
+    # monetisations: a roll is what happens when the trigger did NOT fire, so without the depth
+    # it was tested against, "why did this roll rather than monetise" has no answer on the row.
+    rule, _ = _gfc_shaped_rule()
+    assert rule.events
+    for e in rule.events:
+        assert e.get("drawdown") is not None, f"{e['action']}/{e['reason']} has no drawdown"
+        assert e.get("iv") is not None, f"{e['action']}/{e['reason']} has no iv"
+    # A reopen's drawdown is 0.0 by construction — the reference restarts there. That zero read
+    # against the preceding monetise's depth IS the 2026-09-21 fix, visible on the blotter.
+    for e in _events(rule, "reopen"):
+        assert e["drawdown"] == pytest.approx(0.0)

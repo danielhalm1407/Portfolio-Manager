@@ -74,6 +74,9 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 PRICE_HISTORY = PROJECT_ROOT / "data" / "processed" / "prices_long_history.parquet"
 OUT_DIR = PROJECT_ROOT / "outputs" / "option_monetisation"
 SERIES_DIR = OUT_DIR / "series"
+# The decision record, one file per configuration. Kept beside the per-bar series rather than
+# inside it because it is a different SHAPE: one row per fill, not one row per bar.
+BLOTTER_DIR = OUT_DIR / "blotter"
 
 # 63 bars, the same quarterly cadence every prior plan used. Held FIXED here: tenor is a third
 # sweep axis and it belongs to a later plan, not to the engine's demonstration run.
@@ -326,9 +329,10 @@ def main():
           f"max flat {ILLUSTRATIVE_MAX_FLAT} bars\n")
 
     SERIES_DIR.mkdir(parents=True, exist_ok=True)
+    BLOTTER_DIR.mkdir(parents=True, exist_ok=True)
     rows, states, first_elapsed = [], {}, None
     for name, rule in configs.items():
-        state, _sim, elapsed = run_one(name, rule, spot)
+        state, sim, elapsed = run_one(name, rule, spot)
         if first_elapsed is None:
             first_elapsed = elapsed
             # Printed FIRST and recorded in the SUMMARY: 13-02 sizes its grid from this number
@@ -342,14 +346,46 @@ def main():
         # The artefact 13-02 and 13-03 consume. A time series, not a summary row: window
         # drawdowns are recomputed from this by slicing, never recovered from an aggregate.
         out = state[["equity"]].copy()
+        # PER-BAR RETURN of the strategy, not only its level. This is the sliceable quantity:
+        # a window's return compounds from a slice of this column, and equity itself is
+        # recoverable as (1 + ret).cumprod() times the starting capital, so the level is kept
+        # only to spare later consumers the float drift of re-compounding 5,201 bars. The first
+        # bar is 0.0, not NaN — there is no prior bar to have earned a return against, and a NaN
+        # there silently poisons any cumprod a consumer writes.
+        out["ret"] = out["equity"].pct_change().fillna(0.0)
+        # The MAIN INDEX SERIES, so the strategy is always readable against the thing it hedges
+        # without reopening the price parquet and re-aligning it.
         out["spot"] = spot.reindex(out.index)
+        out["spot_ret"] = out["spot"].pct_change().fillna(0.0)
         if rule is not None and rule.history:
             hist = pd.DataFrame(rule.history).T.set_index(pd.to_datetime(
                 [h["ts"] for h in rule.history.values()]))
-            for col in ("state", "drawdown", "multiple", "iv", "net_value", "net_premium"):
+            # gate_open and flat_bars join the read-outs: the re-entry gate is a comparison
+            # between a LEVEL and a SERIES, and persisting only `iv` left the reader to
+            # re-derive the verdict. Since 2026-09-22 the rule records a row on EVERY bar,
+            # including the flat ones, so these columns now cover the wait rather than
+            # stopping at the monetise.
+            for col in ("state", "drawdown", "multiple", "iv", "gate_open", "flat_bars",
+                        "net_value", "net_premium"):
                 if col in hist:
                     out[col] = hist[col].reindex(out.index)
         out.to_parquet(SERIES_DIR / f"{name}.parquet")
+
+        # THE BLOTTER — every fill the rule made, with the two numbers that decided it. The
+        # rule's own event log is used rather than sim.blotter() because it is strictly richer
+        # on exactly the axis that matters here: it carries the REASON (roll / monetise /
+        # reopen), the trigger that fired, and the drawdown and iv as they stood on that bar.
+        # sim.blotter() is the book's view — it knows a leg traded, not why.
+        if rule is not None and rule.events:
+            blot = rule.events_frame()
+            if rule.history:
+                # The per-bar state the event log does not carry: which state the rule was in
+                # after the bar, whether the gate was open, and how long it had been waiting.
+                hist_by_bar = pd.DataFrame(rule.history).T.set_index("bar")
+                for col in ("state", "gate_open", "flat_bars"):
+                    if col in hist_by_bar and col not in blot:
+                        blot[col] = blot["bar"].map(hist_by_bar[col])
+            blot.to_csv(BLOTTER_DIR / f"{name}.csv", index=False)
 
     table = pd.DataFrame(rows).set_index("configuration")
     pd.set_option("display.width", 200, "display.max_columns", 50)
@@ -381,7 +417,7 @@ def main():
 
     print(f"\nwritten: {OUT_DIR}")
     print("  comparison_table.csv, trigger_events.csv, "
-          f"{fig_name}.html, series/*.parquet ({len(configs)} files)")
+          f"{fig_name}.html, series/*.parquet and blotter/*.csv ({len(configs)} each)")
     print("\nREMINDER: every number above is IN-SAMPLE and every threshold was hand-picked.")
     print("The best-looking row is NOT a finding. 13-02 runs the grid properly.")
     return table

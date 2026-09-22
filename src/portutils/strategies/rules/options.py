@@ -380,8 +380,16 @@ class OptionOverlayRule(RebalanceRule):
             # Net settlement per unit hedged: long legs add, short legs subtract.
             closed_value += np.sign(qty) * px
             units_closed = max(units_closed, abs(qty))
+            # drawdown and iv stamped on the ROLL legs too, not only the monetise ones. A roll
+            # is the decision the policy makes by DEFAULT — it is what happens when the trigger
+            # did not fire — so the depth the trigger was tested against and the vol the
+            # replacement is struck into are exactly what a reader needs to see beside it. Without
+            # them a roll row and a monetise row are not comparable, and the question "why did
+            # this roll rather than monetise" has no answer on the blotter.
             self._log(ts, "close", leg.symbol, -qty, px, "roll", strike=leg.strike,
-                      premium=entry["premium"], pnl_per_unit=np.sign(qty) * (px - entry["premium"]))
+                      premium=entry["premium"], pnl_per_unit=np.sign(qty) * (px - entry["premium"]),
+                      drawdown=self._drawdown_now(spot), multiple=self._multiple_now(spot),
+                      iv=self._iv_now() if self.vol_mode == "v2" else None)
         self._legs = []
 
         # --- 2. Strike the replacement legs off the CURRENT spot. ---------------------------
@@ -400,7 +408,9 @@ class OptionOverlayRule(RebalanceRule):
             deltas[leg.symbol] = deltas.get(leg.symbol, 0.0) + entry["qty"]
             self._opening.append((leg, entry["premium"]))
             self._log(ts, "open", leg.symbol, entry["qty"], entry["premium"], "roll",
-                      strike=leg.strike, premium=entry["premium"], pnl_per_unit=0.0)
+                      strike=leg.strike, premium=entry["premium"], pnl_per_unit=0.0,
+                      drawdown=self._drawdown_now(spot),
+                      iv=self._iv_now() if self.vol_mode == "v2" else None)
         self._legs = new_legs
         self._period_start_bar, self._period_start_spot = self._bar, spot
         # What this period's LONG legs cost, for the multiple trigger. Recorded here, at the one
@@ -484,9 +494,14 @@ class OptionOverlayRule(RebalanceRule):
             leg = entry["leg"]
             deltas[leg.symbol] = deltas.get(leg.symbol, 0.0) + entry["qty"]
             self._opening.append((leg, entry["premium"]))
+            # drawdown stamped alongside iv: an open is a DECISION, and the two numbers that
+            # decided it are the depth the market is at and the vol the leg was struck into.
+            # Reading them off the blotter row is what makes a fill explainable without
+            # cross-referencing a second frame by timestamp.
             self._log(ts, "open", leg.symbol, entry["qty"], entry["premium"], "reopen",
                       strike=leg.strike, premium=entry["premium"], pnl_per_unit=0.0,
-                      flat_bars=flat_bars, forced=forced, iv=iv_now)
+                      flat_bars=flat_bars, forced=forced, iv=iv_now,
+                      drawdown=self._drawdown_now(spot))
         self._legs = new_legs
         # A NEW period starts here, so the next roll is reset_bars from THIS bar, not from
         # whenever the monetised period began.
@@ -510,7 +525,12 @@ class OptionOverlayRule(RebalanceRule):
         self._state = "HEDGED"
         self._flat_since_bar = None
         self._log(ts, "reopen", self.underlying, 0.0, spot, "reopen",
-                  flat_bars=flat_bars, forced=forced, iv=iv_now)
+                  flat_bars=flat_bars, forced=forced, iv=iv_now,
+                  # Stamped AFTER the _peak reset above, deliberately: this is the drawdown the
+                  # NEW hedge starts from, which is 0.0 by construction. That zero is the point —
+                  # read against the preceding monetise row's depth, it shows the reference
+                  # restarting, which is the whole mechanism of the 2026-09-21 fix.
+                  drawdown=self._drawdown_now(spot))
         return deltas
 
     def synthetic_marks(self, ts, prices, book):
@@ -528,14 +548,29 @@ class OptionOverlayRule(RebalanceRule):
 
         # Record the position's value for the figures. Everything is PER UNIT HEDGED and NET of
         # long/short: a put spread's value is the long put minus the short put.
-        if self._legs:
-            self.history[self._bar] = {
+        #
+        # Recorded on EVERY bar, including the ones holding no legs. It used to be guarded by
+        # `if self._legs:`, which silently dropped exactly the bars a reader needs most: the
+        # MONETISE bar (the branch sets self._legs = [] before this runs, so the bar the rule
+        # made its decision on had no row at all, and fig_ladder's hover showed NaN drawdown and
+        # NaN iv on the monetise markers) and every FLAT bar of the wait (so there was no IV path
+        # to compare against the re-entry gate — the one comparison that explains why the rule is
+        # still unhedged). 13-01.1 diagnosed the thrash by reading fifteen tooltips one at a time
+        # precisely because this gap hid the rest.
+        #
+        # The leg-dependent fields degrade to 0.0 rather than being omitted, so the frame has one
+        # stable schema for every bar and a consumer never has to branch on whether a row exists.
+        # 0.0 is the honest value for both: a rule holding no legs has no position value and has
+        # paid no premium for one.
+        self.history[self._bar] = {
                 "bar": self._bar,
                 "ts": self._ts,
                 "period_start_bar": self._period_start_bar,
                 # What the current legs are worth now, and what they cost when struck.
-                "net_value": sum(np.sign(e["qty"]) * marks[e["leg"].symbol] for e in self._legs),
-                "net_premium": sum(np.sign(e["qty"]) * e["premium"] for e in self._legs),
+                "net_value": sum(np.sign(e["qty"]) * marks[e["leg"].symbol]
+                                 for e in self._legs) if self._legs else 0.0,
+                "net_premium": sum(np.sign(e["qty"]) * e["premium"]
+                                   for e in self._legs) if self._legs else 0.0,
                 # On a roll bar only: what the EXPIRING legs settled at, so the figure can show the
                 # period's closing value before the next period restarts at 1.0.
                 "settle_value": (sum(np.sign(q) * px for _, px, q in self._closing)
@@ -549,6 +584,16 @@ class OptionOverlayRule(RebalanceRule):
                 "drawdown": self._drawdown_now(spot),
                 "multiple": self._multiple_now(spot),
                 "iv": self._iv_now() if self.vol_mode == "v2" else None,
+                # The re-entry gate's own verdict, recorded beside the IV it was computed from.
+                # The gate is a comparison between a LEVEL and a SERIES, and reading the two
+                # apart is what made "the gate is nearly always open" invisible for so long.
+                # None while HEDGED, where the gate is not consulted and a True/False would read
+                # as a decision the rule never made.
+                "gate_open": self._gate_open() if self._state == "FLAT" else None,
+                # Bars spent unhedged so far, so max_flat_bars can be read off the same frame as
+                # the gate it overrides.
+                "flat_bars": (self._bar - self._flat_since_bar
+                              if self._flat_since_bar is not None else 0),
             }
         return marks
 
