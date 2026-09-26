@@ -39,7 +39,8 @@ from portutils.strategies.rules.options import (ProtectivePutRule, PutSpreadRule
 from portutils.viz import theme
 
 import portutils.strategies.scoring as scoring
-from portutils.strategies.scoring import MONETISE, OPEN, ROLL, classify_option_events
+from portutils.strategies.scoring import (MONETISE, OPEN, ROLL, classify_option_events,
+                                          classify_option_fills)
 
 # The loaders and the shared carry constants live in 13-01's batch runner and the probe figure
 # module. Imported, never re-derived: a second copy of "which bars are the run window" is a
@@ -47,6 +48,12 @@ from portutils.strategies.scoring import MONETISE, OPEN, ROLL, classify_option_e
 import pipelines.option_monetisation_batch as omb
 from pipelines.option_monetisation_batch import RESET_BARS, load_window
 from pipelines.option_probe_figures import DIV_YIELD, RATE, UNDERLYING, _inline_theme
+
+# The report renderer 10-01 built for the probe write-up, generalised (13-01 amendment,
+# 2026-09-26) to serve THIS write-up too — one implementation, so the heading -> figure guard,
+# the link rewriting and the CSS cannot drift between the two published reports. No cycle: this
+# module imports pipelines.build_report, and build_report never imports this module back.
+from pipelines.build_report import build_report
 
 # %% Reload custom package
 
@@ -56,7 +63,8 @@ from pipelines.option_probe_figures import DIV_YIELD, RATE, UNDERLYING, _inline_
 # actually gets iterated on here; the ledger and the rules underneath it are stable.
 importlib.reload(scoring)
 importlib.reload(omb)
-from portutils.strategies.scoring import MONETISE, OPEN, ROLL, classify_option_events  # noqa: E402
+from portutils.strategies.scoring import (MONETISE, OPEN, ROLL, classify_option_events,  # noqa: E402
+                                          classify_option_fills)
 
 # %% 2. Load the window
 
@@ -357,6 +365,14 @@ def fig_ladder(state, blotter, history, title="", reentry_iv=None, monetise_mult
     fig.update_layout(
         title=title or "Option ladder probe — every fill marked",
         hovermode="closest",
+        # Plotly's default figure height is 450px regardless of row count — it sizes the FIGURE,
+        # not the three panels inside it. Left unset, this 3-row figure rendered with each panel
+        # squeezed into a third of 450px, and the published report then stretches the SAME figure
+        # to ~1600px wide (build_report._CSS's `.figure` rule) while its height stays untouched —
+        # exactly the crunched look flagged on the put-spread panel. `theme.STACKED_FIGURE_HEIGHT`
+        # is the shared table `fig_overlay_values` and `fig_put_paths_market` already read this
+        # from; this is the one stacked figure in the repo that had drifted from it.
+        height=theme.STACKED_FIGURE_HEIGHT[3],
         legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0))
     fig.update_yaxes(title_text="rebased to window start (1.0)", row=1, col=1)
     fig.update_yaxes(title_text="x premium paid", row=2, col=1)
@@ -364,8 +380,12 @@ def fig_ladder(state, blotter, history, title="", reentry_iv=None, monetise_mult
     fig.update_xaxes(title_text=None, row=3, col=1)
     # Subplot titles are annotations, so they do not inherit the axis font. Sized down here so
     # they read as panel labels rather than three competing headlines under the real title.
+    # The COLOUR is set for the same reason: apply_export_theme stamps `font`, `title_font`,
+    # the legend and both axis families, but never annotations — so a panel label left on
+    # Plotly's default near-black would vanish into the dark export surface.
     for ann in fig.layout.annotations:
         ann.font.size = 11
+        ann.font.color = theme.INK
     # Ink and grid applied inline, backgrounds left transparent — the standing convention, so the
     # figure reads correctly in the interactive window without baking a dark template into it.
     _inline_theme(fig)
@@ -496,16 +516,34 @@ print(classify_option_events(blot_d, UNDERLYING)["event"].value_counts().to_stri
 # What the comparison CAN say is whether the mechanism behaves sensibly on a
 # structure that is not a plain long put.
 #
-# Writes one self-contained HTML per configuration plus an index, so the analysis
-# can be opened in a browser without a kernel. include_plotlyjs="cdn" keeps each
-# file at tens of KB rather than the ~3.5 MB an inlined bundle would cost; the
-# pages therefore need a network connection to render.
+# Writes one self-contained HTML per configuration, plus ONE rendered report that embeds all
+# four full-width at the section discussing them — the prose lives in
+# research/validation/option_monetisation_gfc.md and is RENDERED, never retyped, through the same
+# build_report 10-01 built for the probe write-up (13-01 amendment, 2026-09-26). The standalone
+# per-configuration pages stay: opening one by double-clicking the file needs no kernel and no
+# report around it. Every page references the single vendored plotly.min.js at docs/assets/
+# rather than inlining ~3.5 MB per file or pulling the library from a CDN — so the pages are tens
+# of KB AND render with no network connection. (They used to use include_plotlyjs="cdn"; the
+# 2026-09-26 amendment moved the library up to docs/assets/ to be shared with the probing
+# section, at which point depending on a CDN bought nothing.)
 # ============================================================================
 
 # Resolved from the batch pipeline rather than recomputed from __file__: this script is
 # executed cell by cell in a session, where __file__ may not be defined at all, and the
 # batch already owns the one definition of where the project root is.
 DOCS_DIR = omb.PROJECT_ROOT / "docs" / "validation"
+
+# The per-configuration pages sit in a figures/ directory BESIDE the section's index page, the same
+# shape as docs/probing/figures/ — so a section is one unit and a third section is a directory
+# rather than a new layout (13-01 amendment, 2026-09-26).
+FIGURES_DIR = DOCS_DIR / "figures"
+
+# The ONE vendored plotly.min.js at docs/assets/, spelled relative to a page in
+# docs/validation/figures/. Replaces include_plotlyjs="cdn": a page that needs a network connection
+# to draw its own evidence is not a self-contained deliverable, and the library is committed anyway
+# for the probing section. A page written at docs/validation/index.html needs "../assets/..."
+# instead — one level less — which is why this is a constant per output directory and not a global.
+PLOTLY_SRC = "../../assets/plotly.min.js"
 
 # The illustrative policy, one definition shared by every structure below so they cannot drift.
 GFC_POLICY = dict(monetise_drawdown=0.10, reentry_iv=0.18, max_flat_bars=126)
@@ -529,18 +567,202 @@ GFC_CONFIGS = {
         _label="Protective put, BLIND ROLL — no monetisation (the control)"),
 }
 
+# AC-6's blotter artefact, persisted for the GFC-window configurations this script already runs.
+# `outputs/` is gitignored (.gitignore:37) so this is scratch, not a committed deliverable — the
+# COMMITTED evidence is the report's embedded figures; this is what 13-02/13-03 or a later session
+# would read back without re-running the sim. Nested under "gfc/" rather than sharing
+# `omb.BLOTTER_DIR` directly: that constant is the FULL-HISTORY batch's own directory (13-01 Task
+# 3), and the two runs use different window, different capital base and (for three of these four
+# configs) different rule classes — a `protective_put.csv` from one run silently overwriting the
+# other's would be indistinguishable from a real result once written.
+GFC_BLOTTER_DIR = omb.OUT_DIR / "gfc" / "blotter"
 
-def export_gfc_analysis(out_dir=DOCS_DIR, window=GFC, show=False):
+# A single-config FULL-HISTORY smoke test, kept separate from both `GFC_BLOTTER_DIR` above and
+# from `omb.SERIES_DIR`/`omb.BLOTTER_DIR` (the batch's own 7-config named set). Those two already
+# don't collide on filenames with each other or with this — but an ad hoc single-config run is
+# not the batch's canonical AC-6 deliverable, and giving it its own directory means it can never
+# be mistaken for one, however it is later named.
+FULL_OUT_DIR = omb.OUT_DIR / "full"
+FULL_SERIES_DIR = FULL_OUT_DIR / "series"
+FULL_BLOTTER_DIR = FULL_OUT_DIR / "blotter"
+
+# ONE shared, APPENDED log of every measured run — GFC-window and full-history alike. Runtime was
+# previously only ever printed to stdout and lost to terminal scrollback the moment the session
+# ended; this is the retrievable record the user asked for. Appended rather than overwritten: the
+# log's whole point is to answer "how long did X take, and when did we last measure it", which an
+# overwrite would destroy for every row but the last run's.
+RUNTIME_LOG = omb.OUT_DIR / "runtime_log.csv"
+
+
+def _log_runtime(name, window_label, n_bars, elapsed):
+    """Append one measured run to RUNTIME_LOG. See RUNTIME_LOG's own comment for why appended."""
+    row = pd.DataFrame([{
+        "configuration": name,
+        "window": window_label,
+        "bars": n_bars,
+        "elapsed_s": round(elapsed, 4),
+        "ms_per_bar": round(1000 * elapsed / n_bars, 4),
+        # Wall-clock, not the run's own window — this is WHEN it was measured, so a stale
+        # measurement (superseded by a later engine fix) can be told apart from a fresh one
+        # without opening the file and comparing it against git log by hand.
+        "measured_at": pd.Timestamp.now().isoformat(timespec="seconds"),
+    }])
+    RUNTIME_LOG.parent.mkdir(parents=True, exist_ok=True)
+    row.to_csv(RUNTIME_LOG, mode="a", header=not RUNTIME_LOG.exists(), index=False)
+
+
+def export_full_history_probe(name, out_series_dir=FULL_SERIES_DIR,
+                              out_blotter_dir=FULL_BLOTTER_DIR):
+    """Run ONE named GFC_CONFIGS configuration over the FULL real-IV history (2006-01-09 to
+    2026-09-18, ~5,201 bars) and persist it exactly like the GFC window does: series, blotter,
+    and a runtime row. This is deliberately ONE configuration, not the batch's whole named set —
+    a single full-history run costs ~1s (AC-6's own measurement), so running configs one at a
+    time and inspecting each before the next is cheap, where the user has explicitly asked NOT to
+    run the whole batch blind.
+
+    `name` must be a key in GFC_CONFIGS — the SAME config dict the GFC window already runs, so
+    "protective put over the whole window" is provably the same rule, the same floor and the
+    same monetisation policy as the GFC panel already published, with only the window changed.
+    """
+    cfg = dict(GFC_CONFIGS[name])
+    cfg.pop("_label")
+    # No start/end -> run_one slices SPOT_FULL/IV_FULL with `.loc[None:None]`, i.e. the full
+    # window already loaded at import time — the same series rung 3d in this file's cells uses.
+    state, blot, hist, rule, elapsed = run_one(**cfg)
+
+    out_series_dir.mkdir(parents=True, exist_ok=True)
+    out_blotter_dir.mkdir(parents=True, exist_ok=True)
+    # omb.build_series_frame is the SAME join the batch's own named-set run uses — one
+    # implementation, so a full-history series produced here cannot disagree in shape with one
+    # the batch script produces for a different configuration.
+    series = omb.build_series_frame(state, rule, SPOT_FULL.loc[state.index])
+    series.to_parquet(out_series_dir / f"{name}.parquet")
+    # AC-6's own definition of the blotter (sim.blotter()'s shape), matching the GFC blotters
+    # already persisted above rather than the batch script's rule.events_frame() (see that
+    # constant's own note on the two NOT being the same artefact).
+    blot.to_csv(out_blotter_dir / f"{name}.csv", index=False)
+    _log_runtime(name, "full-history", len(state), elapsed)
+
+    print(f"{name} over the full history: {len(state):,} bars, {state.index.min().date()} -> "
+          f"{state.index.max().date()} | {elapsed:.2f}s ({1000 * elapsed / len(state):.2f} ms/bar)")
+    print(f"  series  -> {out_series_dir / f'{name}.parquet'}")
+    print(f"  blotter -> {out_blotter_dir / f'{name}.csv'} ({len(blot)} fills)")
+    print(f"  runtime -> {RUNTIME_LOG}")
+    return series, blot, elapsed
+
+
+def load_persisted_full_run(name, series_dir=FULL_SERIES_DIR, blotter_dir=FULL_BLOTTER_DIR,
+                            runtime_log=RUNTIME_LOG):
+    """Reload one persisted full-history run from disk — NO simulator, no live session state.
+
+    This is the "look back on a persisted artefact" reader: everything it returns comes from the
+    three files `export_full_history_probe` wrote, read fresh. It exists so inspecting a run does
+    not depend on still having the in-memory objects from whenever it was produced — the whole
+    point of persisting is that a LATER session (or a later cell in this one) can read it back.
+
+    Returns ``(series, blot, runtime_row)``:
+      * ``series``      — the joined per-bar frame (equity, ret, spot, spot_ret, and the rule's
+                          own state/drawdown/multiple/iv/gate_open/flat_bars/net_value/
+                          net_premium), exactly `build_series_frame`'s shape
+      * ``blot``         — the bare fill ledger (ts, symbol, side, qty, price, notional)
+      * ``runtime_row``  — the MOST RECENT matching row from RUNTIME_LOG (bars, elapsed_s,
+                          ms_per_bar, measured_at), so a reload always reports how long the run
+                          that produced these files actually took
+
+    `series` alone is enough to redraw the full three-panel figure `fig_ladder` builds for a live
+    run: it carries every column `fig_ladder` reads off `state` (just `equity`) AND every column
+    it reads off `history` (state/drawdown/multiple/iv), because `build_series_frame` is what
+    joined the rule's per-bar history into `state` in the first place. Passing the SAME frame as
+    both `state=` and `history=` reconstructs the identical picture with no re-simulation — see
+    the cell below.
+    """
+    series = pd.read_parquet(series_dir / f"{name}.parquet")
+    blot = pd.read_csv(blotter_dir / f"{name}.csv", parse_dates=["ts"])
+    runtime = pd.read_csv(runtime_log)
+    matches = runtime[(runtime["configuration"] == name) & (runtime["window"] == "full-history")]
+    if len(matches) == 0:
+        raise FileNotFoundError(
+            f"no full-history runtime row logged for {name!r} — was export_full_history_probe "
+            f"ever run for it? (checked {runtime_log})")
+    # LAST match, not first: the log is append-only, so a config run twice (e.g. after an engine
+    # fix) has an earlier, superseded row above a later, current one — the same staleness trap
+    # the 2026-09-20 series files fell into, guarded against here rather than repeated.
+    runtime_row = matches.iloc[-1]
+    return series, blot, runtime_row
+
+
+def premium_financing_summary(blot, underlying=UNDERLYING):
+    """How much of the long leg's premium the short leg financed, averaged across every
+    OPEN/ROLL event in a run — for a TWO-LEG structure (put spread, collar) only.
+
+    `classify_option_events` aggregates a bar's fills together, so its `opened_premium` is the
+    GROSS of both legs and cannot answer "what did the short leg pay for" at all. This uses the
+    per-FILL classification underneath it instead: for these rules an OPENING fill with side=+1
+    is always the long leg (the only way a position moves further from flat on a BUY) and an
+    OPENING fill with side=-1 is always the short leg — see `classify_option_fills`'s own
+    docstring for why that distinction is reliable here.
+
+    Returns ``None`` for a single-leg structure (protective_put, blind_roll_control — no short
+    leg exists to finance anything) or a dict: ``n`` (opening events averaged over),
+    ``long_premium`` (mean $ paid for the long leg per event), ``short_credit`` (mean $ received
+    for the short leg per event), ``pct_financed`` (``short_credit / long_premium``, as a
+    percentage of what the long leg alone would have cost).
+    """
+    fills = classify_option_fills(blot, underlying)
+    opens = fills[fills["opening"]]
+    long_prem = opens.loc[opens["side"] == 1, "notional"]
+    short_prem = opens.loc[opens["side"] == -1, "notional"]
+    if len(long_prem) == 0 or len(short_prem) == 0:
+        return None
+    long_mean = float(long_prem.mean())
+    short_mean = float(short_prem.mean())
+    return {
+        "n": len(long_prem),
+        "long_premium": long_mean,
+        "short_credit": short_mean,
+        "pct_financed": short_mean / long_mean * 100.0,
+    }
+
+
+# The write-up build_report renders, and the heading -> figure map it splices figures into.
+# Headings are the INTERFACE here — a renamed "## Protective put — ..." in the Markdown without
+# the matching update here fails the build (build_report._split_sections), on purpose: a figure
+# under the wrong heading is worse than no figure.
+GFC_WRITE_UP = omb.PROJECT_ROOT / "research" / "validation" / "option_monetisation_gfc.md"
+GFC_FIGURE_AT = {
+    "Protective put":  "protective_put",
+    "Put spread":      "put_spread",
+    "Rolling collar":  "collar",
+    "The control":     "blind_roll_control",
+}
+
+
+def export_gfc_analysis(out_dir=DOCS_DIR, window=GFC, show=False, figures_dir=None):
     """Run every GFC configuration, write a figure per configuration plus an index.
 
     Returns the summary frame it also prints, so a session can keep working with it.
     """
+    figures_dir = FIGURES_DIR if figures_dir is None else figures_dir
     out_dir.mkdir(parents=True, exist_ok=True)
+    figures_dir.mkdir(parents=True, exist_ok=True)
+    GFC_BLOTTER_DIR.mkdir(parents=True, exist_ok=True)
     summary, written = [], []
+    # Kept alongside `written` (the standalone-page records) rather than replacing it: the
+    # standalone pages stay so a figure can be opened by double-clicking a file with no kernel,
+    # and THIS dict is what gets handed to build_report to embed the same figures inline, full
+    # width, in the report below. One figure object serves both — it is never re-rendered twice.
+    figs = {}
+    # The premium-financing sentences for the two TWO-LEG structures, spliced into the write-up's
+    # prose (see the extra_html call below). Built alongside `figs` rather than after the loop:
+    # `premium_financing_summary` needs `blot`, which only exists per-config inside this loop.
+    financing_html = {}
     for name, cfg in GFC_CONFIGS.items():
         cfg = dict(cfg)
         label = cfg.pop("_label")
         state, blot, hist, rule, elapsed = run_one(*window, **cfg)
+        # Retrievable runtime — same log `export_full_history_probe` appends to, so the GFC-window
+        # and full-history measurement of the SAME configuration sit in one place to compare.
+        _log_runtime(name, f"GFC {window[0]} to {window[1]}", len(state), elapsed)
 
         # The gates are passed to the figure ONLY where the configuration armed them, so a
         # panel never draws a threshold the run did not test.
@@ -549,9 +771,52 @@ def export_gfc_analysis(out_dir=DOCS_DIR, window=GFC, show=False):
                          monetise_multiple=cfg.get("monetise_multiple"))
         if show:
             fig.show()
-        path = out_dir / f"{name}.html"
-        fig.write_html(path, include_plotlyjs="cdn")
+        # ----------------------------------------------------------------
+        # THE EXPORT THEME. `fig_ladder` ends with `_inline_theme`, which stamps INK and GRID
+        # but deliberately leaves the backgrounds TRANSPARENT — correct in the interactive
+        # window, where VS Code's own dark theme shows through. A SAVED page has no dark div
+        # behind it, so the browser paints its own white and a light-ink figure becomes
+        # unreadable. `apply_export_theme` swaps the two backgrounds to the opaque dark surface;
+        # it is the same call `pipelines/option_probe_figures.main()` makes before every
+        # `write_html`, and it is not optional here for exactly that reason.
+        #
+        # `show=True` above is left on the INLINE figure on purpose: the order means a session
+        # that both shows and writes sees the transparent version and saves the opaque one.
+        # ----------------------------------------------------------------
+        theme.apply_export_theme(fig)
+        # Widen the legend gap for the full-width render. No-op unless the figure carries the
+        # inline secondary-axis legend x, which this one does not — kept for parity with the
+        # probe pipeline so the two export paths cannot drift.
+        theme.apply_export_spacing(fig)
+        path = figures_dir / f"{name}.html"
+        # `full_html=True` (the default) means Plotly writes the <body>, and its <body> has no
+        # background of its own: the figure div is dark but the margin around it is browser
+        # white. `theme.darken_page` injects the one CSS rule that makes the PAGE dark rather
+        # than just the plot rectangle — shared with the probe pipeline's index so both surfaces
+        # are the same #111.
+        fig.write_html(path, include_plotlyjs=PLOTLY_SRC)
+        path.write_text(theme.darken_page(path.read_text(encoding="utf-8")), encoding="utf-8")
         written.append((name, label, path))
+        figs[name] = fig
+
+        # THE BLOTTER, persisted. AC-6 defines it exactly as `sim.blotter()` already returns it —
+        # ts, symbol, side, qty, price, notional — which is the SAME frame this loop already holds
+        # as `blot` to draw the figure's markers. Nothing is re-derived; the sim was already run
+        # once per config, and this is that run's fill ledger written to disk rather than
+        # discarded after the chart is drawn.
+        blot.to_csv(GFC_BLOTTER_DIR / f"{name}.csv", index=False)
+
+        # THE FINANCING SENTENCE. `None` for a single-leg structure (protective_put,
+        # blind_roll_control) — there is no short leg to write a sentence about, and the
+        # placeholder for those configs is simply never populated (see `_split_sections`'s own
+        # note: an UNMATCHED placeholder is only an error for a FIGURE, not for extra_html).
+        financing = premium_financing_summary(blot)
+        if financing is not None:
+            financing_html[f"<!--STAT:{name}_financing-->"] = (
+                f"<p>Across the {financing['n']} times this structure opened over the window, "
+                f"the long put cost <b>${financing['long_premium']:.2f}</b> on average and the "
+                f"short leg financed <b>${financing['short_credit']:.2f}</b> of that — "
+                f"<b>{financing['pct_financed']:.0f}%</b> of the long leg's own cost.</p>")
 
         ev = classify_option_events(blot, UNDERLYING)["event"].value_counts()
         mons = [e for e in rule.events if e["action"] == "monetise"]
@@ -573,27 +838,115 @@ def export_gfc_analysis(out_dir=DOCS_DIR, window=GFC, show=False):
 
     table = pd.DataFrame(summary).set_index("configuration")
 
-    # A plain index page, so the four figures are one click apart rather than four file paths.
-    links = "\n".join(
-        f'    <li><a href="{n}.html">{lab}</a></li>' for n, lab, _ in written)
-    (out_dir / "index.html").write_text(
-        "<!doctype html>\n<html><head><meta charset='utf-8'>"
-        "<title>13-01 — option monetisation over the GFC</title>"
-        "<style>body{font-family:system-ui,sans-serif;max-width:60rem;margin:3rem auto;"
-        "padding:0 1rem;line-height:1.6}table{border-collapse:collapse}"
-        "td,th{border:1px solid #ccc;padding:.35rem .6rem;text-align:right}"
-        "th:first-child,td:first-child{text-align:left}</style></head><body>\n"
-        f"<h1>Option monetisation over the GFC</h1>\n"
-        f"<p>{window[0]} to {window[1]}. <b>IN-SAMPLE</b>, illustrative hand-picked "
-        "parameters, fills at the model mark with no bid/ask or slippage. "
-        "Not a parameter study — see 13-01's amendment of 2026-09-22.</p>\n"
-        f"<ul>\n{links}\n</ul>\n"
-        f"{table.to_html()}\n</body></html>", encoding="utf-8")
+    # ------------------------------------------------------------------------
+    # THE REPORT. Was a hand-rolled link list; is now a rendered write-up with each figure
+    # embedded full-width at the section that discusses it — the same shape 10-01 chose for the
+    # probe, generalised so both reports run through ONE implementation (13-01 amendment,
+    # 2026-09-26). The summary table is GENERATED here and spliced in, never typed into the
+    # Markdown, so no number in it can go stale relative to the run that produced it.
+    #
+    # `figs` already carries `apply_export_theme`/`apply_export_spacing` from the loop above;
+    # `build_report` applies both again to every figure it is handed, which is a no-op here and
+    # is what lets it also be called with figures that have NOT been through that step yet.
+    # ------------------------------------------------------------------------
+    build_report(
+        figures=figs,
+        write_up=GFC_WRITE_UP,
+        out_path=out_dir / "index.html",
+        figure_at=GFC_FIGURE_AT,
+        # NOT `PLOTLY_SRC` — that constant is relative to a page in figures_dir (two levels below
+        # docs/), and this report sits at out_dir/index.html, one level below docs/. The same trap
+        # build_report's own docstring names as "the single most likely thing to get wrong when a
+        # page moves": it bit here on the first pass (script tag pointed at a directory that does
+        # not exist, so the vendored library never loaded).
+        plotly_src="../assets/plotly.min.js",
+        title="Option monetisation over the GFC — Portfolio Manager",
+        heading="Option monetisation over the GFC",
+        header_note=("Figures are fully interactive — hover, zoom and legend toggles all work, "
+                     "with no server. Generated from {source_link} by "
+                     "<code>python -m research.validation.option_ladder_probe</code> on {built}."),
+        footer_note=("Portfolio Manager — thematic-fundamental research engine. "
+                     "Priced with REAL implied vol from IBKR, not a synthetic surface. "
+                     "IN-SAMPLE, one window, illustrative levels — see “What this does and "
+                     "does not support” above for what that does and does not carry."),
+        extra_html={"<!--TABLE:summary-->": f'<div class="table-wrap">{table.to_html()}</div>',
+                   **financing_html},
+    )
 
     print(f"\nwritten to {out_dir}:")
     for n, _, path in written:
-        print(f"  {path.name}")
+        print(f"  figures/{path.name}")
     print("  index.html")
     print()
     print(table.to_string())
     return table
+
+# %% 10. RUNG 3f — one configuration, the FULL real-IV history, persisted
+
+# 10. RUNG 3f — full-history smoke test
+
+# ============================================================================
+# TRACTABILITY CHECK, run cell by cell. The GFC window (rungs 3a-3e) is 377 bars; this runs the
+# SAME configuration over the full 5,201-bar history and writes it to disk, so a session can
+# confirm "how long does one config actually take over the whole window" without touching the
+# batch script's 7-config named set at all — a single run measured well under 2 seconds (AC-6),
+# so running several one at a time, inspecting each before starting the next, costs nothing like
+# the multi-hour risk of a blind batch run.
+#
+# Change NAME to any key in GFC_CONFIGS to probe a different structure the same way.
+# ============================================================================
+
+NAME = "protective_put"
+full_series, full_blot, full_elapsed = export_full_history_probe(NAME)
+
+# %% 11. Reload that run from disk — no re-run, no live session state required
+
+# 11. Reload a persisted full-history run
+
+# ============================================================================
+# THE "LOOK BACK ON WHAT WE PERSISTED" CELL. Everything below is read fresh from the three files
+# the cell above wrote — it does not touch `full_series`/`full_blot` from above, on purpose, so
+# this cell also works stood alone at the START of a fresh session, days later, with nothing run
+# first except the imports and Cell 2 (which only loads price/IV data, never re-simulates).
+#
+# `fig_ladder` is the SAME three-panel builder every other rung and the published report use —
+# reused here rather than duplicated, because `series` (from `load_persisted_full_run`) already
+# carries every column it reads off BOTH its `state` argument (equity) and its `history` argument
+# (state/drawdown/multiple/iv): `build_series_frame` joined the rule's per-bar diagnostics into
+# `state` when this was first persisted, so passing the ONE reloaded frame as both arguments
+# reconstructs the identical picture.
+# ============================================================================
+
+reloaded_series, reloaded_blot, reloaded_runtime = load_persisted_full_run(NAME)
+print(f"reloaded {NAME}: {reloaded_runtime['bars']:,} bars, "
+      f"{reloaded_runtime['elapsed_s']:.2f}s ({reloaded_runtime['ms_per_bar']:.2f} ms/bar), "
+      f"measured {reloaded_runtime['measured_at']}")
+# EQUITY max drawdown (peak-to-trough of the strategy's own value), NOT `reloaded_series
+# ["drawdown"]` — that column is the RULE's own trigger reference, which RESETS on every reopen
+# (the 2026-09-21 decision), so its minimum understates a genuine multi-episode drawdown. Same
+# computation export_gfc_analysis's summary table uses, so the two numbers are comparable.
+eq = reloaded_series["equity"]
+print(f"final equity {eq.iloc[-1]:.2f}, "
+      f"max drawdown {float((eq / eq.cummax() - 1).min()):.1%}, {len(reloaded_blot)} fills")
+
+fig_ladder(reloaded_series, reloaded_blot, reloaded_series,
+          title=f"{NAME} — persisted full-history run, reloaded from disk, "
+                f"no re-simulation").show()
+
+# %% 12. RUNG 3g — the other two structures, full history, runtime only
+
+# 12. RUNG 3g — put spread and collar, full-history tractability
+
+# ============================================================================
+# Same tractability check as Cell 10, for the two other STRUCTURES (different rule classes, not
+# just different parameters) — put spread and collar. `blind_roll_control` is deliberately left
+# out here: it is `protective_put` with the monetisation policy switched off, the SAME rule class
+# Cell 10 already timed, not a third structure. Runtime only — no reload/replot cell for either,
+# per instruction; `load_persisted_full_run` is there if that changes later, unchanged from Cell
+# 11's use of it.
+# ============================================================================
+
+for _name in ("put_spread", "collar"):
+    export_full_history_probe(_name)
+
+# %%

@@ -312,6 +312,45 @@ def build_figure(name, rule, state, spot, iv):
     return theme.apply_export_theme(fig)
 
 
+def build_series_frame(state, rule, spot):
+    """The per-bar series AC-6 persists: strategy equity and return, the underlying it hedges,
+    and the rule's own per-bar read-outs, all joined by timestamp into ONE frame.
+
+    Extracted from ``main()``'s loop (13-01 amendment, 2026-09-26) so a single ad hoc run — the
+    GFC-window figures in ``research/validation/option_ladder_probe.py``, or a one-off
+    full-history smoke test of a single configuration — produces the EXACT SAME artefact this
+    batch's own named-set run does, through one join rather than two copies of it that could
+    drift. Nothing here re-derives what ``run_one`` already computed; this only reshapes it.
+    """
+    # The artefact 13-02 and 13-03 consume. A time series, not a summary row: window
+    # drawdowns are recomputed from this by slicing, never recovered from an aggregate.
+    out = state[["equity"]].copy()
+    # PER-BAR RETURN of the strategy, not only its level. This is the sliceable quantity:
+    # a window's return compounds from a slice of this column, and equity itself is
+    # recoverable as (1 + ret).cumprod() times the starting capital, so the level is kept
+    # only to spare later consumers the float drift of re-compounding 5,201 bars. The first
+    # bar is 0.0, not NaN — there is no prior bar to have earned a return against, and a NaN
+    # there silently poisons any cumprod a consumer writes.
+    out["ret"] = out["equity"].pct_change().fillna(0.0)
+    # The MAIN INDEX SERIES, so the strategy is always readable against the thing it hedges
+    # without reopening the price parquet and re-aligning it.
+    out["spot"] = spot.reindex(out.index)
+    out["spot_ret"] = out["spot"].pct_change().fillna(0.0)
+    if rule is not None and rule.history:
+        hist = pd.DataFrame(rule.history).T.set_index(pd.to_datetime(
+            [h["ts"] for h in rule.history.values()]))
+        # gate_open and flat_bars join the read-outs: the re-entry gate is a comparison
+        # between a LEVEL and a SERIES, and persisting only `iv` left the reader to
+        # re-derive the verdict. Since 2026-09-22 the rule records a row on EVERY bar,
+        # including the flat ones, so these columns now cover the wait rather than
+        # stopping at the monetise.
+        for col in ("state", "drawdown", "multiple", "iv", "gate_open", "flat_bars",
+                    "net_value", "net_premium"):
+            if col in hist:
+                out[col] = hist[col].reindex(out.index)
+    return out
+
+
 # ============================================================================
 # MAIN
 # ============================================================================
@@ -343,32 +382,9 @@ def main():
         states[name] = state
         rows.append(summarise(name, rule, state, spot, elapsed))
 
-        # The artefact 13-02 and 13-03 consume. A time series, not a summary row: window
-        # drawdowns are recomputed from this by slicing, never recovered from an aggregate.
-        out = state[["equity"]].copy()
-        # PER-BAR RETURN of the strategy, not only its level. This is the sliceable quantity:
-        # a window's return compounds from a slice of this column, and equity itself is
-        # recoverable as (1 + ret).cumprod() times the starting capital, so the level is kept
-        # only to spare later consumers the float drift of re-compounding 5,201 bars. The first
-        # bar is 0.0, not NaN — there is no prior bar to have earned a return against, and a NaN
-        # there silently poisons any cumprod a consumer writes.
-        out["ret"] = out["equity"].pct_change().fillna(0.0)
-        # The MAIN INDEX SERIES, so the strategy is always readable against the thing it hedges
-        # without reopening the price parquet and re-aligning it.
-        out["spot"] = spot.reindex(out.index)
-        out["spot_ret"] = out["spot"].pct_change().fillna(0.0)
-        if rule is not None and rule.history:
-            hist = pd.DataFrame(rule.history).T.set_index(pd.to_datetime(
-                [h["ts"] for h in rule.history.values()]))
-            # gate_open and flat_bars join the read-outs: the re-entry gate is a comparison
-            # between a LEVEL and a SERIES, and persisting only `iv` left the reader to
-            # re-derive the verdict. Since 2026-09-22 the rule records a row on EVERY bar,
-            # including the flat ones, so these columns now cover the wait rather than
-            # stopping at the monetise.
-            for col in ("state", "drawdown", "multiple", "iv", "gate_open", "flat_bars",
-                        "net_value", "net_premium"):
-                if col in hist:
-                    out[col] = hist[col].reindex(out.index)
+        # The artefact 13-02 and 13-03 consume — see build_series_frame's own docstring for what
+        # it carries and why it is a series and not a summary row.
+        out = build_series_frame(state, rule, spot)
         out.to_parquet(SERIES_DIR / f"{name}.parquet")
 
         # THE BLOTTER — every fill the rule made, with the two numbers that decided it. The

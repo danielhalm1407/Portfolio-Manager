@@ -47,6 +47,76 @@ def is_option_symbol(symbol, underlying):
     return symbol != underlying and symbol.startswith(f"{underlying} ")
 
 
+def classify_option_fills(blotter, underlying):
+    """Per-FILL classification: is this fill opening or closing a leg, and which side of the
+    market was it on. Extracted from ``classify_option_events`` (2026-09-26) so a caller that
+    needs the LEG-LEVEL detail — e.g. "what did the long put cost against what the short leg
+    financed", which the bar-level table below cannot answer because it sums both legs
+    together — reuses the exact same opening/closing test rather than re-deriving it a second
+    way that could disagree.
+
+    Parameters
+    ----------
+    blotter : DataFrame
+        ``PortfolioSimulator.blotter()`` — one row per fill, with ``ts``, ``symbol``, ``side``,
+        ``qty``, ``price`` and ``notional``.
+    underlying : str
+        See ``classify_option_events``.
+
+    Returns
+    -------
+    DataFrame
+        One row per option FILL (not per bar), with ``ts``, ``symbol``, ``side`` (+1 buy / -1
+        sell, carried through unchanged — this is what tells a long leg's OPEN from a short
+        leg's, since a long leg always opens on a BUY and a short leg always opens on a SELL),
+        ``opening`` (bool) and ``notional`` (absolute cash magnitude of this one fill). Empty
+        (zero rows, same columns) if the blotter carries no option fills at all.
+    """
+    # ============================================================================
+    # HOW OPEN AND CLOSE ARE TOLD APART — and why `side` cannot do it ALONE.
+    #
+    # A long put is BOUGHT to open and SOLD to close; a collar's short call is
+    # SOLD to open and BOUGHT to close. So the sign of the fill says nothing about
+    # which end of the lifecycle it is — the two structures would classify in
+    # opposite directions off the same rule.
+    #
+    # What does determine it is whether the fill moves the position AWAY from flat
+    # or TOWARDS it. That needs the running position per symbol, which the blotter
+    # gives us as a cumulative sum in bar order. Hence one pass, in time order,
+    # carrying a running signed quantity per leg. `side` IS kept in the per-fill
+    # result, though — once "opening" is known, side tells long from short: an
+    # OPENING fill with side=+1 is a long leg (the only way a position moves
+    # further from flat on a buy), an OPENING fill with side=-1 is a short leg.
+    # ============================================================================
+    empty = pd.DataFrame(columns=["ts", "symbol", "side", "opening", "notional"])
+    if blotter is None or len(blotter) == 0:
+        return empty
+
+    # Option fills only, in strict bar order. `kind="stable"` so two fills on the same bar keep
+    # the order the simulator executed them in (it sorts symbols for determinism), which matters
+    # because the running position below is order-sensitive within a bar.
+    opt = blotter[blotter["symbol"].apply(is_option_symbol, underlying=underlying)]
+    if len(opt) == 0:
+        return empty
+    opt = opt.sort_values("ts", kind="stable")
+
+    running = {}
+    records = []
+    for row in opt.itertuples(index=False):
+        before = running.get(row.symbol, 0.0)
+        # `side` is +1 buy / -1 sell and `qty` is the absolute magnitude, so the signed delta is
+        # their product — the same convention Book.apply_fill uses.
+        after = before + row.side * row.qty
+        running[row.symbol] = after
+        # Strictly further from flat is an OPEN; strictly closer is a CLOSE. A fill that flips
+        # the sign outright (never produced by these rules, which always flatten before
+        # re-striking) counts as a close, because the leg it belonged to is gone.
+        opening = abs(after) > abs(before)
+        records.append({"ts": row.ts, "symbol": row.symbol, "side": row.side,
+                        "opening": opening, "notional": abs(row.notional)})
+    return pd.DataFrame(records)
+
+
 def classify_option_events(blotter, underlying):
     """Per-bar option lifecycle events, derived from the trade blotter alone.
 
@@ -83,31 +153,10 @@ def classify_option_events(blotter, underlying):
         return pd.DataFrame(columns=["ts", "event", "n_open", "n_close",
                                      "closed_value", "opened_premium"])
 
-    # Option fills only, in strict bar order. `kind="stable"` so two fills on the same bar keep
-    # the order the simulator executed them in (it sorts symbols for determinism), which matters
-    # because the running position below is order-sensitive within a bar.
-    opt = blotter[blotter["symbol"].apply(is_option_symbol, underlying=underlying)]
-    if len(opt) == 0:
+    fills = classify_option_fills(blotter, underlying)
+    if len(fills) == 0:
         return pd.DataFrame(columns=["ts", "event", "n_open", "n_close",
                                      "closed_value", "opened_premium"])
-    opt = opt.sort_values("ts", kind="stable")
-
-    running = {}
-    records = []
-    for row in opt.itertuples(index=False):
-        before = running.get(row.symbol, 0.0)
-        # `side` is +1 buy / -1 sell and `qty` is the absolute magnitude, so the signed delta is
-        # their product — the same convention Book.apply_fill uses.
-        after = before + row.side * row.qty
-        running[row.symbol] = after
-        # Strictly further from flat is an OPEN; strictly closer is a CLOSE. A fill that flips
-        # the sign outright (never produced by these rules, which always flatten before
-        # re-striking) counts as a close, because the leg it belonged to is gone.
-        opening = abs(after) > abs(before)
-        records.append({"ts": row.ts, "symbol": row.symbol, "opening": opening,
-                        "notional": abs(row.notional)})
-
-    fills = pd.DataFrame(records)
 
     # ============================================================================
     # BAR-LEVEL CLASSIFICATION. A bar carrying both ends of the lifecycle is a ROLL

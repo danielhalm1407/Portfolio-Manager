@@ -95,7 +95,16 @@ SMIRK_TENORS = {"1 month": 21 / 252, "3 months": 63 / 252, "6 months": 126 / 252
 # because `outputs/` is gitignored (.gitignore:37) — a published figure has to be committed.
 PRICE_PANEL = PROJECT_ROOT / "data" / "processed" / "prices_spy_kmlm.parquet"
 UNDERLYING = "SPY"
-DOCS_FIGURES = PROJECT_ROOT / "docs" / "figures"
+# `docs/probing/` since 13-01's 2026-09-26 amendment: the published site is a hub at
+# docs/index.html plus one directory per section, each holding its index page beside its own
+# figures/ — so this probe's pages moved down one level to sit beside their report.
+DOCS_FIGURES = PROJECT_ROOT / "docs" / "probing" / "figures"
+
+# The ONE vendored plotly.min.js, shared by every page on the site. Passed to write_html as a PATH
+# rather than "directory" (which copies the 4.2 MB library into every figure directory it writes)
+# or "cdn" (which makes a saved page need a network connection to render at all). Spelled relative
+# to a page in docs/probing/figures/, which is where these are written.
+PLOTLY_SRC = "../../assets/plotly.min.js"
 
 # The real (non-synthetic) IV history 11-01 cached — IBKR's OPTION_IMPLIED_VOLATILITY for the
 # underlying itself, back to 2006-01-09. Added 2026-09-20 as a follow-up to the probe: everywhere
@@ -530,7 +539,9 @@ def fig_put_paths_market(put_v1, put_market, spot_path, real_iv, tenor=TENOR_YEA
     fig.update_layout(
         title=f"European put value per ladder strike — {tenor * 252:.0f}-day tenor, "
               f"v1 frozen vs real market vol + current spot",
-        height=820, hovermode="x unified", **_TRANSPARENT,
+        # 2 rows -> theme.STACKED_FIGURE_HEIGHT, so this and every other stacked figure read the
+        # same table rather than each carrying its own height literal.
+        height=theme.STACKED_FIGURE_HEIGHT[2], hovermode="x unified", **_TRANSPARENT,
     )
     # The secondary axis is in the TOP row, which sits directly beside the legend (anchored to the
     # top of the figure), so the spacing IS needed — unlike fig_overlay_values, where the secondary
@@ -801,7 +812,8 @@ def fig_overlay_values(runs, spot_path):
     fig.update_yaxes(title_text="premium", row=3, col=1)
     fig.update_layout(
         title=f"{UNDERLYING} with rolled hedges — 63-bar roll, v1 surface (payoffs are a floor)",
-        height=900, hovermode="x unified", **_TRANSPARENT,
+        # 3 rows -> theme.STACKED_FIGURE_HEIGHT, same table fig_ladder now reads from too.
+        height=theme.STACKED_FIGURE_HEIGHT[3], hovermode="x unified", **_TRANSPARENT,
     )
     # Reserve the legend strip only when the right-hand axis is actually in use, and even then it
     # sits on the MIDDLE panel while the legend is anchored to the top of the figure beside panel
@@ -877,8 +889,10 @@ def write_index(out_dir, figures, captions=FIGURE_CAPTIONS):
     """Write a minimal index page linking every exported figure.
 
     Deliberately hand-rolled HTML with inline CSS and no build step: GitHub Pages serves this
-    directory as static files, so anything requiring a bundler would need CI that does not exist
-    yet. The palette is read from theme.py so the index and the figures it links are one surface.
+    directory as static files, so anything requiring a bundler would need CI that does not
+    exist yet. The stylesheet is ``theme.page_css()`` — the same one the 13-01 validation index
+    uses, so the index, its sibling pages and the figures they link are one surface. It used to
+    be spelled out here, which meant two copies of the page palette in two pipelines.
     """
     rows = "\n".join(
         f'      <li><a href="figures/{name}.html">{captions.get(name, name)}</a></li>'
@@ -888,14 +902,7 @@ def write_index(out_dir, figures, captions=FIGURE_CAPTIONS):
 <html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Portfolio Manager — option overlay probe</title>
-<style>
-  body {{ background: {theme.PAGE_BG}; color: {theme.INK};
-         font: 16px/1.6 system-ui, -apple-system, sans-serif;
-         max-width: 46rem; margin: 0 auto; padding: 3rem 1.5rem; }}
-  a {{ color: {theme.CATEGORICAL[0]}; }}
-  li {{ margin: .6rem 0; }}
-  p.note {{ color: {theme.MUTED}; font-size: .9rem; }}
-</style></head><body>
+<style>{theme.page_css()}</style></head><body>
   <h1>Option overlay probe</h1>
   <p>Pre-rendered, fully interactive Plotly figures — hover, zoom and legend toggles all work
      with no server. Rendered by
@@ -916,10 +923,12 @@ def write_index(out_dir, figures, captions=FIGURE_CAPTIONS):
 def main(out_dir=DOCS_FIGURES):
     """Render every probe figure to standalone, fully interactive HTML.
 
-    ``include_plotlyjs="directory"`` emits ``plotly.min.js`` ONCE beside the pages, and every
-    figure references that single copy — rather than inlining ~3MB per figure, or depending on a
-    CDN being reachable at view time. That is 10-01's stated choice. Switching to ``"cdn"`` is a
-    one-word change if the vendored copy is ever judged too heavy for the repo.
+    ``include_plotlyjs=PLOTLY_SRC`` points every figure at the single vendored copy in
+    ``docs/assets/`` — rather than inlining ~3MB per figure, or depending on a CDN being reachable
+    at view time. That is 10-01's stated choice, with one change from its original form: it used
+    ``"directory"``, which writes a SECOND copy of the 4.2 MB library beside every directory of
+    figures. With two sections on the site (13-01's 2026-09-26 amendment) that became two copies
+    of the same file, so the library moved up to ``docs/assets/`` and both sections reference it.
 
     ``apply_export_theme`` is NOT optional here. A saved figure has no page div behind it, so a
     transparent background lets the browser paint its own white and the dark figure becomes
@@ -931,7 +940,13 @@ def main(out_dir=DOCS_FIGURES):
         theme.apply_export_theme(fig)
         # Widen the legend gap for the wider render. See theme.apply_export_spacing.
         theme.apply_export_spacing(fig)
-        fig.write_html(out_dir / f"{name}.html", include_plotlyjs="directory")
+        path = out_dir / f"{name}.html"
+        fig.write_html(path, include_plotlyjs=PLOTLY_SRC)
+        # The figure is now dark; the PAGE around it is not. Plotly's <body> carries no
+        # background, so the margin outside the figure div is browser white until this injects
+        # theme.BODY_CSS. One shared helper, so these pages, the 13-01 validation pages and both
+        # indexes agree on what #111 means.
+        path.write_text(theme.darken_page(path.read_text(encoding="utf-8")), encoding="utf-8")
     # The link-list index, kept as the fallback and as the home of FIGURE_CAPTIONS. It is written
     # FIRST so that if the report build below fails, docs/ still has a working landing page rather
     # than a stale one.

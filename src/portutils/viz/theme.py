@@ -214,6 +214,19 @@ SECONDARY_AXIS_MARGIN_R = 340
 # Gap in pixels between the y2 tick labels and the rotated y2 title.
 SECONDARY_AXIS_TITLE_STANDOFF = 24
 
+# ---------------------------------------------------------------------------
+# STACKED-SUBPLOT HEIGHT. Plotly's default figure height is 450px regardless of how many rows
+# `make_subplots` was given — it sizes the FIGURE, not the panels inside it. A 2- or 3-row stacked
+# figure left at that default renders every row squeezed into a fraction of 450px, which is
+# unreadable once `.figure` (build_report._CSS) stretches the same figure to ~1600px wide on a
+# published page: the chart gets wider and wider while staying exactly as short.
+#
+# Keyed by row count so a new stacked figure picks its height by asking "how many rows do I have"
+# rather than by choosing a number: `fig_overlay_values` (2 rows) and `fig_put_paths_market` /
+# `fig_ladder` (3 rows) all read from here. Values are the ones already in use across the repo,
+# centralised here rather than left as three separate literals that could drift.
+STACKED_FIGURE_HEIGHT = {2: 820, 3: 900}
+
 
 def _is_secondary_axis(fig, key):
     # `overlaying` names whichever axis is underneath, which is "y" on a single-panel figure but
@@ -311,3 +324,69 @@ def apply_export_theme(fig, *, ink=INK, grid=GRID, paper=PAPER_BG, plot=PLOT_BG)
         title_font=dict(color=ink), tickfont=dict(color=ink),
     )
     return fig
+
+
+# ============================================================================
+# THE PAGE SURFACE — CSS, not Plotly attributes.
+#
+# `apply_export_theme` above darkens the FIGURE. It cannot darken the PAGE: a document written by
+# `fig.write_html(full_html=True)` carries a bare `<body>` with no background of its own, so the
+# margin around the figure div is whatever the browser paints — white. The figure is then a dark
+# rectangle on a white sheet, which is the half-fixed version of the failure the module docstring
+# records.
+#
+# These live HERE rather than in either pipeline because BOTH produce pages off the same palette:
+# `pipelines/option_probe_figures.write_index` and `research/validation/option_ladder_probe`'s
+# GFC index. Two copies of "what colour is the page" is two things to forget to change.
+# ============================================================================
+
+# The minimum rule that makes a page dark: the surface behind the figure, the default text colour
+# for anything the figure does not draw, and no body margin (Plotly's own div manages its spacing).
+BODY_CSS = f"html,body{{background:{PAGE_BG};color:{INK};margin:0}}"
+
+# The same rule as a complete <style> element, ready to inject into a document that already has a
+# <head>. Kept as a constant rather than built per call so `darken_page`'s idempotence check below
+# is an exact string comparison.
+BODY_STYLE_TAG = f"<style>{BODY_CSS}</style>"
+
+
+def darken_page(html):
+    """Inject the page background into an already-written HTML document, before ``</head>``.
+
+    Post-processing the document rather than assembling it by hand: ``fig.write_html`` owns the
+    script tags, the div id and the config JSON, and re-implementing all of that just to add one
+    ``<style>`` would be a second thing to keep in step with Plotly's output format.
+
+    Idempotent — a document that already carries the tag is returned unchanged, so re-running an
+    export does not grow the file. Returns the HTML rather than writing it, so the caller keeps
+    control of encoding and of the path.
+    """
+    if BODY_STYLE_TAG in html:
+        return html
+    return html.replace("</head>", f"{BODY_STYLE_TAG}</head>", 1)
+
+
+def page_css(max_width="46rem"):
+    """The full stylesheet body for a HAND-ROLLED page — an index, a narrative report.
+
+    Everything `BODY_CSS` covers, plus the typographic and link treatment those pages share:
+    readable measure, system font stack, links in the first categorical colour (so a link and the
+    first series on the page below it are the same hue), `MUTED` for caveat lines, `GRID` for
+    table rules — the same tone the gridlines inside the figures use, so a table and a chart on
+    one page do not disagree about what a faint line looks like.
+
+    `max_width` is the one thing that legitimately varies: a link list wants a narrow measure, a
+    page with a wide summary table wants more. Returned WITHOUT the enclosing <style> tag so a
+    caller can append its own page-specific rules.
+    """
+    return (
+        f"body{{background:{PAGE_BG};color:{INK};"
+        "font:16px/1.6 system-ui,-apple-system,sans-serif;"
+        f"max-width:{max_width};margin:0 auto;padding:3rem 1.5rem}}"
+        f"a{{color:{CATEGORICAL[0]}}}"
+        "li{margin:.5rem 0}"
+        f"p.note,.note{{color:{MUTED};font-size:.9rem}}"
+        "table{border-collapse:collapse}"
+        f"td,th{{border:1px solid {GRID};padding:.35rem .6rem;text-align:right}}"
+        "th:first-child,td:first-child{text-align:left}"
+    )

@@ -53,7 +53,10 @@ from portutils.viz import theme
 # `outputs/` is gitignored (.gitignore:37) and a published page must be committed to be served.
 WRITE_UP = PROJECT_ROOT / "research" / "option_overlay_probe.md"
 DOCS = PROJECT_ROOT / "docs"
-REPORT_PATH = DOCS / "index.html"
+# docs/probing/ since 13-01's 2026-09-26 amendment. docs/index.html is now the site HUB, which
+# links down to this report and to the 13-01 validation report; it is written by
+# pipelines/build_site_index.py and must not be overwritten here.
+REPORT_PATH = DOCS / "probing" / "index.html"
 
 # Which figure is dropped in after which section, keyed by a distinctive SUBSTRING of the heading
 # rather than the whole line — headings carry em-dashes and long subtitles that would otherwise make
@@ -76,8 +79,31 @@ FIGURE_AT = {
 GITHUB_REPO = "https://github.com/danielhalm1407/Portfolio-Manager"
 GITHUB_BRANCH = "feat/16-option-instruments"
 
-# The vendored library, relative to the report (which sits at docs/index.html).
-PLOTLY_SRC = "figures/plotly.min.js"
+# The default page chrome — 10-01's probe report. Each is a `build_report` argument, so a second
+# report can replace the ones that are specific to its own evidence and inherit the rest.
+DEFAULT_TITLE = "Option overlay probe — Portfolio Manager"
+DEFAULT_HEADING = "Option overlay probe"
+
+# `{source_link}` and `{built}` are filled by build_report; the rest is prose. Written as a template
+# rather than assembled in the page f-string so a caller can replace the sentence without having to
+# reproduce the link markup.
+DEFAULT_HEADER_NOTE = (
+    "Figures are fully interactive — hover, zoom and legend toggles all work, with no server. "
+    "Generated from {source_link} by <code>python -m pipelines.build_report</code> on {built}.")
+
+# The footer caveat. SPECIFIC TO 10-01: its figures price off the synthetic surface. 13-01's
+# validation pages price off real IBKR implied vol and MUST override this — a caveat that is wrong
+# is worse than no caveat, and this string is the reason the function could not serve two reports.
+DEFAULT_FOOTER_NOTE = (
+    "Portfolio Manager — thematic-fundamental research engine. "
+    "Vol is a SYNTHETIC surface with a constant ATM level, not market data; see the findings above "
+    "for what that does and does not support.")
+
+# The vendored library, relative to the report (which sits at docs/probing/index.html). ONE copy
+# serves the whole site from docs/assets/; a page nested one level deeper (a per-figure page under
+# a section's figures/) needs ../../assets/... instead, which is why build_report takes this as an
+# argument rather than only reading this constant.
+PLOTLY_SRC = "../assets/plotly.min.js"
 
 
 # ============================================================================
@@ -94,7 +120,7 @@ def render_markdown(text):
     return md.render(text)
 
 
-def rewrite_links(html, source_dir="research"):
+def rewrite_links(html, source_dir="research", page_dir="docs"):
     """Point every relative link somewhere that resolves on the PUBLISHED page.
 
     Links in the write-up are relative to its own directory (``research/``). Once the page is
@@ -105,6 +131,14 @@ def rewrite_links(html, source_dir="research"):
       report, so the standalone figure pages keep working with no network;
     * anything else (source files, PAUL plans) — a GitHub blob URL, with any ``#L123`` line anchor
       carried across, because GitHub renders exactly that.
+
+    ``page_dir`` is the published page's OWN directory, repo-relative. It is not a detail: the
+    second case is a path computed relative to the page, so a page at ``docs/probing/index.html``
+    and one at ``docs/index.html`` need different answers for the same link. This argument existing
+    is what stopped 13-01's move of the probe report under ``docs/probing/`` from silently turning
+    the write-up's own ``docs/README.md`` link into a 404 — it was caught by the link check, and the
+    fix belongs here rather than in the write-up, which is correct as written and is shared with
+    GitHub's own rendering of it.
     """
     def _fix(match):
         href = match.group(1)
@@ -116,9 +150,11 @@ def rewrite_links(html, source_dir="research"):
         anchor = f"#{anchor}" if anchor else ""
         # Resolve the link against the write-up's own directory to get a repo-relative path.
         resolved = posixpath.normpath(posixpath.join(source_dir, path))
-        # A target already inside docs/ is served beside the report: make it report-relative.
+        # A target already inside docs/ is served on the SITE: make it relative to this page's own
+        # directory. relpath rather than stripping the "docs/" prefix, which was correct only while
+        # the report sat at docs/index.html and produced a link one level too shallow once it moved.
         if resolved.startswith("docs/"):
-            return f'href="{resolved[len("docs/"):]}{anchor}"'
+            return f'href="{posixpath.relpath(resolved, page_dir)}{anchor}"'
         # Everything else lives in the repo but not on the site — send the reader to GitHub.
         return f'href="{GITHUB_REPO}/blob/{GITHUB_BRANCH}/{resolved}{anchor}"'
 
@@ -212,8 +248,34 @@ def _figure_divs(figures):
             for name, fig in figures.items()}
 
 
-def build_report(figures=None, write_up=WRITE_UP, out_path=REPORT_PATH, figure_at=None):
+def build_report(figures=None, write_up=WRITE_UP, out_path=REPORT_PATH, figure_at=None,
+                 plotly_src=PLOTLY_SRC, title=DEFAULT_TITLE, heading=DEFAULT_HEADING,
+                 header_note=DEFAULT_HEADER_NOTE, footer_note=DEFAULT_FOOTER_NOTE,
+                 source_href=None, extra_html=None, hub_href="../index.html"):
     """Render the write-up with its figures inline and write the report. Returns the path.
+
+    SERVES TWO REPORTS (13-01 amendment, 2026-09-26). 10-01's option-overlay probe and 13-01's GFC
+    monetisation validation are ONE implementation with different arguments, for the same reason the
+    figure builders are: the parts most costly to duplicate are the heading -> figure map's
+    raise-on-mismatch guard, the link rewriting and the CSS, and those are exactly the parts that
+    would drift if there were two copies. Every argument defaults to 10-01's literal, so calling
+    this with no arguments reproduces that page unchanged.
+
+    ``plotly_src``   where the vendored library sits relative to THIS page — one level up for a
+                     section index (``../assets/...``), two for a page inside a ``figures/``
+                     directory. The single most likely thing to get wrong when a page moves.
+    ``title`` / ``heading`` / ``header_note`` / ``footer_note``
+                     the page's own prose. ``header_note`` is a template taking ``{source_link}``
+                     and ``{built}``; ``footer_note`` must be overridden by any report whose vol is
+                     not synthetic, because the default states that it is.
+    ``source_href``  the write-up's path for the "generated from" link, relative to the repo root.
+                     Defaults to ``write_up``'s own path.
+    ``extra_html``   ``{placeholder: html}`` spliced into the rendered body after the figures. The
+                     GFC report's summary table arrives this way, so its numbers are GENERATED from
+                     the run rather than typed into the Markdown — the same rule as the prose, one
+                     level down.
+    ``hub_href``     the link back up to the site hub, so a reader who arrives at one section from a
+                     shared link can reach the other. ``None`` omits it.
 
     ``figures`` is ``{stem: go.Figure}``; when omitted the builders are imported and run here, so
     the module works standalone. The import is deferred to function scope because
@@ -236,7 +298,16 @@ def build_report(figures=None, write_up=WRITE_UP, out_path=REPORT_PATH, figure_a
         # needs the export gap for the same reason the standalone pages do.
         theme.apply_export_spacing(fig)
 
-    body = _split_sections(rewrite_links(render_markdown(write_up.read_text(encoding="utf-8"))),
+    # The page's own directory, repo-relative, so links into docs/ resolve from wherever this page
+    # is written rather than from an assumed docs/index.html. Same treatment for the write-up's own
+    # directory: it defaulted to a hardcoded "research", which was silently correct only because
+    # every write-up so far sat directly in research/ — the GFC write-up sits one level deeper, at
+    # research/validation/, and a link written relative to THAT (e.g. "../../docs/...") needs the
+    # matching source_dir or it resolves against the wrong base and 404s past the link check.
+    page_dir = out_path.parent.relative_to(PROJECT_ROOT).as_posix()
+    source_dir = write_up.parent.relative_to(PROJECT_ROOT).as_posix()
+    body = _split_sections(rewrite_links(render_markdown(write_up.read_text(encoding="utf-8")),
+                                         source_dir=source_dir, page_dir=page_dir),
                            figure_at=figure_at)
     # Wrap tables so the overflow rule above has something to scroll.
     body = body.replace("<table>", '<div class="table-wrap"><table>').replace("</table>", "</table></div>")
@@ -247,30 +318,46 @@ def build_report(figures=None, write_up=WRITE_UP, out_path=REPORT_PATH, figure_a
     for name, div in divs.items():
         body = body.replace(f"<!--FIGURE:{name}-->", f'<div class="figure">{div}</div>')
 
+    # GENERATED HTML that is not a figure — the GFC report's summary table. Spliced here, after the
+    # figures, for the same reason they are: its markup must not be walked by the link rewriting or
+    # the table wrapping above, both of which would find real anchors and a real <table> inside it.
+    # A placeholder that matches nothing is NOT an error, unlike a figure's: a caller may hand the
+    # same dict to a write-up that has not asked for that block.
+    for placeholder, extra in (extra_html or {}).items():
+        body = body.replace(placeholder, extra)
+
     built = _dt.date.today().isoformat()
     css = _CSS.format(page_bg=theme.PAGE_BG, ink=theme.INK, grid=theme.GRID,
                       muted=theme.MUTED, link=theme.CATEGORICAL[0])
+
+    # The "generated from" link points at the write-up ON GITHUB, never at a relative path: the page
+    # is served out of docs/ and the Markdown is not published, so a relative link would 404. Same
+    # reasoning as rewrite_links above, which does this for every link inside the prose.
+    source_rel = source_href or write_up.relative_to(PROJECT_ROOT).as_posix()
+    source_link = f'<a href="{GITHUB_REPO}/blob/{GITHUB_BRANCH}/{source_rel}">{source_rel}</a>'
+    note = header_note.format(source_link=source_link, built=built)
+
+    # The link back UP to the hub. A hub that only points down is half a hub: a reader arriving here
+    # from a shared link would otherwise have no way to discover the other section.
+    up = f'<p class="meta"><a href="{hub_href}">&larr; all sections</a></p>' if hub_href else ""
+
     html = f"""<!doctype html>
 <html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Option overlay probe — Portfolio Manager</title>
+<title>{title}</title>
 <style>{css}</style>
-<script src="{PLOTLY_SRC}"></script>
+<script src="{plotly_src}"></script>
 </head><body>
 <header class="page">
-  <h1>Option overlay probe</h1>
-  <p class="meta">Figures are fully interactive — hover, zoom and legend toggles all work, with no
-     server. Generated from
-     <a href="{GITHUB_REPO}/blob/{GITHUB_BRANCH}/research/option_overlay_probe.md">research/option_overlay_probe.md</a>
-     by <code>python -m pipelines.build_report</code> on {built}.</p>
+  {up}
+  <h1>{heading}</h1>
+  <p class="meta">{note}</p>
 </header>
 <main>
 {body}
 </main>
 <footer>
-  Portfolio Manager — thematic-fundamental research engine.
-  Vol is a SYNTHETIC surface with a constant ATM level, not market data; see the findings above for
-  what that does and does not support.
+  {footer_note}
 </footer>
 </body></html>
 """
