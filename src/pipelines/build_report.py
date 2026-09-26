@@ -65,6 +65,8 @@ FIGURE_AT = {
     "Finding 5": "iv_paths",           # the v1/v2 gap — the two moneyness references overlaid
     "Finding 6": "drawdown_episode",   # struck at the peak and carried
     "Finding 7": "overlay_values",     # the rolled structures through the simulator
+    "Finding 8": "real_iv_history",    # SPY's real IV over the probe window, not synthetic
+    "Finding 9": "put_paths_market",   # the ladder repriced with real vol level + current spot
 }
 
 # Where a source link should point once the page is served from GitHub Pages. A link like

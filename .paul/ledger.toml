@@ -85,3 +85,39 @@ action = "unify"
 phase = 10
 plan = "10-01"
 at = "2026-09-20T00:00:00Z"
+
+[[entry]]
+action = "apply"
+phase = 11
+plan = "11-01"
+at = "2026-09-20T00:00:00Z"
+
+[[entry]]
+action = "unify"
+phase = 11
+plan = "11-01"
+at = "2026-09-20T00:00:00Z"
+
+[[entry]]
+action = "plan"
+phase = 13
+plan = "13-02"
+at = "2026-09-20T00:00:00Z"
+
+[[entry]]
+action = "plan"
+phase = 13
+plan = "13-01.1"
+at = "2026-09-20T00:00:00Z"
+
+[[entry]]
+action = "apply"
+phase = 13
+plan = "13-01.1"
+at = "2026-09-20T00:00:00Z"
+
+[[entry]]
+action = "unify"
+phase = 13
+plan = "13-01.1"
+at = "2026-09-20T00:00:00Z"

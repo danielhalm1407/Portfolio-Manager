@@ -17,6 +17,7 @@ from .ibkr_sync import (
 )
 from .fills import Fill, Order, _iso
 from .ledger import StateLedger
+from .narrow_ledger import NarrowLedger
 from .rules import (
     BuyAndHoldRule,
     ConstantMixRule,
@@ -31,7 +32,7 @@ __all__ = [
     "Book", "Position",
     "Fill", "Order", "_iso",
     "SimExecutionBackend",
-    "StateLedger",
+    "StateLedger", "NarrowLedger",
     "RebalanceRule", "BuyAndHoldRule", "ConstantMixRule", "DrawdownRotationRule",
     "TradeListRule",
     "weights_to_units",

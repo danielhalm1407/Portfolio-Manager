@@ -27,6 +27,11 @@ universe:
     role: beta
     sleeve: broad_market
     note: "The TRADEABLE S&P 500 exposure for this account. SPY is US-domiciled, publishes no PRIIPs KID and is therefore refused to a UK/EU retail client (IB error 201, 'Customer Ineligible'). CSPX is the UCITS equivalent: Irish-domiciled, KID published, LSE-listed, quoted in USD. Accumulating, so dividends roll up inside the fund rather than paying out — total return matches SPY, the cash-flow profile does not."
+  QQQ:
+    name: "Invesco QQQ Trust"
+    role: beta
+    sleeve: broad_market
+    note: "Nasdaq-100 ETF proxy, used for v0.4's long-history index leg alongside SPY. Per the 2026-08-31 Phase 11 decision, ETF proxies are used rather than the SPX/NDX cash indices (secType='IND') unless a probe justifies otherwise — inception 1999-03-11 still clears the milestone's 2008/2020/2022 coverage bar."
   FTXL:
     name: "First Trust Nasdaq Semiconductor ETF"
     role: beta
@@ -198,6 +203,16 @@ portfolios:
     HSBA: 0.02
     LNG: 0.02
     CSPX: 0.02
+
+  # Phase 11 (v0.4) long-history universe — the index legs the milestone's regime claim
+  # rests on. SPY/QQQ ETF proxies rather than SPX/NDX cash indices (secType='IND'), per
+  # the 2026-08-31 decision: ETF inception (1993/1999) already clears the 2008/2020/2022
+  # coverage bar, indices sit behind separate entitlements and are not tradeable, and
+  # 'TRADES' is the wrong basis for a quoted-not-traded instrument anyway. Fetched via
+  # cache_prices.py --portfolio long_history --long-history (portutils.ingestion.history).
+  long_history:
+    SPY: 0.50
+    QQQ: 0.50
 
   # The capital-efficient book from research/hedge_sleeves/hedge_sleeves.py. Gross ~1.8.
   hedge_sleeves:

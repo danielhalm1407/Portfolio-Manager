@@ -89,15 +89,23 @@ class PanelBuilder:
                 start_date='2024-01-01',
                 data_dir=None,
                 ncols = 2, # number of columns to have in a panle
-                nrows = None, # number of rows to have in a panel; 
-                # if None, will be calculated based on the number 
+                nrows = None, # number of rows to have in a panel;
+                # if None, will be calculated based on the number
                 # of sectors and ncols
+                ragged=False, # opt-in ragged-history loading (Phase 11, Task 4, Step 1).
+                # DEFAULT False preserves today's outer-join -> ffill -> dropna behaviour
+                # exactly, so every existing caller/notebook/figure is byte-identical —
+                # this is the 2026-08-31 non-regression decision recorded in STATE.md.
+                # When True, rows are kept even where only SOME series have data; each
+                # series stays NaN outside its own coverage window (Plotly renders NaN as
+                # a line break, which is the correct reading of "did not exist yet").
                 ):
         self.tickers = list(tickers)
         self.start_date = start_date
         self.data_dir = pathlib.Path(data_dir) if data_dir else _DEFAULT_DATA_DIR
         self.ncols = ncols
         self.nrows = nrows
+        self.ragged = ragged
         # the below attribute will be in the form of {'ticker': ticker, 'col': col_idx}
         # where col_idx is the number assigned to that particular sector or theme etc
         # it is only appended to once that ticker's trace has been added
@@ -160,13 +168,39 @@ class PanelBuilder:
         # once we have loaded all the data and combined into a single df_all,
         # we then filter by the start date, forward-fill missing values, and drop any remaining NaNs
         # note that forward-filling is a simple way to handle non-trading days and ensure we have a continuous time series for plotting;
-        # the way it works is that it fills any missing values with the last known price, 
-        # which is a common convention in financial data analysis 
+        # the way it works is that it fills any missing values with the last known price,
+        # which is a common convention in financial data analysis
         df_all = df_all[df_all.index >= self.start_date].copy()
         df_all.ffill(inplace=True)
-        df_all.dropna(inplace=True)
 
-        # if after all that we end up with an empty DataFrame, we raise an error to 
+        # ============================================================================
+        # RAGGED-HISTORY BRANCH — added 2026-09-20 (Phase 11, Task 4, Step 1).
+        # The unconditional `dropna()` above truncates the WHOLE panel to the latest
+        # first-bar across ALL tickers: a 1990 VIX series loaded beside a 2006 KMLM
+        # series silently loses 1990-2006 for every symbol, and nothing here prints a
+        # warning about it (the only `print` in this method fires on a load exception,
+        # never on truncation). That is fine — even correct — for a plot where every
+        # series must line up; it is wrong for inspecting how far back the DATA reaches.
+        # self.ragged=False (the default) keeps that exact `dropna()` behaviour so no
+        # existing caller changes. self.ragged=True skips it: each series stays NaN
+        # outside its own coverage, and Plotly draws NaN as a break in the line
+        # (`connectgaps` defaults to False) — the correct rendering of "this instrument
+        # did not exist yet", not a gap to be forward-filled or dropped.
+        # ============================================================================
+        if not self.ragged:
+            df_all.dropna(inplace=True)
+        else:
+            # No row is dropped for want of a value in another series. Report per-series
+            # first/last bar so a coverage difference is always visible in the log,
+            # never silently baked into a truncated frame.
+            for ticker in df_all.columns:
+                col = df_all[ticker]
+                first_idx = col.first_valid_index()
+                last_idx = col.last_valid_index()
+                print(f"{ticker}: {first_idx} to {last_idx} "
+                      f"({col.notna().sum()} bars, ragged mode — panel not truncated to this)")
+
+        # if after all that we end up with an empty DataFrame, we raise an error to
         # alert the user that something went wrong with loading/filtering the data
         if df_all.empty:
             raise ValueError("No data found. Check dates/files.")
@@ -184,19 +218,25 @@ class PanelBuilder:
     # ``PanelBuilder._daily_returns`` in a comment) working unchanged.
     # ============================================================================
 
-    def _normalise(self, df = None, base=100):
-        """Wealth index: ``(price / first_price) * base``. See ``analysis.returns.normalise``."""
+    def _normalise(self, df = None, base=100, anchor="first_row"):
+        """Wealth index: ``(price / anchor_price) * base``. See ``analysis.returns.normalise``.
+
+        anchor : passed straight through to ``analysis.returns.normalise`` — default
+            "first_row" keeps today's ``df.iloc[0]`` behaviour unchanged. Pass "common"
+            or "self" when ``df`` is a ragged frame (self.ragged=True); see the anchor
+            policy docstring in ``analysis.returns`` for what each does.
+        """
         # we allow an external df to be passed in, but if it's None,
         #  we default to using self.df_all; this way, we can reuse
         #  this method for any DataFrame with the same structure
         # (e.g. returns) without having to duplicate the logic for normalizing it
         df = self.df_all if df is None else df
-        return returns.normalise(df, base)
+        return returns.normalise(df, base, anchor=anchor)
 
-    def _pct_returns(self, df=None):
-        """Cumulative percentage returns from first observation. See ``analysis.returns.pct_returns``."""
+    def _pct_returns(self, df=None, anchor="first_row"):
+        """Cumulative percentage returns from the anchor observation. See ``analysis.returns.pct_returns``."""
         df = self.df_all if df is None else df
-        return returns.pct_returns(df)
+        return returns.pct_returns(df, anchor=anchor)
 
     def _daily_returns(self, df=None):
         """Simple daily percentage returns (first row dropped). See ``analysis.returns.daily_returns``."""

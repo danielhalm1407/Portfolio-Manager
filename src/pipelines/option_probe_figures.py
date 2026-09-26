@@ -32,6 +32,13 @@ WHAT THE FIGURES SHOW
                             that shows monetisation rather than carry
 5. ``fig_overlay_values``   (16-03) protective put, put spread and collar ROLLED every 63 bars
                             through PortfolioSimulator, next to SPY alone, rolls marked
+6. ``fig_real_iv_history``  (11-01 follow-up, 2026-09-20) SPY's REAL implied vol over the probe
+                            window, from IBKR's OPTION_IMPLIED_VOLATILITY — not synthetic, and not
+                            the illustrative VOL_BETA stand-in Finding 6 used
+7. ``fig_put_paths_market`` the same ladder as ``fig_put_paths``, but term A (the vol LEVEL) and
+                            term B (the moneyness reference) both dynamic together, sourced from
+                            REAL data — the "never term B alone" combination the 2026-08-29
+                            decision required, landing for the first time with real numbers
 
 Run as a script to export:  ``python -m pipelines.option_probe_figures``
 """
@@ -89,6 +96,11 @@ SMIRK_TENORS = {"1 month": 21 / 252, "3 months": 63 / 252, "6 months": 126 / 252
 PRICE_PANEL = PROJECT_ROOT / "data" / "processed" / "prices_spy_kmlm.parquet"
 UNDERLYING = "SPY"
 DOCS_FIGURES = PROJECT_ROOT / "docs" / "figures"
+
+# The real (non-synthetic) IV history 11-01 cached — IBKR's OPTION_IMPLIED_VOLATILITY for the
+# underlying itself, back to 2006-01-09. Added 2026-09-20 as a follow-up to the probe: everywhere
+# else in this module `base` is the synthetic constant above; here it is sliced real data instead.
+IV_HISTORY_PANEL = PROJECT_ROOT / "data" / "processed" / "iv_long_history.parquet"
 
 # Spacing for a figure with a secondary y-axis (legend x inline and on export, right margin,
 # y2 title standoff) lives in theme.py beside the palette, as SECONDARY_AXIS_* — those are the
@@ -221,6 +233,54 @@ def episode_paths(spot_path, peak, tenor=TENOR_YEARS, moneyness=MONEYNESS,
     return idx, strikes, pd.DataFrame(flat, index=idx), pd.DataFrame(spike, index=idx)
 
 
+def load_real_iv(panel=IV_HISTORY_PANEL, symbol=UNDERLYING):
+    """Return the underlying's REAL implied-vol history, NaNs dropped.
+
+    Same read-a-column pattern as ``load_spot_path`` — one column, no normalisation. This is
+    IBKR's ``OPTION_IMPLIED_VOLATILITY`` for the ticker itself (11-01 Task 1), already a decimal
+    (0.166 = 16.6%), the SAME convention as ``vol.py``'s ``base``. It is NOT VIX: VIX is an
+    SPX-derived, 30-day-constant-maturity index IBKR would only serve as its own contract.
+    """
+    return pd.read_parquet(panel)[symbol].dropna()
+
+
+def align_real_iv(real_iv, spot_path):
+    """Slice/align a real IV series onto the probe's own (short) window.
+
+    Reindexed to ``spot_path``'s dates and forward-filled, since the two series are pulled
+    separately and are not guaranteed to land on identical bar dates even though both come from
+    IBKR. Raises rather than silently NaN-ing a column if the probe's window falls outside the IV
+    history's own coverage — a wrong or missing vol number must be loud, not quietly zero-filled.
+    """
+    aligned = real_iv.reindex(spot_path.index).ffill()
+    if aligned.isna().any():
+        missing = aligned[aligned.isna()].index
+        raise ValueError(
+            f"real IV history does not cover the probe window: {len(missing)} date(s) missing, "
+            f"first {missing.min().date()} — re-run cache_prices.py --long-history or widen "
+            f"the IV pull in research/data_inspection/data_inspection.py"
+        )
+    return aligned
+
+
+def iv_paths_market(spot_path, ladder, real_iv, tenor=TENOR_YEARS):
+    """Implied vol per ladder strike, with BOTH v1's assumptions replaced by real data, together.
+
+    Term A (the ATM vol LEVEL) comes bar-by-bar from ``real_iv`` — IBKR's actual measured
+    OPTION_IMPLIED_VOLATILITY — instead of the frozen ``base=0.16``. Term B (the moneyness
+    reference) is each bar's own spot, exactly like v2. This is the "v2, but never term B alone"
+    combination the 2026-08-29 decision required, and Finding 6's dashed "+vol spike" lines were
+    only ever an ILLUSTRATIVE stand-in for what this function now does with real numbers.
+
+    ``real_iv`` must already be aligned to ``spot_path``'s index — see ``align_real_iv``.
+    """
+    return pd.DataFrame(
+        {m: synthetic_iv_surface(k, tenor, spot_path.to_numpy(), base=real_iv.to_numpy())
+         for m, k in ladder.items()},
+        index=spot_path.index,
+    )
+
+
 # ============================================================================
 # FIGURE BUILDERS — each returns a figure with transparent backgrounds and
 # the theme's ink/grid colours (_inline_theme). Correct as-is inline; main()
@@ -280,6 +340,13 @@ def _inline_theme(fig, secondary_axis_spacing=None):
     # Clear the legend of any right-hand axis. theme.apply_secondary_axis_spacing carries the
     # reasoning and the numbers; `secondary_axis_spacing` is passed straight through as its
     # override, for a caller that knows the axis is nowhere near the legend.
+    #
+    # `secondary_axis_spacing` is a THREE-STATE FLAG, not a position: None = auto-detect
+    # (whether the figure has a secondary axis at all), True = force the spacing on, False =
+    # force it off. It is NOT a legend x-coordinate — the x values live in theme.py as
+    # SECONDARY_AXIS_LEGEND_X / _EXPORT and are never passed in here. Passing a coordinate
+    # "works" only because any non-zero number is truthy, which silently forces the 340px
+    # right strip onto single-axis figures (fig_smirk, fig_iv_paths) that need no such thing.
     theme.apply_secondary_axis_spacing(fig, enabled=secondary_axis_spacing)
 
     # Responsive sizing (export path in theme.apply_export_spacing):
@@ -374,6 +441,103 @@ def fig_put_paths(put_v1, put_v2, spot_path, tenor=TENOR_YEARS, symbol=UNDERLYIN
         hovermode="x unified", **_TRANSPARENT,
     )
     return _inline_theme(fig)
+
+
+def fig_real_iv_history(real_iv, symbol=UNDERLYING, base=BASE_VOL):
+    """The underlying's REAL implied vol over the probe window, against v1's frozen `base`.
+
+    A single series, not per-strike: this is term A alone (the ATM level), the thing v1 freezes
+    and Finding 6's dashed lines only ever illustrated. `fig_put_paths_market` is the per-strike
+    consequence of feeding this series in.
+    """
+    fig = go.Figure()
+    fig.add_trace(go.Scatter(x=real_iv.index, y=real_iv.to_numpy(), mode="lines",
+                             name=f"{symbol} real IV (IBKR)",
+                             line=dict(color=theme.CATEGORICAL[0], width=2)))
+    fig.add_hline(y=base, line=dict(color=theme.MUTED, width=1, dash="dot"),
+                  annotation_text=f"v1 frozen base={base:.2f}", annotation_position="top left")
+    fig.update_layout(
+        title=f"{symbol} real implied vol over the probe window (IBKR OPTION_IMPLIED_VOLATILITY)",
+        xaxis_title="date", yaxis_title="implied vol", yaxis_tickformat=".0%",
+        xaxis_tickformat="%b %Y", hovermode="x unified", **_TRANSPARENT,
+    )
+    return _inline_theme(fig)
+
+
+def fig_put_paths_market(put_v1, put_market, spot_path, real_iv, tenor=TENOR_YEARS,
+                         symbol=UNDERLYING, base=BASE_VOL):
+    """The ladder valued v1-frozen vs market-driven, STACKED OVER the vol level that drove it.
+
+    Top: the same comparison `fig_put_paths` makes, with the v2 series replaced by the
+    market-driven one — real IV level AND current-spot moneyness, both dynamic together. Spot on
+    the right-hand axis, as there.
+
+    Bottom: the real IV series itself, on a SHARED x-axis. That shared axis is the entire point of
+    stacking rather than showing two figures: a spike in the vol level lines up VERTICALLY with
+    the jump it produced in the dashed put values above, which is the visual form of Finding 9's
+    claim that the vol LEVEL — not the moneyness reference — is what moves the protection. Two
+    separate figures make the reader do that alignment by eye across a scroll.
+
+    The v2 (synthetic, current-spot-only) series is deliberately NOT drawn here. The comparison
+    this figure exists to make is "no vol spike" vs "vol spike"; adding a third series whose only
+    difference is the moneyness term muddles that into a three-way read. The moneyness-slide
+    effect is Finding 5's subject and stays there.
+
+    Every trace is INDEPENDENTLY toggleable — no `legendgroup`, unlike `fig_put_paths`. Pairing a
+    strike's two series makes a legend click hide both, so "show me only the market-driven lines"
+    is impossible; here that isolation is exactly the comparison the figure supports.
+    """
+    from plotly.subplots import make_subplots
+
+    colours = _strike_colours(tuple(put_v1.columns))
+    fig = make_subplots(
+        rows=2, cols=1, shared_xaxes=True, vertical_spacing=0.08, row_heights=[0.68, 0.32],
+        specs=[[{"secondary_y": True}], [{}]],
+        subplot_titles=(
+            "Put value per ladder strike — v1 frozen (solid) vs market-driven (dashed)",
+            f"{symbol} real implied vol (IBKR) — the level driving the dashed series above",
+        ),
+    )
+
+    for m in put_v1.columns:
+        fig.add_trace(go.Scatter(x=put_v1.index, y=put_v1[m], mode="lines",
+                                 name=f"{m:.2f}x  v1 frozen",
+                                 line=dict(color=colours[m], width=2)), row=1, col=1)
+        fig.add_trace(go.Scatter(x=put_market.index, y=put_market[m], mode="lines",
+                                 name=f"{m:.2f}x  market (real IV + current spot)",
+                                 line=dict(color=colours[m], width=1.5, dash="dash")),
+                      row=1, col=1)
+    # Without the underlying the put series are uninterpretable — every feature in them is a
+    # feature of spot or of the vol panel below.
+    fig.add_trace(go.Scatter(x=spot_path.index, y=spot_path.to_numpy(), mode="lines",
+                             name=f"{symbol} spot (rhs)",
+                             line=dict(color=theme.MUTED, width=1)),
+                  row=1, col=1, secondary_y=True)
+
+    # --- Bottom: the real vol level, against what v1 assumes it always is. -------------------
+    fig.add_trace(go.Scatter(x=real_iv.index, y=real_iv.to_numpy(), mode="lines",
+                             name=f"{symbol} real IV",
+                             line=dict(color=theme.CATEGORICAL[0], width=2)), row=2, col=1)
+    fig.add_hline(y=base, line=dict(color=theme.MUTED, width=1, dash="dot"),
+                  annotation_text=f"v1 frozen base={base:.2f}", annotation_position="top left",
+                  annotation_font=dict(color=theme.INK), row=2, col=1)
+
+    fig.update_yaxes(title_text="put value (price units)", row=1, col=1, secondary_y=False)
+    fig.update_yaxes(title_text=f"{symbol} spot", row=1, col=1, secondary_y=True, showgrid=False)
+    fig.update_yaxes(title_text="implied vol", tickformat=".0%", row=2, col=1)
+    # Only the BOTTOM axis carries tick labels and the title — shared_xaxes hides the top one's.
+    fig.update_xaxes(title_text="date", tickformat="%b %Y", row=2, col=1)
+    fig.update_layout(
+        title=f"European put value per ladder strike — {tenor * 252:.0f}-day tenor, "
+              f"v1 frozen vs real market vol + current spot",
+        height=820, hovermode="x unified", **_TRANSPARENT,
+    )
+    # The secondary axis is in the TOP row, which sits directly beside the legend (anchored to the
+    # top of the figure), so the spacing IS needed — unlike fig_overlay_values, where the secondary
+    # axis is in a lower row and never reaches it. Passed explicitly rather than auto-detected for
+    # the same reason that figure passes its own flag: the auto-detection asks only WHETHER a
+    # secondary axis exists, not whether it is anywhere near the legend.
+    return _inline_theme(fig, secondary_axis_spacing=True)
 
 
 def fig_drawdown_episode(idx, strikes, mtm_flat, mtm_spike, spot_path, peak, trough,
@@ -678,6 +842,8 @@ def build_all():
     put_v2 = put_paths(spot_path, ladder, iv_v2)
     peak, trough, _ = worst_drawdown_episode(spot_path)
     idx, strikes, mtm_flat, mtm_spike = episode_paths(spot_path, peak)
+    real_iv = align_real_iv(load_real_iv(), spot_path)
+    put_market = put_paths(spot_path, ladder, iv_paths_market(spot_path, ladder, real_iv))
     return {
         "iv_smirk": fig_smirk(),
         "iv_paths": fig_iv_paths(iv_v1, iv_v2, spot_ref),
@@ -685,6 +851,12 @@ def build_all():
         "drawdown_episode": fig_drawdown_episode(idx, strikes, mtm_flat, mtm_spike,
                                                  spot_path, peak, trough),
         "overlay_values": fig_overlay_values(overlay_runs(spot_path), spot_path),
+        # Kept as its OWN figure as well as being the bottom panel of put_paths_market below:
+        # Finding 8 is about the vol level on its own terms (how far it moved, and against what
+        # v1 assumes), Finding 9 about what that level did to the protection. Same series, two
+        # questions — and the standalone one is what the Finding 8 section embeds.
+        "real_iv_history": fig_real_iv_history(real_iv),
+        "put_paths_market": fig_put_paths_market(put_v1, put_market, spot_path, real_iv),
     }
 
 
@@ -696,6 +868,8 @@ FIGURE_CAPTIONS = {
     "put_paths": "The ladder valued through time, against spot",
     "drawdown_episode": "Puts struck at the peak and carried through the drawdown",
     "overlay_values": "Protective put, put spread and collar, rolled every 63 bars, vs SPY alone",
+    "real_iv_history": "SPY's real implied vol over the probe window (IBKR, not synthetic)",
+    "put_paths_market": "The ladder valued with real vol level AND current spot, both dynamic",
 }
 
 
@@ -730,9 +904,10 @@ def write_index(out_dir, figures, captions=FIGURE_CAPTIONS):
   <ul>
 {rows}
   </ul>
-  <p class="note">Underlying: SPY close, 250 bars, 2025-07-28 to 2026-07-24. Vol is a synthetic
-     surface with a constant ATM level, not market data — see the write-up for what that does and
-     does not support.</p>
+  <p class="note">Underlying: SPY close, 250 bars, 2025-07-28 to 2026-07-24. Findings 1-7 price off
+     a SYNTHETIC surface with a constant ATM level; the real-IV figures added 2026-09-20 use
+     IBKR's actual measured implied vol for the same window instead — see the write-up for what
+     each does and does not support.</p>
 </body></html>
 """
     (out_dir.parent / "index.html").write_text(html, encoding="utf-8")

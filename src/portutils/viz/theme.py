@@ -179,14 +179,30 @@ RESIDUAL_COLOUR = MUTED
 #
 # One builder serves BOTH the interactive window and the published page, and the
 # page renders the figure much wider. `legend.x` is a fraction of the PLOT AREA's
-# width while the margin is in pixels, so a single legend x cannot be right in
-# both: 1.04 is the correct gap inline and too tight once the page stretches the
-# plot. Hence two legend values — `apply_secondary_axis_spacing` sets the inline
-# one during construction, `apply_export_spacing` swaps in the export one.
+# width while the margin is in pixels, so the GAP between the plot's right edge
+# and the legend is `(x - 1.0) * plot_width` PIXELS — it scales with the render.
+#
+# CORRECTED 2026-09-20. The reasoning here was previously inverted: it claimed a
+# single x was "too tight once the page stretches the plot", but stretching the
+# plot makes the same fraction a WIDER pixel gap, not a narrower one. The
+# consequence of that inversion was a real bug — the NARROW inline render was
+# given the SMALL fraction (1.04) and the wide export the large one (1.10), i.e.
+# exactly backwards. What has to fit in the gap is the y2 tick labels (~22px),
+# the title standoff (24px) and the rotated y2 title: about 60px. Inline, with a
+# ~880px plot area, 1.04 bought only ~35px, so the y2 title rendered straight
+# through the legend; the export's ~1180px plot area at 1.10 bought ~118px and
+# looked fine, which is why the bug showed up inline ONLY.
+#
+# Both values are now 1.10, which clears 60px at either width (88px inline,
+# 118px on the page). They stay as two constants — rather than collapsing into
+# one — so the page value can still be tuned independently if a longer series
+# name ever needs a different gap there; `apply_export_spacing` keeps swapping.
 # ---------------------------------------------------------------------------
 
 # Legend's left edge INLINE, as a fraction of the plot area's width (1.0 = the plot's right edge).
-SECONDARY_AXIS_LEGEND_X = 1.04
+# Larger than it looks it should be ON PURPOSE: the inline plot area is the NARROW one, so it needs
+# the bigger fraction to buy the same pixel gap. See the correction note above.
+SECONDARY_AXIS_LEGEND_X = 1.10
 
 # Legend's left edge in the EXPORTED figure (standalone page and report page). Applied only by
 # `apply_export_spacing`, so changing it cannot affect what the interactive window shows.
