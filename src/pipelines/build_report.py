@@ -77,7 +77,7 @@ FIGURE_AT = {
 # become blob URLs. Branch is a constant because the report is published per branch, and `main`
 # would 404 for anything not yet merged.
 GITHUB_REPO = "https://github.com/danielhalm1407/Portfolio-Manager"
-GITHUB_BRANCH = "feat/16-option-instruments"
+GITHUB_BRANCH = "master"
 
 # The default page chrome — 10-01's probe report. Each is a `build_report` argument, so a second
 # report can replace the ones that are specific to its own evidence and inherit the rest.

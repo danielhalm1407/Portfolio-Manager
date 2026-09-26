@@ -46,29 +46,29 @@
 <header class="page">
   <p class="meta"><a href="../index.html">&larr; all sections</a></p>
   <h1>Option overlay probe</h1>
-  <p class="meta">Figures are fully interactive — hover, zoom and legend toggles all work, with no server. Generated from <a href="https://github.com/danielhalm1407/Portfolio-Manager/blob/feat/16-option-instruments/research/option_overlay_probe.md">research/option_overlay_probe.md</a> by <code>python -m pipelines.build_report</code> on 2026-09-26.</p>
+  <p class="meta">Figures are fully interactive — hover, zoom and legend toggles all work, with no server. Generated from <a href="https://github.com/danielhalm1407/Portfolio-Manager/blob/master/research/option_overlay_probe.md">research/option_overlay_probe.md</a> by <code>python -m pipelines.build_report</code> on 2026-09-26.</p>
 </header>
 <main>
 <h1>Option overlay probe — does the synthetic surface price a sane put?</h1>
-<p><strong>Script:</strong> <a href="https://github.com/danielhalm1407/Portfolio-Manager/blob/feat/16-option-instruments/research/option_overlay_probe.py"><code>option_overlay_probe.py</code></a>
+<p><strong>Script:</strong> <a href="https://github.com/danielhalm1407/Portfolio-Manager/blob/master/research/option_overlay_probe.py"><code>option_overlay_probe.py</code></a>
 <strong>Run:</strong> 2026-08-31, on <code>data/processed/prices_spy_kmlm.parquet</code> (SPY, 250 bars,
 2025-07-28 → 2026-07-24)</p>
 <h2>The question</h2>
-<p>Before three plans of module-building (<a href="https://github.com/danielhalm1407/Portfolio-Manager/blob/feat/16-option-instruments/.paul/phases/16-strategy-architecture/CONTEXT.md">16-01</a>
+<p>Before three plans of module-building (<a href="https://github.com/danielhalm1407/Portfolio-Manager/blob/master/.paul/phases/16-strategy-architecture/CONTEXT.md">16-01</a>
 skeleton → 16-02 instruments → 16-03 rules), is the option ECONOMICS sound? Specifically: does the
 vol surface ported out of
-<a href="https://github.com/danielhalm1407/Portfolio-Manager/blob/feat/16-option-instruments/.paul/phases/12-option-overlay/12-01-PLAN.md"><code>12-01-PLAN.md</code></a>, plus a European put, produce
+<a href="https://github.com/danielhalm1407/Portfolio-Manager/blob/master/.paul/phases/12-option-overlay/12-01-PLAN.md"><code>12-01-PLAN.md</code></a>, plus a European put, produce
 protection costs and protection payoffs that look like a real option market on the real SPY path?</p>
 <p>This is deliberately the cheap version. No roll, no sizing, no P&amp;L — a single fixed-tenor snapshot
 repriced bar by bar. That is why it needs neither Phase 11 history nor an option chain.</p>
 <h2>What was built</h2>
 <p>Two pure modules, in the place 16-02 will find them:</p>
 <ul>
-<li><a href="https://github.com/danielhalm1407/Portfolio-Manager/blob/feat/16-option-instruments/src/portutils/strategies/instruments/vol.py"><code>portutils/strategies/instruments/vol.py</code></a> —
+<li><a href="https://github.com/danielhalm1407/Portfolio-Manager/blob/master/src/portutils/strategies/instruments/vol.py"><code>portutils/strategies/instruments/vol.py</code></a> —
 <code>synthetic_iv_surface</code>, ported from <code>crash.py:2579</code> with every constant exposed as a keyword
 argument. It was previously an inline code block inside a planning document, which meant every
 consumer would have retyped it.</li>
-<li><a href="https://github.com/danielhalm1407/Portfolio-Manager/blob/feat/16-option-instruments/src/portutils/strategies/instruments/pricing.py"><code>portutils/strategies/instruments/pricing.py</code></a> —
+<li><a href="https://github.com/danielhalm1407/Portfolio-Manager/blob/master/src/portutils/strategies/instruments/pricing.py"><code>portutils/strategies/instruments/pricing.py</code></a> —
 <code>black_scholes_put</code>, European, discounted-intrinsic floor, <strong>no clamp</strong>, per the 2026-08-26
 decision. No scipy: the normal CDF is built from <code>math.erf</code>.</li>
 </ul>
@@ -402,22 +402,22 @@ explicit. It is four hops, and nothing in it is a second implementation of anyth
 <tbody>
 <tr>
 <td>1</td>
-<td><a href="https://github.com/danielhalm1407/Portfolio-Manager/blob/feat/16-option-instruments/src/pipelines/option_probe_figures.py"><code>option_probe_figures.overlay_runs</code></a></td>
+<td><a href="https://github.com/danielhalm1407/Portfolio-Manager/blob/master/src/pipelines/option_probe_figures.py"><code>option_probe_figures.overlay_runs</code></a></td>
 <td>Builds one <code>PortfolioSimulator</code> per strategy: <code>BuyAndHoldRule({&quot;SPY&quot;: 1.0})</code> plus the option rule, starting capital = the first close, so the book holds exactly one SPY unit.</td>
 </tr>
 <tr>
 <td>2</td>
-<td><a href="https://github.com/danielhalm1407/Portfolio-Manager/blob/feat/16-option-instruments/src/portutils/portfolio/simulator.py#L47"><code>PortfolioSimulator.run</code></a></td>
+<td><a href="https://github.com/danielhalm1407/Portfolio-Manager/blob/master/src/portutils/portfolio/simulator.py#L47"><code>PortfolioSimulator.run</code></a></td>
 <td>Per bar: <code>propose</code> → <strong>synthetic marks</strong> (<code>:72</code>) → fill → mark the book. The marks step is 16-03's hook; without it a leg has no price and can neither fill nor be valued.</td>
 </tr>
 <tr>
 <td>3</td>
-<td><a href="https://github.com/danielhalm1407/Portfolio-Manager/blob/feat/16-option-instruments/src/portutils/strategies/rules/options.py#L136"><code>OptionOverlayRule.propose</code></a></td>
+<td><a href="https://github.com/danielhalm1407/Portfolio-Manager/blob/master/src/portutils/strategies/rules/options.py#L136"><code>OptionOverlayRule.propose</code></a></td>
 <td>Only acts on a ROLL bar. Closes the expiring legs, asks the subclass's <code>_leg_spec()</code> for the new ones, and prices each at birth — that price becomes the premium. <code>RollingCollarRule._leg_spec</code> (<code>:282</code>) returns <code>[(&quot;P&quot;, 0.90, +1), (&quot;C&quot;, 1.28, -1)]</code>.</td>
 </tr>
 <tr>
 <td>4</td>
-<td><a href="https://github.com/danielhalm1407/Portfolio-Manager/blob/feat/16-option-instruments/src/portutils/strategies/rules/options.py#L104"><code>OptionOverlayRule._price</code></a></td>
+<td><a href="https://github.com/danielhalm1407/Portfolio-Manager/blob/master/src/portutils/strategies/rules/options.py#L104"><code>OptionOverlayRule._price</code></a></td>
 <td>The only place a number is produced: <code>vol_fn(strike, tau, spot_ref)</code> → <code>OptionLeg.price</code> → <code>black_scholes_put</code> / <code>black_scholes_call</code>. On the expiry bar it returns <code>intrinsic(spot)</code> instead.</td>
 </tr>
 </tbody>
@@ -696,7 +696,7 @@ the GitHub Pages root:</p>
 <pre><code class="language-bash">python -m pipelines.option_probe_figures      # or the last cell of the script
 </code></pre>
 <p>The builders live in
-<a href="https://github.com/danielhalm1407/Portfolio-Manager/blob/feat/16-option-instruments/src/pipelines/option_probe_figures.py"><code>src/pipelines/option_probe_figures.py</code></a> and are shared
+<a href="https://github.com/danielhalm1407/Portfolio-Manager/blob/master/src/pipelines/option_probe_figures.py"><code>src/pipelines/option_probe_figures.py</code></a> and are shared
 between the research cells and the exporter, so the inline figure and the published page are the
 same object. This is the first concrete instance of Phase 10's Track A (10-01) pattern.</p>
 <h2>Verdict</h2>

@@ -18,7 +18,7 @@ phases = 5
 number = 13
 name = "Walk-forward validation harness"
 status = "in_progress"
-plans_completed = 1
+plans_completed = 2
 
 [loop]
 position = "IDLE"
@@ -27,6 +27,6 @@ position = "IDLE"
 groom = true
 
 [stats]
-total_plans = 24
+total_plans = 25
 total_phases = 15
-last_activity = "2026-09-20T00:00:00Z"
+last_activity = "2026-09-26T13:15:00Z"

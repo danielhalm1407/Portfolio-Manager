@@ -22,22 +22,30 @@ rules into the order ledger). Phase 4 — reopened 2026-08-03 for plan 04-05 (ex
 ## Current Position
 
 Milestone: v0.4 Does hedging actually work? (added 2026-08-24) — v0.2 still in progress alongside
-Phase: 11 (Long-history data foundation) — 11-01 COMPLETE 2026-09-20, loop CLOSED. 11-02 scoped,
-not written, so Phase 11 is 1 of 2 and NOT transitioned. Phase 10's 10-01 and Phase 16's
-16-02/16-03 also complete. Phase 13 now in Planning
+Phase: 13 (Walk-forward validation harness) — 13-01 COMPLETE 2026-09-26, loop CLOSED
+(SUMMARY: `13-01-SUMMARY.md`). 13-01.1 complete (2026-09-20). 13-02 planned, not yet applied, so
+Phase 13 is 2 of 3+ and NOT transitioned. Phase 11's 11-01, Phase 10's 10-01 and Phase 16's
+16-02/16-03 also complete.
 Plan: 16-02 and 16-03 created 2026-09-19, awaiting approval (16-03 depends on 16-02). Option
 instruments, then the three option rules run through PortfolioSimulator via an additive
 synthetic-marks hook, shown over the probe's SPY window. Needs no Phase 11 data (v1 surface).
 Plan: 11-01 created 2026-08-24, awaiting approval — now also carries the ragged-history fix at BOTH
 sites (`cache_prices.py::_tidy` and `PanelBuilder._load`), and has a phase-level `CONTEXT.md`
 written above it. Also open: 02-02 and 02-03 (created 2026-08-23, awaiting approval), 04-05 (CONTEXT.md written,
-not yet planned), 07-02 (planned, not applied), and three scoped-but-unwritten plans: 10-01, 10-02,
-11-02.
-Status: 13-01.1 loop CLOSED 2026-09-20 (UNIFY run). Full suite **218 passed, 1 known ARM_LIVE
-failure**. One full-history simulator run is now **6.3 s over 5,201 bars** (was a projected
-~6.5 min). `data/processed/prices_long_history.parquet` (SPY from 1993) and
-`iv_long_history.parquet` (real IV from 2006-01-09) exist. 13-01 remains in flight at Task 3
-Last activity: 2026-09-20 — UNIFY on 13-01.1. `NarrowLedger` (a constant-width `StateLedger`
+not yet planned), 07-02 (planned, not applied), and three scoped-but-unwritten plans: 10-02, 11-02,
+plus 13-02/13-03 planned but not applied.
+Status: **13-01 loop CLOSED 2026-09-26 (UNIFY run).** Full suite **227 passed, 1 pre-existing
+unrelated failure** (`test_debug_cell_script_is_disarmed_and_gated` — an armed `orders/` debug cell,
+not touched by this plan). The GFC monetisation policy is published as a two-section site
+(`docs/index.html` hub → `docs/probing/` + `docs/validation/`), and `option_monetisation_batch.py`
+— which had SILENTLY NEVER COMPLETED A RUN against the current engine, missing
+`ledger=NarrowLedger()` — now runs the full 5-config named set in seconds, with AC-3b's trigger
+comparison (70.6% agreement within 5 bars) landing as a side effect of the fix. A second stale
+constant (`GITHUB_BRANCH`, still the feature branch after this session pushed straight to
+`master`) fixed the same pass. 13-02's plan updated with the corroborated runtime constant, an
+explicit `monetise_multiple`-out-of-scope note, and a confirmed incremental build order.
+Last activity: 2026-09-26 — UNIFY on 13-01.
+Prior, 2026-09-20 — UNIFY on 13-01.1. `NarrowLedger` (a constant-width `StateLedger`
 SUBCLASS, handed in through the `ledger=` argument `PortfolioSimulator` already accepts, so nothing
 on 13-01's DO NOT CHANGE list moved) takes one full-history run from ~6.5 min to **6.30 s / 5,201
 bars / 1.21 ms/bar**, with equity **bit-identical** to the wide ledger (max gap 0.0, not merely
@@ -119,10 +127,11 @@ Progress:
 Current loop state:
 ```
 PLAN ──▶ APPLY ──▶ UNIFY
-  ✓        ✓        ✓     [13-01.1 loop CLOSED 2026-09-20. 13-01 still IN FLIGHT: Tasks 1-2
-                            complete, Task 3 amended into a staged ladder and not yet run, its
-                            checkpoint not reached. 13-02 planned, blocked behind 13-01's
-                            thrash finding. 11-01, 10-01, 16-02, 16-03 loops CLOSED.]
+  ✓        ✓        ✓     [13-01 loop CLOSED 2026-09-26 — SUMMARY: 13-01-SUMMARY.md. 13-01.1
+                            loop CLOSED 2026-09-20. Phase 13 NOT transitioned: 13-02 planned
+                            but not applied (unblocked now that 13-01's engine and full-history
+                            batch are proven — no thrash finding blocking it any longer).
+                            11-01, 10-01, 16-02, 16-03 loops CLOSED.]
 ```
 
 Phases 1-6 and 8 were completed **before** PAUL was adopted. Their SUMMARY files are
@@ -193,6 +202,9 @@ shipped, not as evidence the loop was followed.
 | 2026-09-20 | `Book` and `StateLedger` are different objects, and the RESIDUAL timing term is in `Book` | Easy to conflate and worth pinning: `Book` is live state (a dict of `Position`s, signed qty, VWAP entry, realised P&L); `StateLedger` is the per-bar recording written from it. 13-01.1 narrowed the recording only. What is left — 0.36 ms/bar at 2,000 bars against 1.21 over the full 5,201 — is `Book.unrealised()` and `Book.gross_exposure()` each walking ~82 dead legs on every bar, because `Book.position()` auto-creates and nothing removes. That is candidate fix 2 in 13-01's context section 6; declined here because it changes `book.symbols` semantics and 6.3 s is already affordable. Routed to 13-01 |
 | 2026-09-20 | Option lifecycle is classified from the RUNNING POSITION, never from the fill's `side` | A long put is bought to open and sold to close; a collar's short call is sold to open and bought to close — so `side` classifies the two structures in opposite directions off the same rule. `classify_option_events` tracks signed qty per symbol through the blotter in bar order and calls a fill opening when it moves |position| away from flat. One definition, in `strategies/scoring.py`, shared by 13-01's Task 3 tables and 13-02's path panels, because two definitions of "what is a roll" stay invisible until a figure contradicts a table |
 | 2026-08-03 | The Master API client ID is NOT required to see another client's executions | The connection was still `CLIENT_ID = 161` when the five fills came back; only `ExecutionFilter.clientId` changed, to 151. So connection-level scoping was never the restriction and the filter alone was. An earlier connection-scoping theory is wrong. The prior observation that `client_id=0` "returned nothing" was taken on a Sunday with no fills, and tested nothing |
+| 2026-09-26 | AC-3b re-opened and satisfied the same day it was descoped | The descoping's premise — `monetise_multiple` has no full-history run — was itself a bug (`option_monetisation_batch.run_one` missing `ledger=NarrowLedger()`), not a genuine gap. Fixing the one argument let the batch complete and its own `trigger_comparison()` print the answer for free: 70.6% of drawdown firings within 5 bars of a multiple firing |
+| 2026-09-26 | `docs/index.html` is a HUB, not a report; each published section lives under its own directory beside its own figures | 10-01's probe report used to BE `docs/index.html`, so 13-01's validation report was reachable only by typing `/validation/` and nothing linked back. `build_site_index.py` now owns the hub; `build_report.py` was generalised (8 new keyword arguments) to serve two reports off one implementation rather than two |
+| 2026-09-26 | The batch script's own blotter (`rule.events_frame()`) and AC-6's defined blotter (`sim.blotter()`) are DIFFERENT artefacts, not reconciled | Found while persisting the GFC-window blotter to match AC-6's literal spec. `option_monetisation_batch.py` persists the richer rule-reasoned log instead. Flagged, not fixed — whoever next reads both directories should expect different columns |
 
 ### Deferred Issues
 
@@ -253,60 +265,59 @@ shipped, not as evidence the loop was followed.
   checked" — a different window, never tested; (b) the workaround no longer exists, since it
   appears only in the legacy v9.72+ doc set and the current docs state a flat "only the current
   day's executions can be retrieved". TWS-side, not code-side.
-- **13-01's monetise/reopen THRASH blocks 13-02.** Found 2026-09-20 by 13-01.1's ladder probe on
-  its first real run. Rung 3c monetises and reopens on consecutive bars: **281 monetisations
-  against 48 rolls** over 2006-2026. `_gate_open()` tests implied vol against `reentry_iv` and
-  nothing else — it never tests whether the monetise trigger is still firing — and `_peak` does not
-  reset on a monetise, so after a real crash the drawdown condition stays true for years. Mid-2008
-  IV sat at 0.16-0.18 against `reentry_iv=0.18`, so the gate opened the next bar every time. Both
-  gates demonstrably WORK (the 2009-03-03 reopen fires at exactly 126 flat bars), so this is either
-  the wrong illustrative `reentry_iv` level — 0.18 is near SPY's unconditional median IV, so it is
-  barely a gate — or a missing DRAWDOWN-RECOVERED condition on `_gate_open()`. Test the cheap
-  reading first. **13-02 must not run until this is resolved**: a 49-point sweep over a thrashing
-  policy produces a response surface of an artefact. Full write-up in `13-01-PLAN.md` under
-  "FINDINGS CARRIED IN FROM 13-01.1".
+- ~~**13-01's monetise/reopen THRASH blocks 13-02.**~~ **RESOLVED 2026-09-21, re-confirmed on the
+  real GFC window 2026-09-22, and again on the full-history batch 2026-09-26.** The drawdown
+  reference now resets on REOPEN (never on a roll, never on the monetise itself) — full reasoning
+  in `13-01-PLAN.md` under "FINDINGS CARRIED IN FROM 13-01.1". Full-history count after the fix:
+  17 `monetise_drawdown` monetisations (not 281) against `monetise_multiple`'s 44, with the two
+  triggers agreeing within 5 bars 70.6% of the time (`option_monetisation_batch.py`, 2026-09-26).
+  **13-02 is no longer blocked.**
 - **`ARM_LIVE = True` is committed** in `orders/rebalance_live_debug.py:67`. The live-submit gate is
   open, and `test_debug_cell_script_is_disarmed_and_gated` fails by design as the reminder. Set it
   back to `False` when live work is finished; the suite is green at 126/126 with it disarmed.
 
 ## Session Continuity
 
-Last session: 2026-09-20
-Stopped at: **13-01 is IN FLIGHT and its APPLY is interrupted.** Tasks 1 and 2 are complete and
-verified (v2 pricing in `OptionOverlayRule`, the monetise / wait / reopen state machine, 23 new
-tests, AC-1's byte-identity hashes unchanged). Task 3's code exists in
-`src/pipelines/option_monetisation_batch.py` but its full-history run was deliberately NOT completed
-and the checkpoint was NOT reached. Nothing is running; nothing was written under `outputs/`.
-The full handoff is `.paul/phases/13-walk-forward-validation/13-01-IMPLEMENTATION-CONTEXT.md`.
+Last session: 2026-09-26
+Stopped at: **13-01 loop CLOSED.** SUMMARY: `.paul/phases/13-walk-forward-validation/13-01-SUMMARY.md`.
+Everything Task 4 (publishing) needed is done except step 6 (following a handful of stale doc/
+cell-comment mentions of the old `docs/figures/` path — cosmetic, non-gating). Full suite 227
+passed, 1 pre-existing unrelated failure (`test_debug_cell_script_is_disarmed_and_gated`, see
+Blockers).
 
-Why it stopped: the simulator is **quadratic in bars** — 5.99 ms/bar at 250 bars, 28.63 at 2,000 —
-putting 13-01's own AC-5 run at ~45 min and 13-02's grid at ~11 hours. The cost is the RECORDER, not
-the rules and not the fill model: `Book` retains every option leg it has ever held,
-`Book.snapshot` iterates all of them, and `Ledger.record_book` flattens all of them into an
-ever-widening row (~82 dead legs over 20 years).
+**Two bugs found and fixed while closing the checkpoint, neither planned:**
+1. `option_monetisation_batch.run_one` never passed `ledger=NarrowLedger()` — the batch script had
+   SILENTLY NEVER COMPLETED A RUN against the current engine since the file was created, defaulting
+   to the pre-13-01.1 O(dead-legs) ledger. Fixed; the full 5-config named set now runs in seconds
+   (0.45s single-run measurement), and AC-3b's trigger-agreement comparison (70.6% within 5 bars)
+   came out as a side effect — re-opening and satisfying an AC that had been descoped hours earlier
+   for exactly the reason this bug caused.
+2. `GITHUB_BRANCH` stale at `"feat/16-option-instruments"` in both page builders, after this
+   session pushed straight to `master` rather than merging a PR. Fixed to `"master"` in both;
+   all three published pages rebuilt.
 
-**13-01.1 is DONE** (SUMMARY: `.paul/phases/13-walk-forward-validation/13-01.1-SUMMARY.md`).
-`NarrowLedger` ships, the ladder probe ships, and the single-run constant is **6.30 s / 5,201 bars
-/ 1.21 ms/bar**, measured not projected. Use that number, not the 1.9 s a projection from the
-2,000-bar slice gives — a residual `Book` term makes the full run 3.3x the projection.
+**Published**: `docs/index.html` is now a hub linking `docs/probing/` (10-01's probe, moved) and
+`docs/validation/` (13-01's GFC report, rendered from `research/validation/option_monetisation_gfc.md`
+with generated premium-financing stats), each section linking back up. One vendored
+`plotly.min.js` at `docs/assets/`, zero pages depending on a CDN, 22 local links site-wide with 0
+missing.
 
-Next action: **resume 13-01 Task 3**, amended 2026-09-20 into a staged ladder — rungs 3a (single
-struck hedge) / 3b (rolling) / 3c (monetising), each ~370 bars over the GFC window and each a STOP
-inspected through `research/validation/option_ladder_probe.py`, then 3d (one configuration, full
-history) and 3e (the named set). Rungs 3a-3d have all now been RUN once under 13-01.1 and the
-numbers are in its SUMMARY; what Task 3 owes is the four findings and then the named set.
+**13-02's plan was updated in the same session** with everything from 13-01 that bears on it: the
+runtime constant corroborated on the actual structure it sweeps (`protective_put`/`monetise_drawdown`,
+1.0-1.8s per full-history run — NOT `put_spread`'s 1.78s or `collar`'s 2.34s, which are out of
+scope), an explicit note that `monetise_multiple` is not part of 13-02 at any step (stays on the
+rule, stays tested via 13-01's own batch, just not swept), the 2026-09-21 reopen-reset fix's effect
+on runtime attributed, and a confirmed incremental build order — one window / four moneyness
+strikes / no monetisation trigger first, then add `monetise_drawdown`, then the rest, one step at a
+time, cell by cell.
 
-**Start with finding 1, the thrash** — see Blockers. It gates 13-02. The other three: the `Book`
-dead-leg retirement (the remaining 3x timing term), an IV panel on the probe figure with
-`reentry_iv` drawn across it, and a hand-check of one bar's strikes and premia against a direct
-`synthetic_iv_surface` + `black_scholes_put` call.
-
-Then 13-02 (in-sample grid and response surface, now reduced to Task 1 scoring, Task 2a a
-four-corner smoke run, Task 2b the 7x7 grid at ~12 min, then surfaces and figures) and 13-03 (CPCV
-procedure validation). Design for all of them is in
-`.paul/phases/13-walk-forward-validation/CONTEXT.md`, subject to 13-02's override table. Alternatives already scoped: 02-02/02-03
-(trade rationale), 07-02, 04-05, 11-02.
-Resume file: .paul/phases/13-walk-forward-validation/CONTEXT.md
+Next action: **13-02** (in-sample grid and response surface: moneyness x monetisation-drawdown,
+floored Calmar, 1-D then 2-D surfaces) is UNBLOCKED — the thrash finding that blocked it is
+resolved and re-confirmed twice more since. Build incrementally per the note above, not the whole
+grid at once. Then 13-03 (CPCV procedure validation). Design for both in
+`.paul/phases/13-walk-forward-validation/CONTEXT.md`, subject to 13-02's own override table.
+Alternatives already scoped: 02-02/02-03 (trade rationale), 07-02, 04-05, 11-02, 10-02.
+Resume file: `.paul/phases/13-walk-forward-validation/13-02-PLAN.md`
 
 **Branch state, 2026-09-20.** Three loops closed on `feat/16-option-instruments` (16-02, 16-03,
 10-01), committed and pushed. The USER opens the PR to master. TWO things must happen around that

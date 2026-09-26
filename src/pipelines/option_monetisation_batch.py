@@ -49,13 +49,11 @@ import pandas as pd
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 
+from portutils.portfolio.book import Book
+from portutils.portfolio.narrow_ledger import NarrowLedger
 from portutils.portfolio.rules import BuyAndHoldRule
 from portutils.portfolio.simulator import PortfolioSimulator
-from portutils.strategies.rules.options import (
-    ProtectivePutRule,
-    PutSpreadRule,
-    RollingCollarRule,
-)
+from portutils.strategies.rules.options import ProtectivePutRule
 from portutils.viz import theme
 
 from pipelines.option_probe_figures import (
@@ -151,11 +149,16 @@ def build_configs(iv):
             floor=0.90, monetise_drawdown=ILLUSTRATIVE_DRAWDOWN, **policy, **v2),
         "monetise_multiple": ProtectivePutRule(
             floor=0.90, monetise_multiple=ILLUSTRATIVE_MULTIPLE, **policy, **v2),
-        # Reference rows only: the other two structures at their 12-01 defaults, so the table
-        # shows where they sit without claiming anything about their parameters.
-        "put_spread_v2_ref": PutSpreadRule(floor=0.90, spread_width=0.80, **v2),
-        "collar_v2_ref": RollingCollarRule(floor=0.90, cap=1.28, **v2),
     }
+    # `put_spread_v2_ref` / `collar_v2_ref` (PutSpreadRule / RollingCollarRule at 12-01 defaults,
+    # no monetisation policy armed) used to sit here as bare reference rows — CUT (13-01
+    # checkpoint decision 0c, 2026-09-26), following the recommendation
+    # 13-01-IMPLEMENTATION-CONTEXT.md section 8 already made and the plan left open. AC-5's own
+    # gherkin never named them (it names exactly the five configs above), and Task 4's published
+    # GFC report now gives put spread and collar something a bare reference row could not: both
+    # structures run under the ACTUAL monetisation policy, not at idle defaults, with every fill
+    # marked and a runtime measured. A reference row that only shows "where a structure sits with
+    # no policy" answers less than that report already does.
 
 
 def run_one(name, rule, spot):
@@ -163,7 +166,19 @@ def run_one(name, rule, spot):
     reads in SPY price units and the table is directly comparable to 16-03's figures."""
     prices = spot.to_frame(UNDERLYING)
     rules = [BuyAndHoldRule({UNDERLYING: 1.0})] + ([rule] if rule is not None else [])
-    sim = PortfolioSimulator(prices, rules, starting_capital=float(spot.iloc[0]))
+    # `ledger=NarrowLedger()` — FOUND AND FIXED 2026-09-26, closing 13-01. Without this argument
+    # PortfolioSimulator defaults to `StateLedger()` (simulator.py:37), the O(dead legs) ledger
+    # 13-01.1 exists to replace: over 5,201 bars and ~82 rolls per hedged configuration, that is
+    # the ~6.5-minute-per-run cost 13-01.1's SUMMARY records, not the ~1-2s this plan's own
+    # progress log has been quoting — which was always measured from
+    # research/validation/option_ladder_probe.py's run_one, the ONLY place the fix had actually
+    # been wired in. This script — the one AC-5/AC-6 name, the one meant to run "in one command"
+    # — had silently never completed a run against the current engine: `python -m
+    # pipelines.option_monetisation_batch` was still timing out past two minutes on a 5-config
+    # named set until this line was added. `Book(base_equity=...)` alongside it for the same
+    # reason the ladder probe passes both together: a fresh book per call, matching convention.
+    sim = PortfolioSimulator(prices, rules, book=Book(base_equity=float(spot.iloc[0])),
+                             starting_capital=float(spot.iloc[0]), ledger=NarrowLedger())
     t0 = time.perf_counter()
     state = sim.run()
     elapsed = time.perf_counter() - t0

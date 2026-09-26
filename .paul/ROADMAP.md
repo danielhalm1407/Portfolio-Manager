@@ -64,7 +64,7 @@ Progress: [█████░░░░░] 50%
 | 10 | Deployment — web app | 2 | In progress (Track A done 2026-09-20; Track B not started) | - |
 | 11 | Long-history data foundation | 2 | In progress (1 of 2) | 11-01 complete 2026-09-20 |
 | 12 | Option overlay engine | TBD | Not started | - |
-| 13 | Walk-forward validation harness | 4 (13-01.1 COMPLETE, 13-01 in progress, 13-02 planned, 13-03 TBD) | In progress (1 of 4) | 13-01.1 complete 2026-09-20 |
+| 13 | Walk-forward validation harness | 4 (13-01.1 COMPLETE, 13-01 COMPLETE, 13-02 planned, 13-03 TBD) | In progress (2 of 4) | 13-01 complete 2026-09-26 |
 | 14 | Regime labelling and scenario guardrails | TBD | Not started | - |
 | 15 | Conviction write-up — how much hedging is enough | TBD | Not started | - |
 | 16 | Strategy architecture consolidation | 7 | In progress (16-02, 16-03 complete 2026-09-20) | - |
@@ -556,17 +556,20 @@ wrong vol. Two changes to how the work is done, one to what is built:
   roughly 30-day ATM series; and `iv_floor = 0.10` sits above the real series' minimum of 0.065.
 
 **Plans:**
-- [ ] 13-01: Option monetisation policy on the full real-IV history — v2 pricing (level and
-  moneyness together), `monetise_multiple` / re-entry gate / `max_flat_bars`, and a one-command batch
-  run over 2006-2026. Plan written 2026-09-20 at `.paul/phases/13-walk-forward-validation/13-01-PLAN.md`.
-  **Tasks 1 and 2 COMPLETE and verified 2026-09-20** (v2 pricing in the rule; the monetise / wait /
-  reopen state machine; 23 new tests; AC-1's byte-identity hashes unchanged). **Task 3 INTERRUPTED**
-  — its code exists, its full-history run was deliberately not completed, and the checkpoint was not
-  reached. Amended 2026-09-20 to resume against 13-01.1 as a staged ladder (rungs 3a single hedge /
-  3b rolling / 3c monetising, each a STOP inspected through the probe, then 3d one configuration
-  over the full history, then 3e the named set). AC-6's wall-clock is now measured AFTER 13-01.1 and
-  requires three persisted artefacts per configuration — equity series, blotter and rule history —
-  because the narrow ledger can no longer explain its own equity path
+- [x] 13-01: **COMPLETE 2026-09-26.** Option monetisation policy on the full real-IV history — v2
+  pricing (level and moneyness together), `monetise_drawdown`/`monetise_multiple`, re-entry gate,
+  `max_flat_bars`, and a one-command batch run over 2006-2026. Plan at
+  `.paul/phases/13-walk-forward-validation/13-01-PLAN.md`. SUMMARY:
+  `.paul/phases/13-walk-forward-validation/13-01-SUMMARY.md`.
+  Published as a two-section site (`docs/index.html` hub, `docs/probing/`, `docs/validation/`
+  with a rendered GFC write-up and generated premium-financing stats). Closing the human-verify
+  checkpoint surfaced two bugs, both fixed: `option_monetisation_batch.py` had never once
+  completed a run against the current engine (missing `ledger=NarrowLedger()`) — fixed, which also
+  re-opened and satisfied AC-3b (70.6% trigger agreement within 5 bars) the same day it had been
+  descoped for lack of exactly that run; and a stale `GITHUB_BRANCH` constant (still the feature
+  branch after pushing straight to `master`), also fixed. AC-6's three artefacts — equity series,
+  blotter (`sim.blotter()`), rule history — are genuinely persisted for the GFC window and the
+  full history, for the batch's five named configs AND for the three real structures separately
 - [x] 13-01.1: **COMPLETE 2026-09-20** — one full-history simulator run goes from a projected
   ~6.5 min to a measured **6.30 s / 5,201 bars / 1.21 ms/bar**, with equity **bit-identical** to the
   wide ledger. `NarrowLedger` is a constant-width `StateLedger` SUBCLASS handed in through the
@@ -732,7 +735,11 @@ Track B migrates working code and is separately gated and individually skippable
 
 ---
 *Roadmap created: 2026-08-01 — migrated from 12 pre-existing plans in `.claude/plans/`*
-*Last updated: 2026-09-20 (latest) — 13-01.1 COMPLETE: one full-history run 6.5 min -> 6.3 s, equity bit-identical; the ladder probe found 13-01's monetise/reopen thrash (281 monetisations vs 48 rolls), which blocks 13-02 until 13-01 resolves it*
+*Last updated: 2026-09-26 (latest) — 13-01 COMPLETE: published as a two-section site, the
+full-history batch run to completion for the first time (missing `ledger=NarrowLedger()` found and
+fixed), AC-3b re-opened and satisfied the same day it was descoped (70.6% trigger agreement within
+5 bars), the monetise/reopen thrash from 13-01.1 re-confirmed resolved. 13-02 unblocked*
+*Previously updated: 2026-09-20 (latest) — 13-01.1 COMPLETE: one full-history run 6.5 min -> 6.3 s, equity bit-identical; the ladder probe found 13-01's monetise/reopen thrash (281 monetisations vs 48 rolls), which blocks 13-02 until 13-01 resolves it*
 *Previously updated: 2026-09-20 (later) — Phase 13 gains 13-01.1, an interruption plan fixing the quadratic simulator cost found while implementing 13-01 Task 3; 13-01 Tasks 1-2 marked complete and Task 3 amended into a staged, probe-inspected ladder; 13-02 reduced to consuming 13-01.1's measured constant and its narrow-ledger artefact contract*
 *Previously updated: 2026-09-20 — Phase 13 gains 13-01 (option monetisation policy on the full real-IV history, run as a batch script) and a 13-02 placeholder for the walk-forward split and sweep*
 *Previously updated: 2026-08-31 — 10-01's static-export pattern seeded end to end into `docs/`; Phase 10 split into Track A (10-01 static) / Track B (10-02 gated live); Phase 11 gains 11-02 (IBKR message reference), the ragged-history blocker (now TWO sites: `panel.py` and `cache_prices.py`) and its measured starting position; 12-01 vol surface staged v1/v2*

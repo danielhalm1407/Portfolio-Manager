@@ -36,7 +36,7 @@ INDEX_PATH = DOCS / "index.html"
 # The repo link in the footer — same constants build_report.py already carries, so a link to the
 # source repo and a link to a source file (were one ever added here) would agree on the branch.
 GITHUB_REPO = "https://github.com/danielhalm1407/Portfolio-Manager"
-GITHUB_BRANCH = "feat/16-option-instruments"
+GITHUB_BRANCH = "master"
 
 # ============================================================================
 # THE SITE MAP. One entry per published section: title, the question it answers, what data it
