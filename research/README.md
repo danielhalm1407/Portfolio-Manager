@@ -42,7 +42,9 @@ Ad-hoc `# %%` cell scripts — exploratory, run by hand, each with a companion w
 | [`check_existing_port.py`](check_existing_port.py) | What is the realised/unrealised P&L of every holding in the paper account, using broker data rather than simulated fills? | [check_existing_port.md](check_existing_port.md) |
 | [`rebalance_realisation.py`](rebalance_realisation.py) | How does rebalancing itself generate realised P&L? | [rebalance_realisation.md](rebalance_realisation.md) |
 | [`hedge_sleeves/hedge_sleeves.py`](hedge_sleeves/hedge_sleeves.py) | How should a hedge sleeve be sized and rotated? | — |
-| [`option_overlay_probe.py`](option_overlay_probe.py) | Does the synthetic vol surface plus a European put price a sane strike ladder on the real SPY path? | [option_overlay_probe.md](option_overlay_probe.md) |
+| [`validation/option_ladder_prices_probe.py`](validation/option_ladder_prices_probe.py) | Does the synthetic vol surface plus a European put price a sane strike ladder on the real SPY path? | [validation/option_ladder_prices_probe.md](validation/option_ladder_prices_probe.md) |
+| [`validation/option_hedge_structures_probe.py`](validation/option_hedge_structures_probe.py) | Protective put, put spread and collar under one monetisation policy over the GFC, every fill marked | [validation/option_hedge_structures_probe.md](validation/option_hedge_structures_probe.md) |
+| [`validation/option_moneyness_optimisation.py`](validation/option_moneyness_optimisation.py) | How far out of the money should the put be struck, scored on drawdown AND calm windows? | — (cell script, no write-up) |
 
 These use `CLIENT_ID = 141` when they connect, distinct from the pipeline's 151 and the debug
 harness's 161 — TWS misbehaves silently when two connections share an id.

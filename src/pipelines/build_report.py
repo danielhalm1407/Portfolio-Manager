@@ -5,7 +5,7 @@ WHY THIS EXISTS (Phase 10, Track A / plan 10-01)
 ------------------------------------------------
 ``option_probe_figures.main()`` publishes five standalone figure pages and a link list. A reader
 following that link list lands on a chart with no argument around it: the findings, the caveats and
-the next steps all live in ``research/option_overlay_probe.md`` and were never published. This
+the next steps all live in ``research/validation/option_ladder_prices_probe.md`` and were never published. This
 module renders that write-up to HTML and splices each figure in at the finding it belongs to, so
 one page carries the analysis AND its evidence.
 
@@ -51,7 +51,7 @@ from portutils.viz import theme
 
 # The write-up this page renders, and the page it writes. `docs/` rather than `outputs/` because
 # `outputs/` is gitignored (.gitignore:37) and a published page must be committed to be served.
-WRITE_UP = PROJECT_ROOT / "research" / "option_overlay_probe.md"
+WRITE_UP = PROJECT_ROOT / "research" / "validation" / "option_ladder_prices_probe.md"
 DOCS = PROJECT_ROOT / "docs"
 # docs/probing/ since 13-01's 2026-09-26 amendment. docs/index.html is now the site HUB, which
 # links down to this report and to the 13-01 validation report; it is written by
@@ -81,8 +81,8 @@ GITHUB_BRANCH = "master"
 
 # The default page chrome — 10-01's probe report. Each is a `build_report` argument, so a second
 # report can replace the ones that are specific to its own evidence and inherit the rest.
-DEFAULT_TITLE = "Option overlay probe — Portfolio Manager"
-DEFAULT_HEADING = "Option overlay probe"
+DEFAULT_TITLE = "Testing option price dynamics over recent drawdowns — Portfolio Manager"
+DEFAULT_HEADING = "Testing option price dynamics over recent drawdowns"
 
 # `{source_link}` and `{built}` are filled by build_report; the rest is prose. Written as a template
 # rather than assembled in the page f-string so a caller can replace the sentence without having to

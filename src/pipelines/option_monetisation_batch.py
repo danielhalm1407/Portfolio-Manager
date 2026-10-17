@@ -11,7 +11,7 @@ demonstration run, not a parameter search:
 
 WHY A SCRIPT AND NOT MORE PROBE CELLS
 -------------------------------------
-``research/option_overlay_probe.py`` is twelve cells written to EXPLAIN the pricer one window at
+``research/validation/option_ladder_prices_probe.py`` is twelve cells written to EXPLAIN the pricer one window at
 a time, and its mechanism work is finished (findings 1-9). A 5,204-bar run across several
 configurations is the wrong shape for that format. The data loading is IMPORTED from
 ``option_probe_figures`` rather than re-derived — one implementation of "what is the real IV
@@ -171,7 +171,7 @@ def run_one(name, rule, spot):
     # 13-01.1 exists to replace: over 5,201 bars and ~82 rolls per hedged configuration, that is
     # the ~6.5-minute-per-run cost 13-01.1's SUMMARY records, not the ~1-2s this plan's own
     # progress log has been quoting — which was always measured from
-    # research/validation/option_ladder_probe.py's run_one, the ONLY place the fix had actually
+    # research/validation/option_hedge_structures_probe.py's run_one, the ONLY place the fix had actually
     # been wired in. This script — the one AC-5/AC-6 name, the one meant to run "in one command"
     # — had silently never completed a run against the current engine: `python -m
     # pipelines.option_monetisation_batch` was still timing out past two minutes on a 5-config
@@ -332,7 +332,7 @@ def build_series_frame(state, rule, spot):
     and the rule's own per-bar read-outs, all joined by timestamp into ONE frame.
 
     Extracted from ``main()``'s loop (13-01 amendment, 2026-09-26) so a single ad hoc run — the
-    GFC-window figures in ``research/validation/option_ladder_probe.py``, or a one-off
+    GFC-window figures in ``research/validation/option_hedge_structures_probe.py``, or a one-off
     full-history smoke test of a single configuration — produces the EXACT SAME artefact this
     batch's own named-set run does, through one join rather than two copies of it that could
     drift. Nothing here re-derives what ``run_one`` already computed; this only reshapes it.

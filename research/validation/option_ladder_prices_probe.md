@@ -1,15 +1,15 @@
-# Option overlay probe — does the synthetic surface price a sane put?
+# Testing option price dynamics over recent drawdowns
 
-**Script:** [`option_overlay_probe.py`](option_overlay_probe.py)
+**Script:** [`option_ladder_prices_probe.py`](option_ladder_prices_probe.py)
 **Run:** 2026-08-31, on `data/processed/prices_spy_kmlm.parquet` (SPY, 250 bars,
 2025-07-28 → 2026-07-24)
 
 ## The question
 
-Before three plans of module-building ([16-01](../.paul/phases/16-strategy-architecture/CONTEXT.md)
+Before three plans of module-building ([16-01](../../.paul/phases/16-strategy-architecture/CONTEXT.md)
 skeleton → 16-02 instruments → 16-03 rules), is the option ECONOMICS sound? Specifically: does the
 vol surface ported out of
-[`12-01-PLAN.md`](../.paul/phases/12-option-overlay/12-01-PLAN.md), plus a European put, produce
+[`12-01-PLAN.md`](../../.paul/phases/12-option-overlay/12-01-PLAN.md), plus a European put, produce
 protection costs and protection payoffs that look like a real option market on the real SPY path?
 
 This is deliberately the cheap version. No roll, no sizing, no P&L — a single fixed-tenor snapshot
@@ -19,11 +19,11 @@ repriced bar by bar. That is why it needs neither Phase 11 history nor an option
 
 Two pure modules, in the place 16-02 will find them:
 
-- [`portutils/strategies/instruments/vol.py`](../src/portutils/strategies/instruments/vol.py) —
+- [`portutils/strategies/instruments/vol.py`](../../src/portutils/strategies/instruments/vol.py) —
   `synthetic_iv_surface`, ported from `crash.py:2579` with every constant exposed as a keyword
   argument. It was previously an inline code block inside a planning document, which meant every
   consumer would have retyped it.
-- [`portutils/strategies/instruments/pricing.py`](../src/portutils/strategies/instruments/pricing.py) —
+- [`portutils/strategies/instruments/pricing.py`](../../src/portutils/strategies/instruments/pricing.py) —
   `black_scholes_put`, European, discounted-intrinsic floor, **no clamp**, per the 2026-08-26
   decision. No scipy: the normal CDF is built from `math.erf`.
 
@@ -200,10 +200,10 @@ explicit. It is four hops, and nothing in it is a second implementation of anyth
 
 | # | Where | What happens |
 |---|---|---|
-| 1 | [`option_probe_figures.overlay_runs`](../src/pipelines/option_probe_figures.py) | Builds one `PortfolioSimulator` per strategy: `BuyAndHoldRule({"SPY": 1.0})` plus the option rule, starting capital = the first close, so the book holds exactly one SPY unit. |
-| 2 | [`PortfolioSimulator.run`](../src/portutils/portfolio/simulator.py#L47) | Per bar: `propose` → **synthetic marks** (`:72`) → fill → mark the book. The marks step is 16-03's hook; without it a leg has no price and can neither fill nor be valued. |
-| 3 | [`OptionOverlayRule.propose`](../src/portutils/strategies/rules/options.py#L136) | Only acts on a ROLL bar. Closes the expiring legs, asks the subclass's `_leg_spec()` for the new ones, and prices each at birth — that price becomes the premium. `RollingCollarRule._leg_spec` (`:282`) returns `[("P", 0.90, +1), ("C", 1.28, -1)]`. |
-| 4 | [`OptionOverlayRule._price`](../src/portutils/strategies/rules/options.py#L104) | The only place a number is produced: `vol_fn(strike, tau, spot_ref)` → `OptionLeg.price` → `black_scholes_put` / `black_scholes_call`. On the expiry bar it returns `intrinsic(spot)` instead. |
+| 1 | [`option_probe_figures.overlay_runs`](../../src/pipelines/option_probe_figures.py) | Builds one `PortfolioSimulator` per strategy: `BuyAndHoldRule({"SPY": 1.0})` plus the option rule, starting capital = the first close, so the book holds exactly one SPY unit. |
+| 2 | [`PortfolioSimulator.run`](../../src/portutils/portfolio/simulator.py#L47) | Per bar: `propose` → **synthetic marks** (`:72`) → fill → mark the book. The marks step is 16-03's hook; without it a leg has no price and can neither fill nor be valued. |
+| 3 | [`OptionOverlayRule.propose`](../../src/portutils/strategies/rules/options.py#L136) | Only acts on a ROLL bar. Closes the expiring legs, asks the subclass's `_leg_spec()` for the new ones, and prices each at birth — that price becomes the premium. `RollingCollarRule._leg_spec` (`:282`) returns `[("P", 0.90, +1), ("C", 1.28, -1)]`. |
+| 4 | [`OptionOverlayRule._price`](../../src/portutils/strategies/rules/options.py#L104) | The only place a number is produced: `vol_fn(strike, tau, spot_ref)` → `OptionLeg.price` → `black_scholes_put` / `black_scholes_call`. On the expiry bar it returns `intrinsic(spot)` instead. |
 
 Between rolls `propose` returns `{}` and only `synthetic_marks` (`:202`) runs, repricing each open
 leg at that bar's spot and shorter `tau`. **That is the whole dynamic:** within a period the legs
@@ -329,7 +329,7 @@ note in the roadmap.
 
 ## Published figures
 
-All seven figures render to standalone interactive HTML under [`docs/`](../docs/README.md), which is
+All seven figures render to standalone interactive HTML under [`docs/`](../../docs/README.md), which is
 the GitHub Pages root:
 
 ```bash
@@ -337,7 +337,7 @@ python -m pipelines.option_probe_figures      # or the last cell of the script
 ```
 
 The builders live in
-[`src/pipelines/option_probe_figures.py`](../src/pipelines/option_probe_figures.py) and are shared
+[`src/pipelines/option_probe_figures.py`](../../src/pipelines/option_probe_figures.py) and are shared
 between the research cells and the exporter, so the inline figure and the published page are the
 same object. This is the first concrete instance of Phase 10's Track A (10-01) pattern.
 

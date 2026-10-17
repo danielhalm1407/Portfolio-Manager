@@ -7,7 +7,7 @@ and `figures/` its content.
 ## What is on the page (added 2026-09-20, plan 10-01)
 
 `index.html` is the **narrative report**, not a link list: the whole of
-[`research/option_overlay_probe.md`](../research/option_overlay_probe.md) — the question, all seven
+[`research/validation/option_ladder_prices_probe.md`](../research/validation/option_ladder_prices_probe.md) — the question, all seven
 findings, the pricing call-chain section, the caveats and the scoped-but-unbuilt next steps — with
 each figure embedded inline at the finding it belongs to (the smirk under Finding 2, the valued
 ladder under Finding 3, the v1/v2 vols under Finding 5, the drawdown episode under Finding 6, the
@@ -38,7 +38,7 @@ python -m pipelines.option_probe_figures      # figures/ + the report at index.h
 python -m pipelines.build_report              # the report alone, reusing the built figures
 ```
 
-Or run cell 10 of [`research/option_overlay_probe.py`](../research/option_overlay_probe.py), which
+Or run cell 10 of [`research/validation/option_ladder_prices_probe.py`](../research/validation/option_ladder_prices_probe.py), which
 calls the same `main()`. The figure builders live in
 [`src/pipelines/option_probe_figures.py`](../src/pipelines/option_probe_figures.py) and are shared
 with the research cells, so what is shown inline and what is published cannot drift apart.

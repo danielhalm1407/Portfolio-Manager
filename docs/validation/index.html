@@ -1,7 +1,7 @@
 <!doctype html>
 <html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Option monetisation over the GFC — Portfolio Manager</title>
+<title>Option hedge structures compared over the GFC — Portfolio Manager</title>
 <style>
   :root { color-scheme: dark; }
   body { background: #111; color: #e0e0e0;
@@ -45,11 +45,11 @@
 </head><body>
 <header class="page">
   <p class="meta"><a href="../index.html">&larr; all sections</a></p>
-  <h1>Option monetisation over the GFC</h1>
-  <p class="meta">Figures are fully interactive — hover, zoom and legend toggles all work, with no server. Generated from <a href="https://github.com/danielhalm1407/Portfolio-Manager/blob/master/research/validation/option_monetisation_gfc.md">research/validation/option_monetisation_gfc.md</a> by <code>python -m research.validation.option_ladder_probe</code> on 2026-09-26.</p>
+  <h1>Option hedge structures compared over the GFC</h1>
+  <p class="meta">Figures are fully interactive — hover, zoom and legend toggles all work, with no server. Generated from <a href="https://github.com/danielhalm1407/Portfolio-Manager/blob/master/research/validation/option_hedge_structures_probe.md">research/validation/option_hedge_structures_probe.md</a> by <code>python -m research.validation.option_hedge_structures_probe</code> on 2026-10-17.</p>
 </header>
 <main>
-<h1>Option monetisation over the GFC</h1>
+<h1>Option hedge structures compared over the GFC</h1>
 <h2>The question</h2>
 <p>13-01 built a monetisation policy: hold a protective hedge, close it and bank the gain once a
 drawdown trigger fires, then wait for cheaper insurance (a real-IV re-entry gate) before opening the
@@ -60,7 +60,7 @@ proves it does anything sensible on a real market.</p>
 window in the available history where every mechanism fires in the same run — a drawdown deep enough
 to trigger monetisation, a vol spike that holds the re-entry gate shut, and enough bars for several
 rolls. Four structures are run through the identical policy and the identical harness
-(<code>research/validation/option_ladder_probe.run_one</code>), so the only thing that differs between any two
+(<code>research/validation/option_hedge_structures_probe.run_one</code>), so the only thing that differs between any two
 panels below is the one parameter named in its heading.</p>
 <p><strong>What this is not.</strong> IN-SAMPLE, one window, one regime. The monetisation levels
 (<code>monetise_drawdown=0.10</code>, <code>reentry_iv=0.18</code>, <code>max_flat_bars=126</code>) are illustrative — hand-picked to

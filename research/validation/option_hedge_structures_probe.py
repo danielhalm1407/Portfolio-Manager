@@ -18,7 +18,7 @@
 # full history). Each rung changes ONE thing, so a wrong picture names its own
 # cause. Run the rung, look at it, then move to the next.
 #
-# Cell-style (# %%) in the manner of research/option_overlay_probe.py, including
+# Cell-style (# %%) in the manner of research/validation/option_ladder_prices_probe.py, including
 # its reload cell, so the figure can be iterated on inside a live session.
 # ============================================================================
 
@@ -518,7 +518,7 @@ print(classify_option_events(blot_d, UNDERLYING)["event"].value_counts().to_stri
 #
 # Writes one self-contained HTML per configuration, plus ONE rendered report that embeds all
 # four full-width at the section discussing them — the prose lives in
-# research/validation/option_monetisation_gfc.md and is RENDERED, never retyped, through the same
+# research/validation/option_hedge_structures_probe.md and is RENDERED, never retyped, through the same
 # build_report 10-01 built for the probe write-up (13-01 amendment, 2026-09-26). The standalone
 # per-configuration pages stay: opening one by double-clicking the file needs no kernel and no
 # report around it. Every page references the single vendored plotly.min.js at docs/assets/
@@ -728,7 +728,7 @@ def premium_financing_summary(blot, underlying=UNDERLYING):
 # Headings are the INTERFACE here — a renamed "## Protective put — ..." in the Markdown without
 # the matching update here fails the build (build_report._split_sections), on purpose: a figure
 # under the wrong heading is worse than no figure.
-GFC_WRITE_UP = omb.PROJECT_ROOT / "research" / "validation" / "option_monetisation_gfc.md"
+GFC_WRITE_UP = omb.PROJECT_ROOT / "research" / "validation" / "option_hedge_structures_probe.md"
 GFC_FIGURE_AT = {
     "Protective put":  "protective_put",
     "Put spread":      "put_spread",
@@ -860,11 +860,11 @@ def export_gfc_analysis(out_dir=DOCS_DIR, window=GFC, show=False, figures_dir=No
         # page moves": it bit here on the first pass (script tag pointed at a directory that does
         # not exist, so the vendored library never loaded).
         plotly_src="../assets/plotly.min.js",
-        title="Option monetisation over the GFC — Portfolio Manager",
-        heading="Option monetisation over the GFC",
+        title="Option hedge structures compared over the GFC — Portfolio Manager",
+        heading="Option hedge structures compared over the GFC",
         header_note=("Figures are fully interactive — hover, zoom and legend toggles all work, "
                      "with no server. Generated from {source_link} by "
-                     "<code>python -m research.validation.option_ladder_probe</code> on {built}."),
+                     "<code>python -m research.validation.option_hedge_structures_probe</code> on {built}."),
         footer_note=("Portfolio Manager — thematic-fundamental research engine. "
                      "Priced with REAL implied vol from IBKR, not a synthetic surface. "
                      "IN-SAMPLE, one window, illustrative levels — see “What this does and "

@@ -43,7 +43,7 @@ DOWN the smirk — a strike the market has actually fallen to is no longer a tai
 on this function at ``K=90, t=0.125, r=0.02``, spot ``S=88`` gives iv 0.176 / price 3.206 on the
 current-spot reference against 0.210 / 3.612 frozen: 11% CHEAPER in exactly the crash state
 Phase 13 exists to measure. Term A is what actually lifts a put in a selloff. Cell 8 of
-``research/option_overlay_probe.py`` plots both references side by side.
+``research/validation/option_ladder_prices_probe.py`` plots both references side by side.
 
 v1 also carries NO Phase 11 dependency — ``base = 0.16`` needs no vol history at all — which is
 why the option instruments and rules are buildable before 11-01 lands.

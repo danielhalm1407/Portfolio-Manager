@@ -336,7 +336,7 @@ def apply_export_theme(fig, *, ink=INK, grid=GRID, paper=PAPER_BG, plot=PLOT_BG)
 # records.
 #
 # These live HERE rather than in either pipeline because BOTH produce pages off the same palette:
-# `pipelines/option_probe_figures.write_index` and `research/validation/option_ladder_probe`'s
+# `pipelines/option_probe_figures.write_index` and `research/validation/option_hedge_structures_probe`'s
 # GFC index. Two copies of "what colour is the page" is two things to forget to change.
 # ============================================================================
 

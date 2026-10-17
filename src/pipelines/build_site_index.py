@@ -13,7 +13,7 @@ NO FIGURES, SO NONE OF build_report's MACHINERY APPLIES
 ---------------------------------------------------------
 This page carries no Plotly figures and renders no Markdown write-up — it is one short paragraph
 plus a card per section, hand-rolled the same way ``option_probe_figures.write_index`` and
-``option_ladder_probe.export_gfc_analysis``'s summary index used to be, before those two grew a
+``option_hedge_structures_probe.export_gfc_analysis``'s summary index used to be, before those two grew a
 per-section write-up of their own. ``theme.page_css()`` is still the shared stylesheet, so this
 page and the two it links to are one surface rather than three that happen to share a colour.
 
@@ -44,7 +44,7 @@ GITHUB_BRANCH = "master"
 # ============================================================================
 SECTIONS = [
     {
-        "title": "Option overlay probe",
+        "title": "Testing option price dynamics over recent drawdowns",
         "href": "probing/index.html",
         "data": "synthetic vol surface (constant ATM level), plus a real-IV follow-on",
         "blurb": (
@@ -55,7 +55,7 @@ SECTIONS = [
         ),
     },
     {
-        "title": "Option monetisation over the GFC",
+        "title": "Option hedge structures compared over the GFC",
         "href": "validation/index.html",
         "data": "REAL implied vol from IBKR, one window (2007-10 to 2009-03), IN-SAMPLE",
         "blurb": (

@@ -5,7 +5,7 @@ WHY THIS MODULE EXISTS, AND WHY IT IS A PIPELINE RATHER THAN A LIBRARY
 ----------------------------------------------------------------------
 It serves TWO consumers with one implementation:
 
-* ``research/option_overlay_probe.py`` imports the builders and calls ``.show()`` on them, so
+* ``research/validation/option_ladder_prices_probe.py`` imports the builders and calls ``.show()`` on them, so
   the figures appear inline in the VS Code interactive window;
 * ``main()`` in this file renders the same figures to standalone HTML under ``docs/figures/``
   for GitHub Pages.
@@ -901,13 +901,13 @@ def write_index(out_dir, figures, captions=FIGURE_CAPTIONS):
     html = f"""<!doctype html>
 <html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Portfolio Manager — option overlay probe</title>
+<title>Portfolio Manager — testing option price dynamics over recent drawdowns</title>
 <style>{theme.page_css()}</style></head><body>
-  <h1>Option overlay probe</h1>
+  <h1>Testing option price dynamics over recent drawdowns</h1>
   <p>Pre-rendered, fully interactive Plotly figures — hover, zoom and legend toggles all work
      with no server. Rendered by
      <code>src/pipelines/option_probe_figures.py</code>; the write-up is
-     <code>research/option_overlay_probe.md</code>.</p>
+     <code>research/validation/option_ladder_prices_probe.md</code>.</p>
   <ul>
 {rows}
   </ul>

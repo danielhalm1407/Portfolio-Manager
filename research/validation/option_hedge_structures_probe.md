@@ -1,4 +1,4 @@
-# Option monetisation over the GFC
+# Option hedge structures compared over the GFC
 
 ## The question
 
@@ -12,7 +12,7 @@ This write-up is that proof, read as a picture rather than a table. The window i
 window in the available history where every mechanism fires in the same run — a drawdown deep enough
 to trigger monetisation, a vol spike that holds the re-entry gate shut, and enough bars for several
 rolls. Four structures are run through the identical policy and the identical harness
-(`research/validation/option_ladder_probe.run_one`), so the only thing that differs between any two
+(`research/validation/option_hedge_structures_probe.run_one`), so the only thing that differs between any two
 panels below is the one parameter named in its heading.
 
 **What this is not.** IN-SAMPLE, one window, one regime. The monetisation levels

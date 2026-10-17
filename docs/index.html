@@ -4,12 +4,12 @@
 <p>A thematic-fundamental research engine that turns qualitative market narratives into portfolio tilts, feeds those tilts into a disciplined allocator, and executes the result against a real Interactive Brokers account. This corner of the project — the two sections below — is the structural commodity/hedging extension: pricing and testing option overlays as a portfolio hedge, first on a synthetic vol surface to prove the mechanics, then on real implied vol to see the policy decide.</p>
 <ul>
     <li class="card">
-      <h2><a href="probing/index.html">Option overlay probe</a></h2>
+      <h2><a href="probing/index.html">Testing option price dynamics over recent drawdowns</a></h2>
       <p>How does a protective put, put spread and collar price and behave through one probe window — the pricer's own mechanics, the smirk, term structure, and the cost of carrying a hedge, worked out step by step against a synthetic implied-vol surface. Findings 1-9.</p>
       <p class="note">Data: synthetic vol surface (constant ATM level), plus a real-IV follow-on</p>
     </li>
     <li class="card">
-      <h2><a href="validation/index.html">Option monetisation over the GFC</a></h2>
+      <h2><a href="validation/index.html">Option hedge structures compared over the GFC</a></h2>
       <p>Can a monetisation policy be seen DECIDING on real data — closing a hedge at a drawdown trigger, banking the gain, and waiting for cheaper insurance before re-opening? Four structures, one policy, every fill marked on the equity path, against a blind-roll control.</p>
       <p class="note">Data: REAL implied vol from IBKR, one window (2007-10 to 2009-03), IN-SAMPLE</p>
     </li>
