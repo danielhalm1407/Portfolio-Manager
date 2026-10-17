@@ -215,6 +215,38 @@ SECONDARY_AXIS_MARGIN_R = 340
 SECONDARY_AXIS_TITLE_STANDOFF = 24
 
 # ---------------------------------------------------------------------------
+# SIDE LEGEND FOR A FIGURE WITH NO SECONDARY AXIS.
+#
+# WHY THIS EXISTS SEPARATELY FROM THE BLOCK ABOVE. `apply_secondary_axis_spacing`
+# solves a collision between a legend and a RIGHT-HAND AXIS, and it reserves 340px
+# because three things share that strip: y2 ticks, the rotated y2 title and the
+# legend. A stacked figure with no y2 has only the legend out there, so it needs a
+# narrower strip — and it must not go through that function at all, whose own
+# auto-detection would (correctly) decline to do anything.
+#
+# WHY NOT A HORIZONTAL LEGEND ACROSS THE TOP, which is what `fig_ladder` uses and
+# what `fig_moneyness_stack` copied from it. That works at SEVEN entries and breaks
+# at TEN: one series per moneyness level, plus the underlying, plus the real-IV
+# path, plus the three lifecycle shape keys wraps onto a second row, and the second
+# row renders straight through the figure title and its sub-line. Measured on the
+# four-strike panels, 2026-10-17. A vertical legend grows DOWNWARD into space that
+# is already reserved, so it cannot collide with the title however many entries it
+# carries.
+#
+# `SIDE_LEGEND_X` is a fraction of the PLOT AREA's width, exactly like
+# SECONDARY_AXIS_LEGEND_X — see the correction note above for why that unit makes
+# the inline and exported values differ in meaning. It is deliberately NOT equal to
+# SECONDARY_AXIS_LEGEND_X, so `apply_export_spacing`'s identity test does not fire
+# on these figures: there is no y2 here whose ticks the gap would need to clear, and
+# widening it on export would only steal width from three stacked panels.
+# ---------------------------------------------------------------------------
+SIDE_LEGEND_X = 1.02
+
+# Right margin in pixels, reserved for the legend alone. Raise this if a longer
+# series name is ever clipped — the legend grows rightwards into this strip.
+SIDE_LEGEND_MARGIN_R = 260
+
+# ---------------------------------------------------------------------------
 # STACKED-SUBPLOT HEIGHT. Plotly's default figure height is 450px regardless of how many rows
 # `make_subplots` was given — it sizes the FIGURE, not the panels inside it. A 2- or 3-row stacked
 # figure left at that default renders every row squeezed into a fraction of 450px, which is
@@ -287,6 +319,25 @@ def apply_export_spacing(fig):
     """
     if fig.layout.legend.x == SECONDARY_AXIS_LEGEND_X:
         fig.update_layout(legend=dict(x=SECONDARY_AXIS_LEGEND_X_EXPORT))
+    return fig
+
+
+def apply_side_legend(fig, *, margin_r=SIDE_LEGEND_MARGIN_R, x=SIDE_LEGEND_X):
+    """Put the legend down the RIGHT-HAND SIDE and reserve room for it, in place.
+
+    For a figure with many series and NO secondary axis — a stacked multi-series panel, where a
+    horizontal legend across the top wraps onto a second row and renders through the title.
+    Anchored top-left so it grows downward and rightwards into the margin reserved here, never
+    upward into the title.
+
+    Called during construction, like ``apply_secondary_axis_spacing``, so the interactive window
+    and the export agree. ``apply_export_spacing`` deliberately does NOT touch these figures —
+    see ``SIDE_LEGEND_X``'s own note for why widening the gap on export would be wrong here.
+    """
+    fig.update_layout(
+        legend=dict(orientation="v", x=x, xanchor="left", y=1.0, yanchor="top"),
+        margin=dict(r=margin_r),
+    )
     return fig
 
 

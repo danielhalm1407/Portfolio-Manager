@@ -20,6 +20,14 @@ dependencies = [
     # Declared rather than relied on transitively: the same objection pricing.py records about
     # scipy applies to any package this repo uses but does not name.
     "markdown-it-py",
+    # B-spline bases for the penalised response surface (portutils/strategies/surface.py,
+    # plan 13-02 Task 3). Named explicitly because it had been arriving transitively through
+    # scikit-learn — which is exactly the situation pricing.py's own objection is about, and
+    # the plan requires whichever smoother library is used to be declared rather than assumed.
+    # pygam was preferred by the plan where already available; it is not installed, and it is
+    # not worth a dependency for two axes and sixty-odd design points when the penalised
+    # B-spline it would fit is thirty lines of numpy over this.
+    "scipy",
 ]
 
 [tool.setuptools.packages.find]

@@ -173,7 +173,26 @@ def fig_moneyness_stack(results, spot, title="", reentry_iv=None, underlying="SP
         line=dict(color=theme.CATEGORICAL[0], width=2.2),
         hovertemplate="%{x|%Y-%m-%d}<br>" + underlying + " %{y:.3f}<extra></extra>"), row=1, col=1)
 
-    iv_drawn = False
+    # ------------------------------------------------------------------------
+    # THE IV PATH IS SHARED, so it is resolved ONCE here rather than inside the loop. It is the
+    # same series for every configuration in a given window — the rule prices off the market, not
+    # off its own strike — so drawing it per configuration would be four identical lines implying
+    # four different ones.
+    #
+    # Hoisted ABOVE the loop for a second reason as well: the FLAT bands below need the panel's
+    # vertical range to stack themselves against, and the trace itself must be added AFTER every
+    # configuration so it lands at the BOTTOM of the legend. Plotly orders legend entries by the
+    # order traces were added, and adding this one from inside the loop put "real IV" between the
+    # first and second moneyness levels — reading as though it were one of them.
+    # ------------------------------------------------------------------------
+    iv_ref = None
+    for res in results.values():
+        iv_ref = _numeric(res["series"], "iv")
+        if iv_ref is not None:
+            break
+    iv_lo = float(np.nanmin(iv_ref)) if iv_ref is not None else 0.0
+    iv_hi = float(np.nanmax(iv_ref)) if iv_ref is not None else 1.0
+
     # The FLAT bands are stacked at descending heights near the top of the vol panel, one per
     # configuration. Computed as a fraction of the panel's own range rather than at fixed levels,
     # because real IV spans 0.07 to 0.80 over the full history and 0.15 to 0.80 over the GFC.
@@ -243,29 +262,20 @@ def fig_moneyness_stack(results, spot, title="", reentry_iv=None, underlying="SP
                     row=2, col=1)
 
         # --------------------------------------------------------------------
-        # PANEL 3 — the IV the rule actually priced and decided with, taken from the rule's own
-        # history rather than re-read from the IV parquet. Drawn ONCE: it is the same series for
-        # every configuration in a given window, and four identical lines would imply otherwise.
+        # PANEL 3 — the FLAT stretches for THIS configuration, as a filled band. A REGION rather
+        # than two markers, because the eye reads a shaded span as a duration, which is what a
+        # wait is. One masked trace with NaN gaps rather than N shapes: a 5,201-bar run would
+        # otherwise add an unbounded number of layout objects.
+        #
+        # The IV line itself is NOT drawn here — it is shared, and it is added after the loop so
+        # it sorts to the bottom of the legend. See the hoist above.
         # --------------------------------------------------------------------
-        iv = _numeric(series, "iv")
-        if iv is not None and not iv_drawn:
-            fig.add_trace(go.Scatter(
-                x=iv.index, y=iv.to_numpy(), name="real IV", legendgroup="iv",
-                line=dict(color=theme.CATEGORICAL[0], width=1.3),
-                hovertemplate="%{x|%Y-%m-%d}<br>iv %{y:.3f}<extra></extra>"), row=3, col=1)
-            iv_drawn = True
-
-        # The FLAT stretches as a filled band. A REGION rather than two markers, because the eye
-        # reads a shaded span as a duration — which is what a wait is. One masked trace with NaN
-        # gaps rather than N shapes: a 5,201-bar run would otherwise add an unbounded number of
-        # layout objects.
-        if iv is not None and "state" in series.columns:
+        if iv_ref is not None and "state" in series.columns:
             flat = (series["state"] == "FLAT").to_numpy()
             if flat.any():
-                lo, hi = float(np.nanmin(iv)), float(np.nanmax(iv))
                 # Stacked downward from the top edge so several configurations' bands are
                 # readable at once instead of overprinting into one opaque line.
-                level = hi - flat_slot * 0.055 * max(hi - lo, 1e-6)
+                level = iv_hi - flat_slot * 0.055 * max(iv_hi - iv_lo, 1e-6)
                 fig.add_trace(go.Scatter(
                     x=series.index, y=np.where(flat, level, np.nan),
                     name=f"{label} FLAT", legendgroup=label, showlegend=False,
@@ -274,6 +284,24 @@ def fig_moneyness_stack(results, spot, title="", reentry_iv=None, underlying="SP
                     hovertemplate="%{x|%Y-%m-%d}<br>" + label
                                   + " unhedged<extra></extra>"), row=3, col=1)
                 flat_slot += 1
+
+    # ------------------------------------------------------------------------
+    # THE SHARED IV PATH, added last so it sorts to the BOTTOM of the legend, under every
+    # moneyness entry rather than between two of them.
+    #
+    # DRAWN IN INK, NOT IN A CATEGORICAL SLOT. It used to take CATEGORICAL[0] — the same blue
+    # the UNDERLYING keeps on every figure — so the legend showed two different quantities in one
+    # colour. It cannot simply take another slot either: `moneyness_colours` hands out slots 1
+    # upwards, so any slot this took would collide with a long enough ladder. Ink says "ambient
+    # context, not one of the series", which is exactly what the market's vol is here — and it
+    # is unambiguous inside panel 3, where the only other marks are the per-configuration FLAT
+    # bands in their own moneyness colours.
+    # ------------------------------------------------------------------------
+    if iv_ref is not None:
+        fig.add_trace(go.Scatter(
+            x=iv_ref.index, y=iv_ref.to_numpy(), name="real IV", legendgroup="iv",
+            line=dict(color=theme.INK, width=1.3),
+            hovertemplate="%{x|%Y-%m-%d}<br>iv %{y:.3f}<extra></extra>"), row=3, col=1)
 
     # BREAK-EVEN on panel 2. Drawn on every figure because it is a property of the ratio, not of
     # any configuration's parameters: above it the legs are worth more than they cost.
@@ -301,8 +329,14 @@ def fig_moneyness_stack(results, spot, title="", reentry_iv=None, underlying="SP
         # Plotly sizes the FIGURE, not the panels — left unset this 3-row figure renders with
         # each panel squeezed into a third of 450px. theme.STACKED_FIGURE_HEIGHT is the shared
         # table every stacked figure in the repo reads this from.
-        height=theme.STACKED_FIGURE_HEIGHT[3],
-        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0))
+        height=theme.STACKED_FIGURE_HEIGHT[3])
+    # THE LEGEND GOES DOWN THE SIDE, not across the top. This figure originally copied
+    # `fig_ladder`'s horizontal top legend, which is right for ITS seven entries and wrong here:
+    # one entry per moneyness level plus the underlying, the real-IV path and the three lifecycle
+    # shape keys is ten or more, so the legend wrapped onto a second row and rendered straight
+    # through the title and its sub-line. A vertical legend grows DOWNWARD into margin reserved
+    # for it, so the entry count cannot collide with the title however far the ladder is widened.
+    theme.apply_side_legend(fig)
     fig.update_yaxes(title_text="rebased to window start (1.0)", row=1, col=1)
     fig.update_yaxes(title_text="x premium paid", row=2, col=1)
     fig.update_yaxes(title_text="implied vol", row=3, col=1)
@@ -398,4 +432,263 @@ def fig_score_grid(scores, value_col="score", row="config", col="window", title=
                f"{scoring.DRAWDOWN_FLOOR:.0%}; * = denominator set by the floor, so that cell is "
                f"NOT a Calmar. {MARK_CAVEAT}.</sub>"),
         height=120 + 42 * max(len(pivot.index), 3))
+    return _inline_theme(fig)
+
+
+# ============================================================================
+# TASK 4 — THE SURFACE FIGURES.
+#
+# All four read the SAME two axes in the same orientation: moneyness across,
+# monetisation drawdown down. The raw heatmap and the fitted contour therefore
+# sit on identical axes, which is the whole point of drawing both — the
+# smoothing has to be legible as a CONTINUATION of the design points rather
+# than as a separate object that happens to be nearby.
+# ============================================================================
+
+# The two swept parameters, named once. Every figure below and the sweep script read these, so a
+# renamed column breaks in one place rather than four.
+X_PARAM = "floor"
+Y_PARAM = "monetise_drawdown"
+X_LABEL = "moneyness (strike / spot)"
+Y_LABEL = "monetisation drawdown"
+
+
+def _mesh(fit, xs, ys):
+    """Predicted surface on a rectangular mesh, shaped ``(len(ys), len(xs))`` for a heatmap.
+
+    Plotly's ``z`` is row-major with rows on the Y axis, so the transpose matters and is done
+    once here rather than at four call sites where three of them would eventually be wrong.
+    """
+    gx, gy = np.meshgrid(xs, ys, indexing="xy")
+    z = np.asarray(fit.predict(gx.ravel(), gy.ravel()), dtype=float)
+    return z.reshape(gx.shape)
+
+
+def fig_grid_heatmap(scores, title="", trial_count=None):
+    """THE RAW DESIGN POINTS — moneyness across, monetisation drawdown down, colour the score
+    pooled over every window. No smoothing anywhere: this is what was actually simulated.
+
+    POOLING ACROSS WINDOWS AVERAGES REGIMES WHOSE LEVELS DIFFER BY A FACTOR OF SIX (around -0.8
+    through the GFC against around +5 through 2017), so this figure is dominated by the calm
+    windows and should be read as "the pooled design", not as a verdict. The per-window panel
+    below is where a moving optimum becomes visible, and it is the more informative figure of
+    the two. Both are kept because AC-6 asks for the unsmoothed design points as their own
+    object.
+    """
+    return fig_score_grid(scores, value_col="score", row=Y_PARAM, col=X_PARAM,
+                          title=title or "Raw grid — floored Calmar pooled over all windows",
+                          trial_count=trial_count, normalise=None,
+                          colourbar_title="pooled<br>floored Calmar", text_format="{:.2f}")
+
+
+def fig_window_surfaces(fits, optima, bounds, title="", trial_count=None, n_mesh=60):
+    """ONE PANEL PER INDICATIVE WINDOW, each with its own fitted surface and its own optimum.
+
+    THE MOST INFORMATIVE OUTPUT OF THE PLAN, and the reason pooling alone would be a mistake:
+    four windows are four REGIMES, not four replicates of one quantity. The spread between the
+    panels is SIGNAL. If the optimum sits in roughly the same place in each, a single parameter
+    choice is defensible; if it moves, a single pooled optimum is the wrong object and 13-03
+    should be validating a regime-conditional rule instead. Either way it is a finding, and it
+    is only visible side by side.
+
+    Each panel carries its OWN colour scale, for the same reason ``fig_score_grid`` normalises
+    per column: a shared scale across a crisis panel and a calm panel shows which regime was
+    benign and hides where each one's optimum is.
+    """
+    names = list(fits)
+    cols = min(3, max(1, len(names)))
+    rows = int(np.ceil(len(names) / cols))
+    fig = make_subplots(rows=rows, cols=cols, subplot_titles=names,
+                        horizontal_spacing=0.07, vertical_spacing=0.12)
+
+    (lox, hix), (loy, hiy) = bounds
+    xs = np.linspace(lox, hix, n_mesh)
+    ys = np.linspace(loy, hiy, n_mesh)
+
+    for i, name in enumerate(names):
+        r, c = divmod(i, cols)
+        fig.add_trace(go.Heatmap(
+            z=_mesh(fits[name], xs, ys), x=xs, y=ys, colorscale="RdBu",
+            # One colour bar per panel would take half the figure; the scales differ per panel
+            # anyway, so a single shared bar would be a lie. Dropped entirely and the optimum
+            # marker plus the panel title carry the reading instead.
+            showscale=False,
+            hovertemplate=(f"{X_LABEL}: %{{x:.3f}}<br>{Y_LABEL}: %{{y:.3f}}"
+                           "<br>fitted: %{z:.3f}<extra></extra>")), row=r + 1, col=c + 1)
+        opt = optima[name]
+        fig.add_trace(go.Scatter(
+            x=[opt.point[0]], y=[opt.point[1]], mode="markers",
+            marker=dict(color=theme.INK, symbol="x", size=11, line=dict(width=1)),
+            showlegend=False,
+            hovertemplate=(f"<b>{name} optimum</b><br>{X_LABEL} %{{x:.3f}}"
+                           f"<br>{Y_LABEL} %{{y:.3f}}<br>fitted {opt.value:.3f}"
+                           f"<br>curvature {opt.curvature:.1f}<extra></extra>")),
+            row=r + 1, col=c + 1)
+
+    trials = f" — {trial_count} trials" if trial_count is not None else ""
+    fig.update_layout(
+        title=(f"{title or 'Fitted surface per indicative window — x marks each optimum'}"
+               f"<br><sub>IN-SAMPLE{trials}. Each panel has its OWN colour scale: a shared one "
+               f"would show which regime was benign and hide where each optimum is. "
+               f"{MARK_CAVEAT}.</sub>"),
+        height=300 * rows + 140)
+    fig.update_xaxes(title_text=X_LABEL)
+    fig.update_yaxes(title_text=Y_LABEL)
+    for ann in fig.layout.annotations:
+        ann.font.size = 11
+        ann.font.color = theme.INK
+    return _inline_theme(fig)
+
+
+def fig_pooled_contour(fit, scores, opt, bounds, title="", trial_count=None, n_mesh=80):
+    """THE POOLED SURFACE AS A FILLED CONTOUR, WITH THE DESIGN POINTS DRAWN ON TOP.
+
+    Same axes and same orientation as ``fig_grid_heatmap``, deliberately, so the two can be read
+    one after the other. The design points are overlaid as open markers rather than left to the
+    reader's memory of the previous figure: a contour that bulges where there is no design point
+    underneath it is the smoother inventing structure, and that is visible here and nowhere else.
+    """
+    (lox, hix), (loy, hiy) = bounds
+    xs = np.linspace(lox, hix, n_mesh)
+    ys = np.linspace(loy, hiy, n_mesh)
+
+    fig = go.Figure(go.Contour(
+        z=_mesh(fit, xs, ys), x=xs, y=ys, colorscale="RdBu",
+        contours=dict(showlabels=True, labelfont=dict(size=10, color=theme.INK)),
+        colorbar=dict(title="fitted pooled<br>floored Calmar"),
+        hovertemplate=(f"{X_LABEL}: %{{x:.3f}}<br>{Y_LABEL}: %{{y:.3f}}"
+                       "<br>fitted: %{z:.3f}<extra></extra>")))
+
+    pooled = scores.groupby([X_PARAM, Y_PARAM])["score"].mean().reset_index()
+    fig.add_trace(go.Scatter(
+        x=pooled[X_PARAM], y=pooled[Y_PARAM], mode="markers", name="design points",
+        marker=dict(color=theme.INK, symbol="circle-open", size=7, line=dict(width=1.2)),
+        customdata=pooled["score"],
+        hovertemplate=(f"{X_LABEL}: %{{x:.3f}}<br>{Y_LABEL}: %{{y:.3f}}"
+                       "<br>SIMULATED: %{customdata:.3f}<extra></extra>")))
+    fig.add_trace(go.Scatter(
+        x=[opt.point[0]], y=[opt.point[1]], mode="markers", name="in-sample optimum",
+        marker=dict(color=theme.CATEGORICAL[1], symbol="x", size=13, line=dict(width=1)),
+        hovertemplate=(f"<b>in-sample optimum</b><br>{X_LABEL} %{{x:.3f}}"
+                       f"<br>{Y_LABEL} %{{y:.3f}}<extra></extra>")))
+
+    trials = f" — {trial_count} trials" if trial_count is not None else ""
+    fig.update_layout(
+        title=(f"{title or 'Pooled fitted surface, on the same axes as the raw grid'}"
+               f"<br><sub>IN-SAMPLE{trials}. Open circles are the SIMULATED design points; the "
+               f"contour between them is fitted. A bulge with no point under it is the smoother "
+               f"inventing structure. {MARK_CAVEAT}.</sub>"),
+        xaxis_title=X_LABEL, yaxis_title=Y_LABEL, height=620)
+    return _inline_theme(fig)
+
+
+def fig_pooled_surface_3d(fit, opt, snap, bounds, title="", trial_count=None, n_mesh=60):
+    """THE POOLED SURFACE IN THREE DIMENSIONS, with the continuous optimum and the NEAREST
+    TRADEABLE STRIKE both marked.
+
+    The pair of markers is the point of the figure. A surface's optimum is a real number — "0.914
+    of spot" — and no exchange lists that strike. If the two markers sit at visibly different
+    heights, the surface is too sharp for its own optimum to mean anything deployable, and that
+    is the finding rather than a rounding footnote. If they are indistinguishable, the
+    recommendation survives being rounded, which is the strongest form this result can take.
+    """
+    (lox, hix), (loy, hiy) = bounds
+    xs = np.linspace(lox, hix, n_mesh)
+    ys = np.linspace(loy, hiy, n_mesh)
+    z = _mesh(fit, xs, ys)
+
+    fig = go.Figure(go.Surface(
+        z=z, x=xs, y=ys, colorscale="RdBu", opacity=0.92,
+        colorbar=dict(title="fitted pooled<br>floored Calmar"),
+        hovertemplate=(f"{X_LABEL}: %{{x:.3f}}<br>{Y_LABEL}: %{{y:.3f}}"
+                       "<br>fitted: %{z:.3f}<extra></extra>")))
+
+    snapped_value = opt.value - (snap.cost if np.isfinite(snap.cost) else 0.0)
+    fig.add_trace(go.Scatter3d(
+        x=[opt.point[0], snap.moneyness], y=[opt.point[1], opt.point[1]],
+        z=[opt.value, snapped_value], mode="markers+text",
+        text=[f"continuous {opt.point[0]:.4f}", f"strike {snap.strike:.0f} ({snap.moneyness:.3f})"],
+        textposition="top center", textfont=dict(color=theme.INK, size=10),
+        marker=dict(color=[theme.CATEGORICAL[1], theme.CATEGORICAL[3]], size=6,
+                    symbol=["x", "diamond"]),
+        name="optimum vs nearest tradeable strike",
+        hovertemplate="%{text}<br>fitted %{z:.4f}<extra></extra>"))
+
+    trials = f" — {trial_count} trials" if trial_count is not None else ""
+    cost = f"{snap.cost:.4f}" if np.isfinite(snap.cost) else "n/a"
+    fig.update_layout(
+        title=(f"{title or 'Pooled fitted surface — continuous optimum and nearest strike'}"
+               f"<br><sub>IN-SAMPLE{trials}. Snapping cost {cost} in floored-Calmar units. "
+               f"Curvature at the optimum {opt.curvature:.1f}. {MARK_CAVEAT}.</sub>"),
+        scene=dict(xaxis_title=X_LABEL, yaxis_title=Y_LABEL,
+                   zaxis_title="fitted floored Calmar"),
+        height=720)
+    return _inline_theme(fig)
+
+
+def fig_window_paths(window_name, scores, results, spot, reentry_iv=None, underlying="SPY"):
+    """THE BEST, SECOND-BEST AND WORST configurations for ONE window, as PATHS.
+
+    A cell in a heatmap is a number; the same cell as an equity path next to SPY through the GFC
+    is an argument. This is the figure a human reads first.
+
+    SECOND BEST is included, and not as padding: the gap between first and second IS the
+    plateau-versus-spike question in path form. If the two are indistinguishable the surface is
+    flat there, and that is readable without consulting a curvature number. If the best is
+    visibly apart from the second on one window and not on another, the optimum is sharp in one
+    regime and broad in the other — which a single pooled curvature would average away.
+
+    Delegates the drawing to ``fig_moneyness_stack``, so these three paths come with the same
+    three panels as every other path figure in the plan: equity with fills marked, value as a
+    multiple of premium, and the vol gate. Selecting three configurations and then drawing them
+    a DIFFERENT way would make this the one panel in the set that cannot be compared with the
+    others.
+    """
+    rows = scores[(scores["window"] == window_name) & scores["score"].notna()]
+    rows = rows.sort_values("score", ascending=False)
+    if len(rows) < 2:
+        raise ValueError(f"{window_name}: need at least 2 scored configurations, got {len(rows)}")
+
+    picks = [("best", rows.iloc[0]), ("worst", rows.iloc[-1])]
+    if len(rows) > 2:
+        picks.insert(1, ("2nd", rows.iloc[1]))
+    chosen = {f"{rank} — {r['config']} ({r['score']:.2f})": results[r["config"]]
+              for rank, r in picks}
+
+    kind = rows.iloc[0].get("kind", "")
+    return fig_moneyness_stack(
+        chosen, spot, reentry_iv=reentry_iv, underlying=underlying,
+        title=f"{window_name} ({kind}) — best, second-best and worst by floored Calmar")
+
+
+def fig_pooled_spline(fit, scores, bounds, title="", trial_count=None, n_mesh=80):
+    """The pooled smooth drawn on the SAME axes and the SAME colour scale as the pooled raw grid.
+
+    Separate from ``fig_pooled_contour`` only in that it is a heatmap rather than a contour, so
+    it can be put directly beside ``fig_score_grid``'s pooled output and read as the same object
+    with the gaps filled in. That adjacency is the argument: smoothing is a continuation of the
+    design points, not a different claim about them.
+    """
+    (lox, hix), (loy, hiy) = bounds
+    xs = np.linspace(lox, hix, n_mesh)
+    ys = np.linspace(loy, hiy, n_mesh)
+    pooled = scores.groupby([X_PARAM, Y_PARAM])["score"].mean()
+
+    fig = go.Figure(go.Heatmap(
+        z=_mesh(fit, xs, ys), x=xs, y=ys, colorscale="RdBu",
+        # Pinned to the RANGE OF THE DESIGN POINTS, not to the fitted surface's own range, so
+        # this figure and the raw pooled grid share a scale and a colour means one thing across
+        # the pair. A fitted surface that overshoots the data then shows as saturated colour,
+        # which is the correct signal.
+        zmin=float(pooled.min()), zmax=float(pooled.max()),
+        colorbar=dict(title="fitted pooled<br>floored Calmar"),
+        hovertemplate=(f"{X_LABEL}: %{{x:.3f}}<br>{Y_LABEL}: %{{y:.3f}}"
+                       "<br>fitted: %{z:.3f}<extra></extra>")))
+
+    trials = f" — {trial_count} trials" if trial_count is not None else ""
+    fig.update_layout(
+        title=(f"{title or 'Pooled spline, on the raw grid’s axes and colour range'}"
+               f"<br><sub>IN-SAMPLE{trials}. Colour range pinned to the SIMULATED points, so "
+               f"saturation means the fit overshot the data. {MARK_CAVEAT}.</sub>"),
+        xaxis_title=X_LABEL, yaxis_title=Y_LABEL, height=600)
     return _inline_theme(fig)
