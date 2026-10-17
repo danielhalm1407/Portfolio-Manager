@@ -63,13 +63,13 @@ REPORT_PATH = DOCS / "probing" / "index.html"
 # this map fragile for cosmetic reasons. A key that matches nothing is an ERROR (see _split_sections):
 # silently publishing a figure under the wrong finding is worse than failing the build.
 FIGURE_AT = {
-    "Finding 2": "iv_smirk",           # the surface's shape — the section about the smirk
-    "Finding 3": "put_paths",          # the cost of protection — the ladder valued through time
-    "Finding 5": "iv_paths",           # the v1/v2 gap — the two moneyness references overlaid
-    "Finding 6": "drawdown_episode",   # struck at the peak and carried
-    "Finding 7": "overlay_values",     # the rolled structures through the simulator
-    "Finding 8": "real_iv_history",    # SPY's real IV over the probe window, not synthetic
-    "Finding 9": "put_paths_market",   # the ladder repriced with real vol level + current spot
+    "reproduces the smirk": "iv_smirk",            # the surface's shape, swept across strikes
+    "Protection costs fall": "put_paths",          # the ladder valued through time
+    "How the surface is anchored": "iv_paths",     # the two moneyness references overlaid
+    "Struck where a rolling hedge": "drawdown_episode",  # struck at the peak and carried
+    "rolled book": "overlay_values",               # the three structures through the simulator
+    "What implied volatility actually did": "real_iv_history",   # the measured series, not synthetic
+    "Repricing with the real volatility": "put_paths_market",    # real level + current spot
 }
 
 # Where a source link should point once the page is served from GitHub Pages. A link like
@@ -161,7 +161,7 @@ def rewrite_links(html, source_dir="research", page_dir="docs"):
     return re.sub(r'href="([^"]+)"', _fix, html)
 
 
-def _split_sections(html, figure_at=FIGURE_AT):
+def _split_sections(html, figure_at=FIGURE_AT, source_name=None):
     """Return the HTML with a placeholder inserted after each mapped section.
 
     The document is cut at ``<h2>`` boundaries: a figure belongs AFTER the whole section that
@@ -184,9 +184,15 @@ def _split_sections(html, figure_at=FIGURE_AT):
                 matched.add(key)
     missing = set(figure_at) - matched
     if missing:
+        # Name the write-up that was ACTUALLY rendered. This used to report WRITE_UP.name — the
+        # module default — which sent a reader to the probe write-up whichever of the three
+        # sections had really gone out of sync. Only sections are searched, so a heading that
+        # exists but sits at h3 reports as missing too, which is the common case and worth
+        # saying: a figure belongs after a whole section, not after a sub-heading inside one.
         raise KeyError(
-            f"headings not found in {WRITE_UP.name}: {sorted(missing)} — the write-up was edited "
-            "without updating FIGURE_AT in build_report.py")
+            f"headings not found in {source_name or WRITE_UP.name}: {sorted(missing)} — either "
+            "the write-up was edited without updating its figure map, or the heading exists but "
+            "is not an h2 (sections are split at h2 only)")
     return "".join(out)
 
 
@@ -230,6 +236,17 @@ _CSS = """
   /* Plotly writes an inline width onto its div; override it so the chart tracks the container
      (paired with responsive:true in the embed, which re-lays-out on window resize). */
   .figure .plotly-graph-div {{ width: 100% !important; }}
+  /* Display equations. Typeset in the page's own CSS with unicode symbols rather than by
+     loading KaTeX or MathJax: every page here vendors its one copy of plotly.min.js precisely so
+     it renders with no network, and a maths library pulled from a CDN would give that up for a
+     handful of formulas. Serif, because a formula set in the body sans-serif reads as code. */
+  .math {{ font-family: "Latin Modern Math", "Cambria Math", Cambria, Georgia, serif;
+          font-size: 1.05rem; line-height: 1.9; text-align: center;
+          background: rgba(255,255,255,.04); border-left: 3px solid {grid};
+          padding: 1rem 1.25rem; margin: 1.5rem 0; overflow-x: auto; }}
+  /* The "where ..." line under an equation — smaller, left-aligned, same block. */
+  .math .where {{ display: block; font-family: inherit; font-size: .88rem; text-align: left;
+                 color: {muted}; margin-top: .75rem; }}
   .meta {{ color: {muted}; font-size: .9rem; }}
   header.page {{ max-width: 46rem; margin: 0 auto 2rem; }}
   footer {{ max-width: 46rem; margin: 4rem auto 0; color: {muted}; font-size: .85rem;
@@ -308,7 +325,7 @@ def build_report(figures=None, write_up=WRITE_UP, out_path=REPORT_PATH, figure_a
     source_dir = write_up.parent.relative_to(PROJECT_ROOT).as_posix()
     body = _split_sections(rewrite_links(render_markdown(write_up.read_text(encoding="utf-8")),
                                          source_dir=source_dir, page_dir=page_dir),
-                           figure_at=figure_at)
+                           figure_at=figure_at, source_name=write_up.name)
     # Wrap tables so the overflow rule above has something to scroll.
     body = body.replace("<table>", '<div class="table-wrap"><table>').replace("</table>", "</table></div>")
 

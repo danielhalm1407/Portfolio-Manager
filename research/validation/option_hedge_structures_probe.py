@@ -733,7 +733,7 @@ GFC_FIGURE_AT = {
     "Protective put":  "protective_put",
     "Put spread":      "put_spread",
     "Rolling collar":  "collar",
-    "The control":     "blind_roll_control",
+    "Blind roll":      "blind_roll_control",
 }
 
 

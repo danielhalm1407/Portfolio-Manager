@@ -1,164 +1,253 @@
 # Testing option price dynamics over recent drawdowns
 
-**Script:** [`option_ladder_prices_probe.py`](option_ladder_prices_probe.py)
-**Run:** 2026-08-31, on `data/processed/prices_spy_kmlm.parquet` (SPY, 250 bars,
-2025-07-28 → 2026-07-24)
+*SPY, 250 daily bars, 2025-07-28 → 2026-07-24. Script:
+[`option_ladder_prices_probe.py`](option_ladder_prices_probe.py).*
 
-## The question
+## Why this exists
 
-Before three plans of module-building ([16-01](../../.paul/phases/16-strategy-architecture/CONTEXT.md)
-skeleton → 16-02 instruments → 16-03 rules), is the option ECONOMICS sound? Specifically: does the
-vol surface ported out of
-[`12-01-PLAN.md`](../../.paul/phases/12-option-overlay/12-01-PLAN.md), plus a European put, produce
-protection costs and protection payoffs that look like a real option market on the real SPY path?
+This project does not buy option prices. There is no historical chain behind it, so every option
+it values is **modelled** — from the underlying's price, a time to expiry, and an implied
+volatility read off a parametric surface. Everything downstream depends on that: if the pricer
+misrepresents how a put behaves in a selloff, then every hedging result built on top of it is
+measuring the model rather than the market.
 
-This is deliberately the cheap version. No roll, no sizing, no P&L — a single fixed-tenor snapshot
-repriced bar by bar. That is why it needs neither Phase 11 history nor an option chain.
+So before any strategy work, the pricer has to earn trust. The test used here is whether it
+reproduces the **stylised facts** of a real equity option market — the regularities that hold
+across venues and decades and that any usable model must show:
 
-## What was built
+1. Out-of-the-money puts carry higher implied volatility than at-the-money puts (the skew, or
+   smirk), and the curve turns up at the wings rather than running off linearly.
+2. Longer tenors carry slightly higher implied volatility, with the term structure steep at the
+   front and flattening out.
+3. Protection gets cheaper, fast, as the strike falls — and the relationship is strongly convex.
+4. A put's value responds to the underlying falling, to time decaying, and to volatility
+   repricing — and in a genuine selloff the volatility term is not a second-order correction.
 
-Two pure modules, in the place 16-02 will find them:
+Those are also, not coincidentally, the facts the hedging strategy itself rests on. A rolling
+out-of-the-money put programme is only worth considering if cheap protection is genuinely cheap,
+if it genuinely pays when the market falls through it, and if the payoff is large enough to be
+banked. Each section below therefore does double duty: it checks the pricer against a known
+regularity, and it reads off what that regularity implies for the strategy.
 
-- [`portutils/strategies/instruments/vol.py`](../../src/portutils/strategies/instruments/vol.py) —
-  `synthetic_iv_surface`, ported from `crash.py:2579` with every constant exposed as a keyword
-  argument. It was previously an inline code block inside a planning document, which meant every
-  consumer would have retyped it.
-- [`portutils/strategies/instruments/pricing.py`](../../src/portutils/strategies/instruments/pricing.py) —
-  `black_scholes_put`, European, discounted-intrinsic floor, **no clamp**, per the 2026-08-26
-  decision. No scipy: the normal CDF is built from `math.erf`.
+The window is deliberately small and the setup deliberately cheap — a single fixed-tenor snapshot
+repriced bar by bar, no sizing, no portfolio accounting. The question here is whether the
+machinery behaves, not whether hedging pays.
 
-## Finding 1 — the port is exact
+## The pricing model
 
-12-01 quotes four numbers from the source function. All four reproduce to the printed precision:
+Two modules do the work:
+[`vol.py`](../../src/portutils/strategies/instruments/vol.py) supplies the volatility surface,
+[`pricing.py`](../../src/portutils/strategies/instruments/pricing.py) the option value.
 
-| | plan | this port |
-|---|---|---|
-| IV, `K=90, τ=0.125, spot_ref=100` (frozen) | 0.210 | **0.2098** |
-| IV, `K=90, τ=0.125, spot_ref=88` (current) | 0.176 | **0.1760** |
-| put, `S=88`, frozen IV | 3.612 | **3.612** |
-| put, `S=88`, current IV | 3.206 | **3.206** |
+### The volatility surface
 
-Cell 3 prints the two IV anchors on every run, so a mis-ported constant is caught immediately
-rather than three cells later. A grid sweep also confirms the put never breaches its discounted
-intrinsic floor — which it should not, by put-call parity, and which is the reason no clamp is
-applied.
+Implied volatility is a parametric function of log-moneyness and tenor:
 
-## Finding 2 — the smirk has the right shape
+<div class="math">
+σ(K, τ) = clip[ σ₀ + c<sub>term</sub>·√τ + c<sub>skew</sub>·ln(K/S<sub>ref</sub>) + c<sub>smile</sub>·ln²(K/S<sub>ref</sub>) ,  σ<sub>min</sub> , σ<sub>max</sub> ]
+<span class="where">K strike · τ years to expiry · S<sub>ref</sub> the spot that moneyness is measured against<br>
+σ₀ = 0.16 (at-the-money level) · c<sub>term</sub> = 0.06 · c<sub>skew</sub> = −0.24 · c<sub>smile</sub> = 0.30 · σ<sub>min</sub> = 0.10 · σ<sub>max</sub> = 0.85</span>
+</div>
 
-Cell 3's figure shows the three terms separately and correctly: IV falls as strike rises (the
-skew term), longer tenors sit higher (the term-structure term), and the wings turn up rather than
-running off linearly (the smile term). Nothing here is surprising; the point is that it is now
-verified rather than assumed.
+Three things are worth stating plainly about its shape.
 
-## Finding 3 — the cost of protection, on the only window that exists
+**The skew is additive in log-moneyness, not multiplicative.** A wing strike is priced at the
+at-the-money level *plus* a spread, not at a multiple of it. At K/S = 0.80 and τ = 0.25, the terms
+contribute +3.0 volatility points (term structure), +5.4 (skew) and +1.5 (smile), so a 16% base
+becomes 25.8% — roughly ten points of uplift, not a scaling. This matters for interpretation: when
+the base level later moves, it moves the *whole* surface up in parallel rather than fanning it, so
+a volatility spike lifts cheap wing strikes by far more in percentage terms than it lifts
+at-the-money ones. That asymmetry drives most of what follows.
 
-Three-month puts struck off the period-start spot (636.94):
+**The sign conventions produce the right curve.** `c_skew` is negative, so lower strikes carry
+higher volatility. `c_smile` is positive, so the wings turn up and deep strikes do not extrapolate
+to nonsense. `c_term` scales with √τ, so the term structure is steep at the front and flattens —
+which is how real term structures behave.
 
-| strike | K/S | IV | put | as % of spot |
+**It is not calibrated.** The coefficients are plausible equity-index values, not a fit to a
+quoted surface, and no attempt is made here to match a particular day's market. That is a real
+limitation and it bounds what this page can claim: nothing here is a statement about the *level*
+of option prices in any specific period. What it does retain is the **dynamics** — the ordering
+of strikes, the convexity of cost in moneyness, the relative sensitivity of wing strikes to a
+volatility move. Those are the properties the strategy work depends on, and they are structural
+consequences of the functional form rather than of the particular constants. The level question
+is answered later on this page, where the synthetic surface is replaced with the ticker's actual
+measured implied volatility.
+
+### The option value
+
+European Black-Scholes with a continuous dividend yield:
+
+<div class="math">
+P = K e<sup>−rτ</sup> Φ(−d₂) − S e<sup>−qτ</sup> Φ(−d₁)
+<span class="where">d₁ = [ ln(S/K) + (r − q + σ²/2)τ ] / (σ√τ) &nbsp;·&nbsp; d₂ = d₁ − σ√τ &nbsp;·&nbsp; Φ the standard normal CDF</span>
+</div>
+
+A European put is bounded below by its *discounted* intrinsic value, not by its intrinsic value:
+
+<div class="math">
+P ≥ max( K e<sup>−rτ</sup> − S e<sup>−qτ</sup> , 0 )
+</div>
+
+This follows from put-call parity and is the reason the implementation applies **no clamp**. A
+naive floor at `max(K − S, 0)` would be wrong — it would force a positive value onto deep
+in-the-money puts that are correctly worth slightly less than their undiscounted intrinsic,
+because exercise cannot happen until expiry. The bound is instead asserted as a property and
+checked across a strike-and-tenor grid on every run, so a mis-signed term shows up as a failure
+rather than as a quietly distorted price. The normal CDF is built from `math.erf` rather than
+pulled from a numerical library, which keeps the pricer dependency-free and auditable in one
+screen of code.
+
+That is as far as the engineering goes on this page. The rest is what the model says.
+
+## The surface reproduces the smirk, the term structure and the wings
+
+Fixing spot and sweeping the strike separates the three terms visually. All three are present and
+correctly signed: implied volatility falls as the strike rises, longer tenors sit above shorter
+ones, and the wings curve upward instead of running off in a straight line.
+
+This is the least surprising result on the page and it is still worth having. The surface was
+previously an untested expression; it is now a verified one, and every number further down
+inherits that.
+
+## Protection costs fall sharply as the strike falls
+
+Three-month puts struck off the period-start spot of 636.94:
+
+| strike | K/S | implied vol | put | % of spot |
 |---|---|---|---|---|
 | 509.55 | 0.80 | 25.8% | 1.14 | **0.18%** |
 | 573.25 | 0.90 | 21.9% | 5.38 | **0.85%** |
 | 605.09 | 0.95 | 20.3% | 11.41 | **1.79%** |
 | 636.94 | 1.00 | 19.0% | 22.52 | **3.53%** |
 
-The headline number for v0.4: **an ATM three-month put costs 3.53% of spot, so rolling it
-quarterly is roughly 14% of notional a year.** That is the drag Phase 13 has to show a benefit
-against, and it is large enough that the answer is very unlikely to be "hedge at the money".
-The 0.90× strike at 0.85% (≈3.4%/yr) is the one that looks like a real candidate.
+The cost relationship is steeply convex: moving the strike down 20% cuts the premium by a factor
+of twenty, even though implied volatility is *rising* along the way. Delta falls faster than
+volatility rises.
 
-## Finding 4 — the ladder never had the drawdown in front of it
+The practical reading is the one that shapes everything afterwards. **An at-the-money three-month
+put costs 3.53% of spot, so rolling it quarterly costs roughly 14% of notional a year.** No
+equity risk premium supports that, which effectively rules out an at-the-money hedge before any
+backtest is run. The 0.90× strike at 0.85% per quarter — about 3.4% annually — is the first
+candidate that looks economically plausible, and the 0.80× strike at 0.18% is cheap enough to be
+almost free. Whether either *pays* is a separate question; what this establishes is which part of
+the strike range is even worth testing.
 
-**Corrected 2026-08-31.** An earlier version of this section read *"the window cannot answer the
-actual question — on a window with no crash, every put is pure cost by construction."* Both halves
-were wrong, and the mistake is worth recording because it is a property of the PROBE, not of the
-data.
+## A drawdown that ends above the strike pays nothing
 
-The window does contain a drawdown: **2026-01-27 (695.49) → 2026-03-30 (631.97), −9.1% over 43
-bars.** What it does not contain is a drawdown that happened *in front of these strikes*. SPY
-opened the window at 636.94, rallied **+9.2%** to the peak, and then gave all of it back — so at
-the trough spot was **−0.8% against the window start**, within 1% of where the ladder was struck.
-The whole fall took place *above* every strike in the ladder. A put struck at 636.94 therefore
-watched a 9% selloff and finished essentially at the money, which reads as carry because it *is*
-carry.
+The window contains a real selloff: **2026-01-27 (695.49) → 2026-03-30 (631.97), −9.1% over 43
+bars.** A ladder struck at the window's start, however, barely registers it.
 
-That is not what a hedge does. A hedge rolls: every 63 days it restrikes at the then-current spot,
-so whatever happens next is measured from *there*, not from wherever the market stood a year ago.
-Finding 6 strikes at the peak, which is where a rolled hedge would have been standing, and the
-answer changes completely.
+The reason is positional rather than statistical. SPY opened at 636.94, rallied **+9.2%** to the
+peak, then gave all of it back — so at the trough spot sat **0.8% below the window start**, within
+one percent of where the ladder was struck. The entire fall happened *above* every strike. A put
+struck at 636.94 watched a nine percent selloff and finished roughly at the money, which reads as
+pure carry because that is exactly what it was.
 
-What genuinely does not survive the window: **one drawdown is one observation.** 14 bars below
-−5%, 2 below −8%, none below −20%. The v0.4 claim is about behaviour *across regimes*, and a
-single episode cannot speak to that. Phase 11 is still the binding constraint — just not for the
-reason this section originally gave.
+This is the central mechanical insight of the page, and it generalises well beyond this window:
 
-## Finding 5 — the v1/v2 gap is real, same sign, much smaller here
+> A put only converts a drawdown into cash if the drawdown carries spot **through its strike**.
+> A hedge struck once and held measures the market's distance from a stale reference point, not
+> its recent fall.
 
-At the trough:
+Which is the argument for **rolling**. Restriking every quarter at the prevailing spot keeps the
+strike tracking the underlying's level, so each new drawdown is measured from where the market
+actually is rather than from where it was a year ago. Against an index that trends upward over
+time, a static strike drifts ever further below spot and becomes progressively less likely to be
+reached — protection that quietly turns into a donation. Rolling resets that distance on a
+schedule.
 
-| strike | K/S *then* | IV v1 | IV v2 | put v1 | put v2 | v2 vs v1 |
+The same logic motivates **monetising**. If a put is sold while it is in the money and the
+position is reopened at a lower strike afterwards, the gain is banked and the new strike is set
+against the reduced spot level, rather than the whole position being carried back to zero as the
+market recovers. Both mechanisms exist to keep the strike meaningfully close to spot.
+
+One limitation genuinely does survive here, and it is about the data rather than the method: **one
+drawdown is one observation.** The window has 14 bars below −5%, two below −8%, and none below
+−20%. Nothing about behaviour across regimes can be read off it.
+
+## How the surface is anchored, and what happens when it moves
+
+Pricing a put through time requires a decision that is easy to make silently: *which* spot does
+moneyness get measured against?
+
+The baseline convention is the conservative one. Implied volatility is fixed per leg at the moment
+it is struck — both the at-the-money level σ₀ and the reference spot S_ref in the formula above are
+frozen at strike time. Under that convention the surface is never consulted again, and a put's
+value moves through **spot and time decay alone**. It captures the most basic channel, a falling
+underlying lifting a fixed strike's value, and nothing else.
+
+Two refinements can then be layered on, and the distinction between them matters:
+
+- **Moving the moneyness reference** (measuring against each bar's own spot) means that as spot
+  falls toward a fixed strike, that strike becomes *less* of a tail strike and slides down the
+  smirk to a lower implied volatility. On its own, this makes protection **cheaper** in a selloff.
+- **Moving the volatility level** (letting σ₀ follow the market) captures the volatility spike
+  that accompanies a real decline, lifting the whole surface in parallel and making protection
+  **dearer**.
+
+Measured at the trough with only the moneyness reference moving:
+
+| strike | K/S then | vol, frozen | vol, current-spot | put, frozen | put, current-spot | change |
 |---|---|---|---|---|---|---|
 | 509.55 | 0.81 | 25.8% | 25.6% | 1.32 | 1.25 | **−5.7%** |
 | 573.25 | 0.91 | 21.9% | 21.6% | 6.14 | 5.96 | −2.9% |
 | 605.09 | 0.96 | 20.3% | 20.1% | 12.83 | 12.60 | −1.8% |
 | 636.94 | 1.01 | 19.0% | 18.8% | 24.88 | 24.65 | −0.9% |
 
-The sign is exactly as the 2026-08-29 decision predicts — the current-spot reference makes
-protection **cheaper** in the selloff — but the magnitude is 1–6%, not the 11% the plan quotes.
+The effect is small here, and for a mechanical reason: the two references agree exactly when
+current spot equals the strike-time spot, and at this trough spot had round-tripped to within one
+percent of where the ladder was struck. The gap scales with distance travelled since the strike
+was set, so a *rolling* ladder — which restrikes and then watches spot move away — would see
+considerably more of it.
 
-The reason is the same one as Finding 4, and it is mechanical. The v1/v2 gap is the difference
-between evaluating the smirk at `log(K / spot_ref)` and at `log(K / S_t)`. Those two agree exactly
-when `S_t == spot_ref` — and at the trough spot was within 1% of the window start the ladder was
-struck against, so the two references were asking the smirk almost the same question. 12-01's
-example instead moves spot 12% *below* a strike set 10% out, where they disagree substantially.
-The gap is a function of distance travelled since the strike was set; **a rolling ladder would
-restrike and see the full effect**, which is precisely what 16-02's `RollCalendar` provides and
-cells 5-7 do not.
+The ordering of these two effects is established further down, and it is not close. The
+consequence for the engine is a firm rule: **the moneyness reference is never made dynamic without
+the volatility level being made dynamic at the same time.** Enabling the cheaper-in-a-selloff term
+on its own would not merely understate the hedge, it would move its price in the wrong direction
+during precisely the event it exists for.
 
-The decision stands: ship v1, and never enable term B (current-spot reference) without term A
-(dynamic vol level).
+## Struck where a rolling hedge would stand
 
-## Finding 6 — struck at the peak, the ladder pays 1-2.6x the premium
-
-Cell 8 strikes the same ladder at the drawdown's peak and carries **one** option through its full
-63-day life, so tenor decays and theta is part of what is measured.
+Striking the same ladder at the drawdown's **peak** — where a quarterly roll would have placed it
+— and carrying one option through its full 63-day life, so that time decay is part of the
+measurement:
 
 Struck 2026-01-27 at 695.49, marked at the trough 2026-03-30 at 631.97 (−9.1%, 43 bars):
 
-| strike | premium | % of spot | MTM at trough | return | + vol spike | return |
+| strike | premium | % of spot | value at trough | return | with vol response | return |
 |---|---|---|---|---|---|---|
 | 556.39 (0.80×) | 1.25 | 0.18% | 0.66 | **−46.9%** | 5.20 | +317.0% |
 | 625.94 (0.90×) | 5.88 | 0.85% | 12.18 | **+107.2%** | 24.04 | +308.8% |
 | 660.72 (0.95×) | 12.46 | 1.79% | 32.54 | **+161.2%** | 43.11 | +246.0% |
 | 695.49 (1.00×) | 24.59 | 3.53% | 62.98 | **+156.2%** | 68.79 | +179.8% |
 
-Two things fall out, and they point in opposite directions:
+Two results, pointing in different directions.
 
-**The mechanic works.** A 0.90× put costing 0.85% of spot roughly doubles on a nine percent dip.
-That is monetisable without holding to expiry, and it is the first evidence in this project that
-the structure does what the catalogue claims.
+**The payoff mechanic works, and it is large.** A 0.90× put costing 0.85% of spot roughly doubles
+on a nine percent dip. That is a gain big enough to be worth banking rather than carrying, which
+is the quantitative version of the rolling-and-monetising argument made above: the strike was
+close enough to spot for the fall to reach it, and the resulting move in the put is a multiple of
+its cost rather than a fraction.
 
-**The 0.80× strike LOSES half its value on a 9% fall.** A 20%-OTM put is not reached by a 9%
-selloff, so under a frozen vol level it is pure theta and it decays. That is the honest v1 answer,
-and it is also the clearest demonstration of what v1 leaves out: deep-OTM protection is almost
-entirely **vega**, and a model whose ATM level never moves cannot price the thing it is bought
-for.
+**The 0.80× strike loses half its value on the same fall.** A 20%-out-of-the-money put is simply
+not reached by a nine percent selloff, so with a frozen volatility level it is pure time decay. On
+its own that would suggest deep-out-of-the-money protection is not worth buying.
 
-The "+ vol spike" columns bound that gap. They apply an **illustrative** term-A response — the ATM
-level rising by `VOL_BETA = 2.0` vol points per 1.0 of drawdown, so 0.16 → 0.34 at the trough —
-and the 0.80× strike goes from **−47% to +317%**. Not calibrated; calibrating it is exactly what
-Phase 11's vol history is for. The point is the ordering: **the vol-level term dominates the
-payoff, and it dominates most on the cheapest strikes**, which are the ones a retail hedge would
-actually buy.
+It is the wrong conclusion, and the final columns show why. Applying an illustrative volatility
+response — the at-the-money level rising from 0.16 to 0.34 across the drawdown — turns the 0.80×
+strike from **−47% to +317%**. Deep-out-of-the-money protection is almost entirely a **volatility**
+position, not a directional one, so a model whose volatility level never moves cannot price the
+thing such a put is actually bought for. The understatement is worst precisely on the cheapest
+strikes.
 
-This is the sharpest argument yet for Phase 11 being the gate on the *result* — and it also says
-the 3.53% ATM cost figure is the wrong thing to design around.
+That illustrative response is assumed, not measured. It is replaced with the real series below.
 
-## Finding 7 — rolled for real, the hedges gained mid-period and then gave it all back
+## Running the structures as a rolled book
 
-**Added 2026-09-19 (plan 16-03), cell 9.** The first six findings price legs. This one runs a
-hedged BOOK. Each structure is a rule in `PortfolioSimulator`: it holds one SPY unit bought on bar
-0, opens its hedge on bar 1 at one option per unit, and rolls every 63 bars off the spot at that
-moment. That restriking is what Finding 4 said was missing. v1 surface, and dividend yield 0.
+Moving from pricing single legs to holding a hedged portfolio: one SPY unit, with a hedge opened
+alongside it and rolled every 63 bars at the prevailing spot — the restriking the stale-strike
+problem above calls for. Frozen volatility level throughout.
 
 | strategy | final value | return | max drawdown | net premium, %/yr of spot |
 |---|---|---|---|---|
@@ -167,194 +256,158 @@ moment. That restriking is what Finding 4 said was missing. v1 surface, and divi
 | + put spread (0.90 / 0.80) | 720.76 | +13.2% | 8.3% | 2.67% |
 | + collar (0.90 / 1.28) | 715.91 | +12.4% | 8.4% | 3.38% |
 
-The rolls fell on 2025-07-29, 2025-10-27, **2026-01-28** and 2026-04-29. The third roll is the one
-that matters. It struck one bar after the drawdown's 2026-01-27 peak, at 695.42, so the 0.90 put's
-strike (625.88) sat in front of the whole fall. **By the 2026-03-30 trough, the put was worth 1.97×
-what it cost, and the spread 2.38×.** Those are the same monetisation numbers cell 8 found, now
-measured inside a rolling book.
+The rolls landed on 2025-07-29, 2025-10-27, **2026-01-28** and 2026-04-29. The third is the
+interesting one: it struck a single bar after the drawdown's peak, at 695.42, placing the 0.90 put's
+strike at 625.88 — in front of the entire subsequent fall. **By the trough the put was worth 1.97×
+what it cost, and the put spread 2.38×.**
 
-**It still expired worthless.** SPY recovered to 711.58 by the 2026-04-29 roll, so the put settled
-at 0. The rules hold every leg to expiry, so a hedge that nearly doubled mid-period contributed
-nothing. The book paid ≈3.4% a year of drag to cut max drawdown by 0.7 points. Three observations:
+**Both expired worthless.** SPY recovered to 711.58 by the next roll, and because these rules hold
+every leg to expiry, a hedge that nearly doubled mid-period contributed nothing at all. The book
+paid roughly 3.4% a year to reduce maximum drawdown by 0.7 percentage points.
 
-1. **A roll-only rule does not monetise.** The payoff exists (the middle panel shows it), but no
-   rule takes it. A monetisation trigger is the natural next rule. It is a policy question for
-   Phase 13's sweep, not a pricing one: for example, close and re-strike when a hedge reaches N×
-   its premium, or when spot is X% below the strike-time spot.
-2. **The wide collar here is a protective put with a rounding error.** A 1.28 call struck 90 days
-   out on a 16% base vol is worth ≈0.009, so it funds almost nothing. That is 12-01's cap working as
-   intended: +28% a quarter is what the source ran, and it is chosen to rarely bind. On this window
-   it never did, so no collar redeploy or funding ever fired. All three rolls logged "collar
-   carry".
-3. **The put spread was the cheapest and did best.** Its net premium was ≈21% lower. The sold 0.80
-   put was never reached, so the credit was kept in full.
+This is the clearest possible statement of the case for a monetisation rule. The payoff was
+genuinely there and was genuinely available — it simply was not taken, because nothing in the
+rule set was looking for it. Rolling fixes *where* the strike sits; it does nothing about *when*
+to realise a gain. Closing a position at some multiple of premium paid, or once the underlying has
+fallen a given distance below its peak, is a separate policy decision, and quantifying it is the
+subject of the other two sections of this site.
 
-The usual caveats apply, and they apply more strongly here. The vol level is frozen, so every
-mid-period multiple above is a floor (Finding 6). And this is one window with one drawdown: one
-observation, not evidence that hedging does or does not pay.
+Two secondary observations:
 
-## How a collar leg is actually priced — the call chain, and why the call is worth ~0.009
+**The wide collar is a protective put with a rounding error.** A 1.28× call struck 90 days out on
+a 16% base volatility is worth about 0.009, so it funds almost nothing; the collar's return
+matches the protective put's to three significant figures. The next section works through why.
 
-**Added 2026-09-20.** Finding 7's numbers are only readable if the path from figure to formula is
-explicit. It is four hops, and nothing in it is a second implementation of anything:
+**The put spread was the cheapest and performed best.** Its net premium was about 21% lower
+because the sold 0.80 put was never reached, so the credit was kept in full. Selling the wing you
+have just established is nearly worthless is an efficient trade on this window.
 
-| # | Where | What happens |
-|---|---|---|
-| 1 | [`option_probe_figures.overlay_runs`](../../src/pipelines/option_probe_figures.py) | Builds one `PortfolioSimulator` per strategy: `BuyAndHoldRule({"SPY": 1.0})` plus the option rule, starting capital = the first close, so the book holds exactly one SPY unit. |
-| 2 | [`PortfolioSimulator.run`](../../src/portutils/portfolio/simulator.py#L47) | Per bar: `propose` → **synthetic marks** (`:72`) → fill → mark the book. The marks step is 16-03's hook; without it a leg has no price and can neither fill nor be valued. |
-| 3 | [`OptionOverlayRule.propose`](../../src/portutils/strategies/rules/options.py#L136) | Only acts on a ROLL bar. Closes the expiring legs, asks the subclass's `_leg_spec()` for the new ones, and prices each at birth — that price becomes the premium. `RollingCollarRule._leg_spec` (`:282`) returns `[("P", 0.90, +1), ("C", 1.28, -1)]`. |
-| 4 | [`OptionOverlayRule._price`](../../src/portutils/strategies/rules/options.py#L104) | The only place a number is produced: `vol_fn(strike, tau, spot_ref)` → `OptionLeg.price` → `black_scholes_put` / `black_scholes_call`. On the expiry bar it returns `intrinsic(spot)` instead. |
-
-Between rolls `propose` returns `{}` and only `synthetic_marks` (`:202`) runs, repricing each open
-leg at that bar's spot and shorter `tau`. **That is the whole dynamic:** within a period the legs
-move through SPOT and TIME DECAY alone. The vol they are priced at is fixed per leg at birth (v1:
-`base = 0.16`, moneyness measured against the strike-time spot), so nothing in this engine re-prices
-a leg because the market got scared.
-
-### Why the collar is a protective put with a rounding error
+## How a collar leg is priced, and why the call is worth so little
 
 Measured at the first roll (spot 635.26, τ = 0.25):
 
-| leg | strike | IV from the smirk | distance from spot | premium |
+| leg | strike | vol from the surface | distance from spot | premium |
 |---|---|---|---|---|
 | long put 0.90× | 571.73 | 21.9% | **0.91 sd** | 5.3701 |
 | short put 0.80× (spread) | 508.21 | 25.8% | 1.55 sd | 1.1391 |
 | short call 1.28× (collar) | 813.13 | 14.9% | **3.76 sd** | 0.0083 |
 
-Totals over the window's four rolls, per SPY unit:
+Across the window's four rolls, per SPY unit:
 
 | structure | paid for longs | received for shorts | net | shorts offset |
 |---|---|---|---|---|
 | put spread | 23.06 | 4.89 | 18.17 | **21.2%** |
 | collar | 23.06 | 0.04 | 23.02 | **0.16%** |
 
-So the collar's short call funds one part in six hundred of its floor, and the +12.4% it returns is
-the protective put's number to three digits. Two independent reasons, and the second dominates:
+The collar's short call funds one part in six hundred of its floor. Two reasons, and the second
+dominates overwhelmingly:
 
-1. **Skew.** The call sits on the low side of the smirk (14.9%) and the put on the high side
-   (21.9%), so equal distance would already be worth less.
-2. **Distance.** 1.28× is **3.76 standard deviations** away over a 63-day tenor at that vol, while
-   0.90× is 0.91 sd. Almost all of the gap is here, not in the skew.
+1. **Skew.** The call sits on the low side of the smirk at 14.9% while the put sits on the high
+   side at 21.9%, so equal distance would already be worth less.
+2. **Distance.** 1.28× is **3.76 standard deviations** away over a 63-day tenor at that volatility,
+   against 0.91 sd for the 0.90× put. Almost the whole gap is here.
 
-This is 12-01's cap working exactly as specified — `HEDGE_UPSIDE_CAP = 0.28` is deliberately wide,
-chosen so it rarely binds — but a cap that never binds also never pays. **Whether 1.28 is the right
-default for a 63-BAR roll is an open question:** the source applies +28% to its own horizon, and at
-a quarterly reset the same number is nearly four sigma out. A cap nearer 1.05-1.10 (≈0.7-1.4 sd)
-would fund a visible share of the floor and would genuinely cap upside — a different structure, and
-exactly the kind of parameter Phase 13 should sweep rather than assume.
+A +28% cap is a sensible annual figure and a nearly meaningless quarterly one — at a 63-day reset
+it is almost four sigma out. A cap that never binds also never pays for anything. Somewhere near
+1.05–1.10 (roughly 0.7–1.4 sd) would fund a visible share of the floor and would genuinely cap
+upside, which makes it a different structure and a parameter worth sweeping rather than assuming.
 
-## Finding 8 — the real vol level nearly doubled at the trough, confirming Finding 6's guess
+## What implied volatility actually did
 
-**Added 2026-09-20**, using 11-01's cached SPY implied vol
-(`data/processed/iv_long_history.parquet`, IBKR's `OPTION_IMPLIED_VOLATILITY` for the ticker
-itself, back to 2006-01-09 — not VIX, not synthetic). Finding 6's "+vol spike" columns were an
-**illustrative** stand-in — `base` rising by `VOL_BETA = 2.0` points per unit of drawdown, chosen
-to bound the gap v1 leaves out, not measured. This finding replaces the guess with the real
-number.
+Replacing the assumed volatility response with the measured one: SPY's own implied volatility, as
+recorded by the broker for the ticker itself — not VIX, and not synthetic.
 
-Over the probe window (2025-07-28 → 2026-07-24), SPY's real IV ranged **10.5% to 26.2%**, mean
-**14.7%** — sitting BELOW `base = 0.16` most of the time, not above it. Across the drawdown episode
-specifically:
+Over the window, real implied volatility ranged **10.5% to 26.2%**, mean **14.7%** — sitting
+*below* the model's 16% base most of the time rather than above it. Across the drawdown:
 
-| | date | real IV |
+| | date | implied vol |
 |---|---|---|
 | peak | 2026-01-27 | **12.9%** |
 | trough | 2026-03-30 | **25.1%** |
-| episode max | — | 26.2% |
+| episode maximum | — | 26.2% |
 
-The level roughly **doubled** from peak to trough — close to the illustrative 0.16 → 0.34 jump
-Finding 6 assumed, arrived at independently from real market data rather than a chosen constant.
+The level roughly **doubled** from peak to trough, arriving independently at close to the
+illustrative 0.16 → 0.34 response assumed earlier. The stylised fact that volatility spikes as
+equities fall is reproduced in the data, and its magnitude on a merely nine percent dip is
+substantial.
 
-## Finding 9 — repriced with real vol AND current spot together, the cheap strikes move the most
+## Repricing with the real volatility level
 
-Same ladder, same trough, now valued with `iv_paths_market` — term A (the level) from Finding 8's
-real series, term B (the moneyness reference) from that bar's own spot, both dynamic together
-(never term B alone, per the 2026-08-29 decision):
+The same ladder at the same trough, now valued with both the measured volatility level and the
+current-spot moneyness reference:
 
-| strike | K/S then | IV v1 | IV market | put v1 | put market | market vs v1 |
+| strike | K/S then | vol, frozen | vol, market | put, frozen | put, market | change |
 |---|---|---|---|---|---|---|
 | 509.55 | 0.81 | 25.8% | 34.6% | 1.32 | 4.72 | **+257.6%** |
 | 573.25 | 0.91 | 21.9% | 30.7% | 6.14 | 13.88 | **+126.1%** |
 | 605.09 | 0.96 | 20.3% | 29.2% | 12.83 | 22.89 | +78.5% |
 | 636.94 | 1.01 | 19.0% | 27.9% | 24.88 | 36.09 | +45.0% |
 
-Same ordering as Finding 6, now with real numbers instead of an illustrative one: **the cheapest,
-most OTM strike gains the most from a real vol repricing** (+258% vs +45% for the ATM strike).
-Finding 6's frozen-`base` run showed the 0.80× strike LOSING 46.9% over this same episode when held
-to expiry with decaying tau — the two are different measurements (a fixed 63-day snapshot here vs
-one option carried to expiry there) but they point at the same mechanism from opposite directions:
-a model whose vol level never moves cannot price what deep-OTM protection is actually bought for,
-and this finding is the first time that statement is backed by a real, measured vol series rather
-than an assumption.
+**The cheapest, furthest out-of-the-money strike gains the most** — +258% against +45% for the
+at-the-money strike — which is the additive structure of the surface showing through. A parallel
+lift in the level is a far larger proportional change to a put worth 1.32 than to one worth 24.88.
 
-**The vol spike is the overriding factor, and it is not close.** Both the market series here and
-the v2 series in Finding 5 measure the moneyness reference against each bar's own spot — term B is
-common to both. The only thing this finding adds is term A, the real vol level. So the two tables
-decompose the effect cleanly:
+Because both this table and the earlier one measure moneyness against each bar's own spot, the
+two decompose the effect cleanly:
 
-| strike | term B alone (Finding 5, v2 vs v1) | term B **and** term A (this finding, market vs v1) |
+| strike | moneyness reference alone | moneyness reference **and** volatility level |
 |---|---|---|
 | 0.80× | −5.7% | **+257.6%** |
 | 0.90× | −2.9% | **+126.1%** |
 | 0.95× | −1.8% | **+78.5%** |
 | 1.00× | −0.9% | **+45.0%** |
 
-Sliding down the smirk — a fixed strike becoming less of a tail strike as spot falls toward it —
-makes protection **cheaper by 1-6%**. The vol level rising makes it **dearer by 45-258%**. They
-push in opposite directions and they are not the same order of magnitude: term A is roughly two
-orders larger than term B on the same bars. Any model that freezes the vol level is therefore not
-making a small approximation, and the 2026-08-29 rule ("never term B alone") is doing more work
-than it appears to — enabling term B by itself would not merely under-price the hedge, it would
-move the price the *wrong way* in a selloff.
+Sliding down the smirk makes protection cheaper by 1–6%. The volatility level rising makes it
+dearer by 45–258%. The two push in opposite directions and differ by roughly two orders of
+magnitude. **Freezing the volatility level is therefore not a small approximation**, and the rule
+stated earlier — never move the moneyness reference without moving the level — is doing
+considerably more work than it appears to.
 
-The figure above is stacked for exactly this reason: the real IV panel shares its x-axis with the
-put panel, so the spike and the jump in the dashed series line up vertically rather than having to
-be matched by eye across two separate charts.
+## Limitations
 
-This is a probe-window result, not yet the walk-forward: the FULL 2006-2026 real IV series is what
-Phase 13 needs to actually calibrate `vol.py`'s v2 (`base` driven bar-by-bar off a real series,
-per the 2026-08-29 decision) across many regimes rather than one window. See that phase's scope
-note in the roadmap.
+**The surface is uncalibrated.** Coefficients are plausible rather than fitted. Price *levels*
+from the synthetic surface should not be read as market levels; the dynamics and the orderings
+are what this page supports.
 
-## What this does not cover — and who owns it
+**One window, one drawdown.** A −9.1% dip is a single observation, and a shallow one. Nothing here
+speaks to behaviour across regimes.
 
-| gap | owner |
-|---|---|
-| ~~Rolling / restriking, theta decay within a period~~ | **Done 2026-09-19** — 16-02 `RollCalendar`, 16-03 rules (Finding 7) |
-| Monetising a hedge before expiry (take-profit / re-strike triggers) | Phase 13 policy sweep; a new rule |
-| Delta, theta, `OptionLeg` as an object | 16-02 |
-| Put spreads, collars, funding branch | 16-03 |
-| Dividend yield (left at 0.0 to match the plan's worked examples; SPY is ~1.2%) | 16-02 |
-| Whether hedging actually pays | Phase 13, and it needs Phase 11 first |
+**Frozen-volatility payoffs are floors, not estimates.** Every figure computed with a fixed
+volatility level understates the hedge, most severely on the cheap out-of-the-money strikes that a
+retail programme would actually buy.
 
-## Published figures
+**No dividend yield.** Left at zero; SPY's is approximately 1.2%.
 
-All seven figures render to standalone interactive HTML under [`docs/`](../../docs/README.md), which is
-the GitHub Pages root:
+**No transaction costs.** Every price is a model mark — no bid/ask spread, no slippage. This
+flatters any strategy that trades frequently.
+
+## What this establishes
+
+The pricer reproduces the stylised facts it needs to: a correctly signed smirk with convex wings,
+a flattening term structure, steeply convex protection costs, and a volatility response that
+dominates the payoff of cheap strikes. It can be used for strategy work, with the level caveat
+above held in view.
+
+For the strategy itself, three things follow:
+
+1. **At-the-money hedging is uneconomic** at roughly 14% of notional a year. The plausible range
+   is 0.80×–0.95×.
+2. **Rolling is structural, not cosmetic.** A static strike measures distance from a stale
+   reference and drifts out of reach of exactly the falls it was bought for.
+3. **Rolling alone is not enough.** A hedge that reached 1.97× its premium still expired
+   worthless, because no rule was looking to realise it. Monetisation is a separate decision and
+   needs its own evidence.
+
+The [next section](../../docs/validation/index.html) takes those three structures through a real
+crisis with a monetisation policy attached.
+
+## Reproducing this
 
 ```bash
-python -m pipelines.option_probe_figures      # or the last cell of the script
+python -m pipelines.option_probe_figures
 ```
 
-The builders live in
-[`src/pipelines/option_probe_figures.py`](../../src/pipelines/option_probe_figures.py) and are shared
-between the research cells and the exporter, so the inline figure and the published page are the
-same object. This is the first concrete instance of Phase 10's Track A (10-01) pattern.
-
-## Verdict
-
-The economics are sound and the port is exact, so 16-02 and 16-03 can be planned against verified
-numbers rather than against an untested code block in a markdown file.
-
-The payoff mechanic is **demonstrated, not merely plausible**: struck where a rolled hedge would
-stand, the 0.90×-1.00× strikes return 107-161% on a nine percent dip. What is not demonstrated is
-that it pays *over time* — one episode is one observation, and the frozen vol level means every
-payoff figure here is a floor rather than an estimate, most severely on the cheap OTM strikes.
-
-Two consequences for sequencing:
-
-1. **16-02's `RollCalendar` is not cosmetic.** Restriking is what puts the next drawdown in front
-   of the strike. Without it, any backtest of this measures carry and calls it a result — which is
-   the exact error Finding 4 records.
-2. **Phase 11 gates the vol LEVEL, and the vol level is where the payoff lives.** That is a
-   stronger argument for 11-01 than the window-length one this write-up originally made.
+Figure builders live in
+[`option_probe_figures.py`](../../src/pipelines/option_probe_figures.py) and are shared between the
+interactive research script and the page exporter, so what is published and what is inspected are
+the same objects.

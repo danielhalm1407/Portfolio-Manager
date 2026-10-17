@@ -51,6 +51,12 @@ from portutils.viz import theme
 # option_grid_figures imports option_probe_figures and this module, never the other way round.
 import pipelines.option_grid_figures as gridfig
 
+# The report renderer the other two published sections already use. One implementation, so the
+# heading -> figure guard, the link rewriting and the page CSS cannot drift between the three.
+# No cycle: build_report imports option_probe_figures' build_all lazily and only when it is given
+# no figures, which this module never does.
+from pipelines.build_report import build_report
+
 # The loaders and the shared carry constants live in 13-01's batch runner and the probe figure
 # module. IMPORTED, never re-derived: a second copy of "which bars are the run window" is a
 # second thing to get wrong, and it would be wrong silently.
@@ -575,6 +581,129 @@ def fit_vs_raw(scores, fits, optima):
             "curvature": opt.curvature,
         })
     return pd.DataFrame(rows)
+
+
+# ============================================================================
+# PUBLICATION — the third section of the static site.
+#
+# Same shape as the other two sections: a write-up rendered to HTML with each
+# figure spliced in at the heading that discusses it, plus one standalone page
+# per figure beside it. The prose is RENDERED from the Markdown, never retyped,
+# so the page and the write-up cannot drift — the same rule the other two
+# sections follow, through the same `build_report`.
+# ============================================================================
+
+DOCS_DIR = PROJECT_ROOT / "docs" / "optimisation"
+DOCS_FIGURES_DIR = DOCS_DIR / "figures"
+WRITE_UP = PROJECT_ROOT / "research" / "validation" / "option_moneyness_optimisation.md"
+
+# The ONE vendored plotly.min.js at docs/assets/, spelled relative to each page that loads it. A
+# page in docs/optimisation/figures/ is two levels below docs/; the section index is one. Getting
+# this wrong points the script tag at a directory that does not exist and the figures silently
+# never draw — which is why it is two constants rather than one.
+PLOTLY_SRC_FIGURE = "../../assets/plotly.min.js"
+PLOTLY_SRC_INDEX = "../assets/plotly.min.js"
+
+# Heading -> figure. The headings are the INTERFACE: renaming one in the Markdown without
+# updating this map fails the build (build_report._split_sections), deliberately, because a
+# figure published under the wrong heading is worse than no figure.
+FIGURE_AT = {
+    "quiet decades": "grid_heatmap",
+    "Per-window score grids": "window_grids",
+    "optimum moves between regimes": "window_surfaces",
+    "Pooling across windows": "pooled_contour",
+    "Snapping to a tradeable strike": "pooled_surface_3d",
+}
+
+
+def build_publication_figures(scores, fits, optima, bounds, snap, trials,
+                              default_trigger=LADDER_MONETISE_DRAWDOWN):
+    """The five figures the published section carries, keyed by the stems FIGURE_AT names."""
+    per_window = {k: v for k, v in fits.items() if not k.startswith("POOLED")}
+    pooled_key = "POOLED_DEMEANED"
+    demeaned_note = ("height is the deviation from each window's own mean score, NOT a Calmar — "
+                     "pooling the raw scores fits a flat plane (R2 0.009) because window identity "
+                     "dominates the variance")
+    # STRIKE against WINDOW, at the default trigger depth, colour normalised per window. This is
+    # the readable cross-section of the grid: the full 63-row config axis would be a heatmap
+    # taller than the page, and the narrative at that heading is about how a strike reads
+    # differently in each regime rather than about the trigger axis.
+    at_default = scores[np.isclose(scores["monetise_drawdown"].fillna(-1), default_trigger)]
+    return {
+        "grid_heatmap": gridfig.fig_grid_heatmap(scores, trial_count=trials),
+        "window_grids": gridfig.fig_score_grid(
+            at_default, value_col="score", row="floor", col="window",
+            title=(f"Floored Calmar by strike and window, at a "
+                   f"{default_trigger:.0%} monetisation trigger"),
+            trial_count=trials, normalise="column"),
+        "window_surfaces": gridfig.fig_window_surfaces(
+            per_window, optima, bounds, trial_count=trials),
+        "pooled_contour": gridfig.fig_pooled_contour(
+            fits[pooled_key], demeaned_scores(scores), optima[pooled_key], bounds,
+            trial_count=trials,
+            title=f"Pooled fitted surface, window-demeaned — {demeaned_note}"),
+        "pooled_surface_3d": gridfig.fig_pooled_surface_3d(
+            fits[pooled_key], optima[pooled_key], snap, bounds, trial_count=trials,
+            title="Pooled window-demeaned surface — optimum and nearest tradeable strike"),
+    }
+
+
+def export_optimisation_analysis(out_dir=DOCS_DIR, figures_dir=None):
+    """Publish the section from the PERSISTED sweep — no simulator runs.
+
+    Reads back what ``main()`` wrote, refits the surfaces (seconds, pure arithmetic) and renders
+    the page. Deliberately decoupled from the sweep itself: republishing after an edit to the
+    prose must not cost three minutes of simulation, and must not risk the published numbers
+    silently changing because something upstream moved.
+    """
+    figures_dir = DOCS_FIGURES_DIR if figures_dir is None else figures_dir
+    out_dir.mkdir(parents=True, exist_ok=True)
+    figures_dir.mkdir(parents=True, exist_ok=True)
+
+    results, scores = load_sweep()
+    spot, _iv = load_full()
+    trials = int(scores["config"].nunique())
+    fits, optima, bounds, one_d = fit_surfaces(scores)
+    pooled_opt = optima["POOLED_DEMEANED"]
+    snap = surface.snap_to_strike(pooled_opt.point[0], float(spot.iloc[-1]), increment=1.0,
+                                  predict=fits["POOLED_DEMEANED"].predict,
+                                  other=pooled_opt.point[1])
+
+    figs = build_publication_figures(scores, fits, optima, bounds, snap, trials)
+
+    # One standalone page per figure, so a chart can be opened by double-clicking a file with no
+    # kernel and no report around it. The SAME figure objects are then handed to build_report, so
+    # nothing is rendered twice and the two cannot disagree.
+    for name, fig in figs.items():
+        theme.apply_export_theme(fig)
+        theme.apply_export_spacing(fig)
+        path = figures_dir / f"{name}.html"
+        fig.write_html(path, include_plotlyjs=PLOTLY_SRC_FIGURE)
+        # Plotly's <body> carries no background of its own, so the margin around a dark figure is
+        # browser white until this injects the shared page rule.
+        path.write_text(theme.darken_page(path.read_text(encoding="utf-8")), encoding="utf-8")
+
+    build_report(
+        figures=figs,
+        write_up=WRITE_UP,
+        out_path=out_dir / "index.html",
+        figure_at=FIGURE_AT,
+        plotly_src=PLOTLY_SRC_INDEX,
+        title="Optimising put option moneyness for drawdown-adjusted returns — Portfolio Manager",
+        heading="Optimising put option moneyness for drawdown-adjusted returns",
+        header_note=("Figures are fully interactive — hover, zoom and legend toggles all work, "
+                     "with no server. Generated from {source_link} by "
+                     "<code>python -m pipelines.option_grid_sweep</code> on {built}."),
+        footer_note=("Portfolio Manager — thematic-fundamental research engine. "
+                     "Priced with measured implied volatility, not a synthetic surface. "
+                     "IN-SAMPLE across 63 trials on the windows the parameters were read on — "
+                     "see “What this establishes, and what it does not” above."),
+    )
+    print(f"\nwritten to {out_dir}:")
+    for name in figs:
+        print(f"  figures/{name}.html")
+    print("  index.html")
+    return out_dir / "index.html"
 
 
 def main(persist=True):

@@ -65,6 +65,18 @@ SECTIONS = [
             "against a blind-roll control."
         ),
     },
+    {
+        "title": "Optimising put option moneyness for drawdown-adjusted returns",
+        "href": "optimisation/index.html",
+        "data": "REAL implied vol, 2006-2026, 63 parameter combinations over six windows, IN-SAMPLE",
+        "blurb": (
+            "How far out of the money should the put be struck, and how far should the market "
+            "fall before the hedge is closed? A full parameter sweep scored on three crises and "
+            "three calm stretches. The two regimes rank configurations in OPPOSITE directions, "
+            "and the choice turns out to be decided by carry in quiet markets rather than by "
+            "performance in a crash."
+        ),
+    },
 ]
 
 
