@@ -44,7 +44,8 @@ from portutils.portfolio.narrow_ledger import NarrowLedger
 from portutils.portfolio.rules import BuyAndHoldRule
 from portutils.portfolio.simulator import PortfolioSimulator
 from portutils.strategies import scoring, surface
-from portutils.strategies.rules.options import ProtectivePutRule
+from portutils.strategies.rules.options import (BudgetMatchedPutRule, PortfolioBudgetPutRule,
+                                                ProtectivePutRule)
 from portutils.viz import theme
 
 # The figure builders. Imported at module scope and not deferred: there is no cycle —
@@ -115,6 +116,25 @@ LADDER_MONETISE_DRAWDOWN = 0.10
 LADDER_REENTRY_IV = 0.18
 LADDER_MAX_FLAT_BARS = 126
 
+# ============================================================================
+# SIZING (13-02.1, decisions D2 and D3, 2026-10-18). 13-02 bought ONE put per
+# unit of SPY at every strike, so a 0.80x put was bought for a small fraction
+# of what a 0.95x put cost, and the moneyness axis was really a SPEND axis in
+# disguise. Every run here is now sized to an EQUAL PREMIUM BUDGET: as many
+# contracts at strike K as the premium of one BUDGET_MONEYNESS put buys, per
+# unit held (BudgetMatchedPutRule). Spend is then constant across strikes and
+# the grid asks the real question: for the same money, which strike protects
+# best. 13-02's one-per-unit results are kept in outputs/option_grid/.
+# ============================================================================
+BUDGET_MONEYNESS = 0.95
+
+# The second sizing class, run ONCE as a reference rather than swept: a fixed share of portfolio
+# value spent on puts each year (PortfolioBudgetPutRule), at the ladder's default strike and
+# trigger. It answers the allocation question as a holder would state it ("I will spend 5% a
+# year on insurance") beside the grid's budget-matched answer.
+PORTFOLIO_BUDGET_PCT = 0.05
+REFERENCE_FLOOR = 0.90
+
 
 # ============================================================================
 # DATA — loaded once per process, because every configuration slices the same
@@ -143,7 +163,7 @@ def load_full(reload=False):
 # THE RUNNER
 # ============================================================================
 
-def run_config(floor=0.90, monetise_drawdown=None, window=None, rule_cls=ProtectivePutRule,
+def run_config(floor=0.90, monetise_drawdown=None, window=None, rule_cls=BudgetMatchedPutRule,
                spot=None, iv=None, reentry_iv=LADDER_REENTRY_IV,
                max_flat_bars=LADDER_MAX_FLAT_BARS, quiet=False, **rule_kwargs):
     """One parameter combination over one window. THE single code path for every step of 13-02.
@@ -199,6 +219,10 @@ def run_config(floor=0.90, monetise_drawdown=None, window=None, rule_cls=Protect
         # show up in the run's parameter record and invite a reader to think it did something.
         kw.update(monetise_drawdown=monetise_drawdown, reentry_iv=reentry_iv,
                   max_flat_bars=max_flat_bars)
+    # The budget strike travels with the budget-matched rule unless a caller overrides it, so
+    # the default call is sized exactly as decision D2 says without every caller repeating it.
+    if rule_cls is BudgetMatchedPutRule:
+        kw.setdefault("budget_moneyness", BUDGET_MONEYNESS)
     kw.update(rule_kwargs)
     rule = rule_cls(**kw)
 
@@ -249,7 +273,9 @@ def run_config(floor=0.90, monetise_drawdown=None, window=None, rule_cls=Protect
 
     return {
         "params": {"floor": floor, "monetise_drawdown": monetise_drawdown,
-                   "reset_bars": RESET_BARS},
+                   "reset_bars": RESET_BARS, "rule": rule_cls.__name__,
+                   "budget_moneyness": getattr(rule, "budget_moneyness", None),
+                   "budget_pct": getattr(rule, "budget_pct", None)},
         "state": state,
         # The persisted artefact shape, built by 13-01's own function. AC-2 requires three
         # artefacts per combination — this frame, the blotter and the rule history — because
@@ -273,7 +299,13 @@ def slice_result(res, start, end):
     series = res["series"].loc[start:end]
     blot = res.get("blotter")
     if blot is not None and len(blot):
-        blot = blot[(blot["ts"] >= pd.Timestamp(start)) & (blot["ts"] <= pd.Timestamp(end))]
+        # Cut at the END only, NOT at the start (fixed 13-02.1). Lifecycle classification
+        # (classify_option_events) follows the running position from the first fill it is
+        # given, so a blotter cut at the window start turns the close of a leg opened BEFORE the
+        # window into an apparent "opening" fill: the COVID monetisation of 2020-02-27 was
+        # being drawn and counted as an OPEN. Keeping the earlier fills lets the classifier see
+        # the position it is closing; the figure drops events outside the series' own index.
+        blot = blot[blot["ts"] <= pd.Timestamp(end)]
     return {"series": series, "blotter": blot, "params": res.get("params", {})}
 
 
@@ -306,7 +338,10 @@ def config_slug(floor, monetise_drawdown):
 # ============================================================================
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
-OUT_DIR = PROJECT_ROOT / "outputs" / "option_grid"
+# 13-02.1: budget-sized results land in their OWN directory. 13-02's one-put-per-unit sweep stays
+# untouched in outputs/option_grid/ (UNIT_OUT_DIR) so the two sizings can be compared directly.
+UNIT_OUT_DIR = PROJECT_ROOT / "outputs" / "option_grid"
+OUT_DIR = PROJECT_ROOT / "outputs" / "option_grid_budget"
 SERIES_DIR = OUT_DIR / "series"
 BLOTTER_DIR = OUT_DIR / "blotter"
 HISTORY_DIR = OUT_DIR / "rule_history"
@@ -604,57 +639,263 @@ WRITE_UP = PROJECT_ROOT / "research" / "validation" / "option_moneyness_optimisa
 PLOTLY_SRC_FIGURE = "../../assets/plotly.min.js"
 PLOTLY_SRC_INDEX = "../assets/plotly.min.js"
 
-# Heading -> figure. The headings are the INTERFACE: renaming one in the Markdown without
+# ============================================================================
+# 13-02.1 — THE MECHANISM RUNS, THE REFERENCE RUN AND THE 1-D FIT LAYERS.
+#
+# The page now argues in the order a reader needs: HOW a strike wins (the GFC
+# ladder, then every window as paths), then the score built up one ingredient
+# at a time, then the 1-D fits at a fixed trigger, and only then the surfaces.
+# Everything below feeds that order. None of it changes the grid itself.
+# ============================================================================
+
+# The GFC window for the mechanism figures (steps 1, 2 and 2b), and the two strikes step 2b
+# overlays. Same choices as the cell script, which imports them from here so there is one copy.
+GFC_WINDOW = scoring.INDICATIVE_WINDOWS["GFC 2007-2009"][:2]
+COMPARE_STRIKES = (0.85, 0.95)
+
+# The interior knots of the layer-(ii) regression spline. Three, at the ladder's own interior
+# strikes, so each cubic piece spans a 0.05 stretch of moneyness. Fixed by hand on purpose: the
+# point that layer makes is that SOMEONE has to choose them, which is what layer (iii) removes.
+REGRESSION_SPLINE_KNOTS = (0.85, 0.90, 0.95)
+
+
+def mechanism_runs(window=None):
+    """Steps 1 and 2 over the GFC: the four ladder strikes, blind and armed, budget-sized.
+
+    Eight short runs (about 375 bars each), seconds in total. Run fresh rather than sliced from
+    the full-history sweep because these start FLAT on the window's first bar, the cleanest way
+    to watch one crisis from the first hedge onwards; the per-window panels below are slices of
+    the standing programme instead, and the write-up says which is which.
+    """
+    window = GFC_WINDOW if window is None else window
+    blind = {config_label(f, None): run_config(floor=f, monetise_drawdown=None, window=window,
+                                               quiet=True)
+             for f in MONEYNESS_LADDER}
+    armed = {config_label(f, LADDER_MONETISE_DRAWDOWN): run_config(
+                 floor=f, monetise_drawdown=LADDER_MONETISE_DRAWDOWN, window=window, quiet=True)
+             for f in MONEYNESS_LADDER}
+    return blind, armed
+
+
+def reference_run(persist=True, out_dir=None):
+    """THE 5%-A-YEAR PORTFOLIO-BUDGET RUN (decision D3) over the full history, persisted.
+
+    One configuration, at the ladder's default strike and trigger, sized by
+    ``PortfolioBudgetPutRule``. It is NOT a design point: it never enters the grid, the ranking
+    or a fit, because its sizing is a different axis from the grid's. It is scored on the same
+    windows and shown as an extra row beside the grid so the two sizing answers can be read
+    side by side.
+    """
+    res = run_config(floor=REFERENCE_FLOOR, monetise_drawdown=LADDER_MONETISE_DRAWDOWN,
+                     rule_cls=PortfolioBudgetPutRule, budget_pct=PORTFOLIO_BUDGET_PCT, quiet=True)
+    if persist:
+        out_dir = OUT_DIR if out_dir is None else Path(out_dir)
+        ref_dir = out_dir / "reference"
+        ref_dir.mkdir(parents=True, exist_ok=True)
+        res["series"].to_parquet(ref_dir / "portfolio_budget_series.parquet")
+        res["blotter"].to_csv(ref_dir / "portfolio_budget_blotter.csv", index=False)
+        res["history"].to_csv(ref_dir / "portfolio_budget_rule_history.csv")
+    return res
+
+
+def reference_label():
+    """The display label of the reference run, used as its grid row."""
+    return (f"{PORTFOLIO_BUDGET_PCT:.0%}/yr budget, {REFERENCE_FLOOR:.2f}x/"
+            f"dd{LADDER_MONETISE_DRAWDOWN:.0%}")
+
+
+def load_reference(out_dir=None):
+    """Reload the persisted reference run — no simulator."""
+    out_dir = OUT_DIR if out_dir is None else Path(out_dir)
+    ref_dir = out_dir / "reference"
+    return {"series": pd.read_parquet(ref_dir / "portfolio_budget_series.parquet"),
+            "blotter": pd.read_csv(ref_dir / "portfolio_budget_blotter.csv", parse_dates=["ts"]),
+            "params": {"floor": REFERENCE_FLOOR, "monetise_drawdown": LADDER_MONETISE_DRAWDOWN}}
+
+
+def build_up_rows(scores, reference_scores=None, trigger=LADDER_MONETISE_DRAWDOWN):
+    """The rows the four build-up grids draw: every strike at ONE trigger depth, then SPY as its
+    own row, then the reference run. Each grid then shows, column by column, whether every
+    configuration improved on the underlying, and by how much compared with the 5% budget."""
+    at = scores[np.isclose(scores["monetise_drawdown"].fillna(-1), trigger)].copy()
+    at = at.sort_values("floor")
+    parts = [at, scoring.spy_reference_rows(at)]
+    if reference_scores is not None and len(reference_scores):
+        parts.append(reference_scores)
+    return pd.concat(parts, ignore_index=True)
+
+
+def fit_strike_layers(scores, trigger=LADDER_MONETISE_DRAWDOWN):
+    """The three 1-D fitting layers at a FIXED trigger, over every (strike, window) observation.
+
+    Fitted to ALL the points (nine strikes x six windows), not to per-strike means: the score is
+    relative to SPY on every window, so the observations share a scale and the spread above each
+    strike is part of what the curve has to summarise. Returns ``(points, layers)`` in the shape
+    ``gridfig.fig_strike_fit_layers`` takes.
+    """
+    pts = scores[np.isclose(scores["monetise_drawdown"].fillna(-1), trigger)]
+    pts = pts.dropna(subset=["score"])[["floor", "window", "kind", "score"]].copy()
+    x, y = pts["floor"].to_numpy(), pts["score"].to_numpy()
+    p_fit = surface.fit_1d(x, y)
+    layers = {
+        "(i) global quadratic": {"fit": surface.fit_poly(x, y, degree=2), "knots": None,
+                                 "colour": theme.CATEGORICAL[7], "dash": "dash"},
+        "(ii) cubic regression spline": {
+            "fit": surface.fit_regression_spline(x, y, REGRESSION_SPLINE_KNOTS),
+            "knots": np.asarray(REGRESSION_SPLINE_KNOTS),
+            "colour": theme.CATEGORICAL[5], "dash": "dashdot"},
+        "(iii) penalised B-spline (P-spline, GCV)": {
+            "fit": p_fit, "knots": surface.pspline_knots(x),
+            "colour": theme.INK, "dash": "solid"},
+    }
+    return pts, layers
+
+
+# Heading -> figure(s). The headings are the INTERFACE: renaming one in the Markdown without
 # updating this map fails the build (build_report._split_sections), deliberately, because a
-# figure published under the wrong heading is worse than no figure.
+# figure published under the wrong heading is worse than no figure. Since 13-02.1 a value may be a
+# LIST of stems, published in order after that section.
+WINDOW_PANEL_STEMS = [f"panel_{i}" for i in range(len(scoring.INDICATIVE_WINDOWS))]
 FIGURE_AT = {
+    "Step 1": "step1_blind",
+    "Step 2:": "step2_armed",
+    "Step 2b": "step2b_compare",
+    "window by window": WINDOW_PANEL_STEMS,
+    "drawdown on its own": "grid_mdd",
+    "return on its own": "grid_ret",
+    "Return per unit of drawdown": "grid_wod",
+    "The optimisation metric": "grid_score",
     "quiet decades": "grid_heatmap",
-    "Per-window score grids": "window_grids",
+    "observations at a fixed trigger": "fit_scatter",
+    "Layer 1": "fit_poly",
+    "Layer 2": "fit_regspline",
+    "Layer 3": "fit_pspline",
     "optimum moves between regimes": "window_surfaces",
     "Pooling across windows": "pooled_contour",
-    "Snapping to a tradeable strike": "pooled_surface_3d",
+    "Snapping to a tradeable strike": "snap_slice",
+    "three dimensions": "pooled_surface_3d",
+    "portfolio budget": "reference_gfc",
 }
 
 
-def build_publication_figures(scores, fits, optima, bounds, snap, trials,
+def build_publication_figures(scores, fits, optima, bounds, snap, trials, results, spot,
+                              reference=None, reference_scores=None, mechanism=None,
                               default_trigger=LADDER_MONETISE_DRAWDOWN):
-    """The five figures the published section carries, keyed by the stems FIGURE_AT names."""
-    per_window = {k: v for k, v in fits.items() if not k.startswith("POOLED")}
-    pooled_key = "POOLED_DEMEANED"
-    demeaned_note = ("height is the deviation from each window's own mean score, NOT a Calmar — "
-                     "pooling the raw scores fits a flat plane (R2 0.009) because window identity "
-                     "dominates the variance")
+    """Every figure the published section carries, keyed by the stems FIGURE_AT names."""
+    figs = {}
+    blind, armed = mechanism if mechanism is not None else mechanism_runs()
+    gfc_spot = spot.loc[GFC_WINDOW[0]:GFC_WINDOW[1]]
+    budget = f"sized to the {BUDGET_MONEYNESS:.2f}x premium"
+
+    # ---- THE MECHANISM: GFC steps 1, 2, 2b ----
+    figs["step1_blind"] = gridfig.fig_moneyness_stack(
+        blind, gfc_spot, underlying=UNDERLYING,
+        title=f"Step 1 — blind roll, four strikes {budget}, GFC 2007-2009")
+    figs["step2_armed"] = gridfig.fig_moneyness_stack(
+        armed, gfc_spot, reentry_iv=LADDER_REENTRY_IV, underlying=UNDERLYING,
+        title=(f"Step 2 — monetise at {default_trigger:.0%} drawdown, re-enter under "
+               f"{LADDER_REENTRY_IV:.2f} IV, four strikes {budget}, GFC 2007-2009"))
+    compare = {}
+    for f in COMPARE_STRIKES:
+        compare[config_label(f, None)] = blind[config_label(f, None)]
+        compare[config_label(f, default_trigger)] = armed[config_label(f, default_trigger)]
+    figs["step2b_compare"] = gridfig.fig_moneyness_stack(
+        compare, gfc_spot, reentry_iv=LADDER_REENTRY_IV, underlying=UNDERLYING,
+        title=(f"Step 2b — blind roll against monetisation, {COMPARE_STRIKES[0]:.2f}x and "
+               f"{COMPARE_STRIKES[1]:.2f}x only, GFC 2007-2009"))
+
+    # ---- THE MECHANISM, WINDOW BY WINDOW: slices of the standing full-history programme ----
+    for stem, (window, (start, end, kind)) in zip(WINDOW_PANEL_STEMS,
+                                                 scoring.INDICATIVE_WINDOWS.items()):
+        sliced = {lab: slice_result(results[lab], start, end)
+                  for lab in (config_label(f, default_trigger) for f in MONEYNESS_LADDER)}
+        figs[stem] = gridfig.fig_moneyness_stack(
+            sliced, spot.loc[start:end], reentry_iv=LADDER_REENTRY_IV, underlying=UNDERLYING,
+            title=(f"{window} ({kind}) — monetise at {default_trigger:.0%} drawdown, four "
+                   f"strikes {budget}"))
+
+    # ---- THE SCORE, BUILT UP ONE INGREDIENT AT A TIME ----
     # STRIKE against WINDOW, at the default trigger depth, colour normalised per window. This is
     # the readable cross-section of the grid: the full 63-row config axis would be a heatmap
     # taller than the page, and the narrative at that heading is about how a strike reads
-    # differently in each regime rather than about the trigger axis.
-    at_default = scores[np.isclose(scores["monetise_drawdown"].fillna(-1), default_trigger)]
-    return {
-        "grid_heatmap": gridfig.fig_grid_heatmap(scores, trial_count=trials),
-        "window_grids": gridfig.fig_score_grid(
-            at_default, value_col="score", row="floor", col="window",
-            title=(f"Floored Calmar by strike and window, at a "
-                   f"{default_trigger:.0%} monetisation trigger"),
-            trial_count=trials, normalise="column"),
-        "window_surfaces": gridfig.fig_window_surfaces(
-            per_window, optima, bounds, trial_count=trials),
-        "pooled_contour": gridfig.fig_pooled_contour(
-            fits[pooled_key], demeaned_scores(scores), optima[pooled_key], bounds,
-            trial_count=trials,
-            title=f"Pooled fitted surface, window-demeaned — {demeaned_note}"),
-        "pooled_surface_3d": gridfig.fig_pooled_surface_3d(
-            fits[pooled_key], optima[pooled_key], snap, bounds, trial_count=trials,
-            title="Pooled window-demeaned surface — optimum and nearest tradeable strike"),
-    }
+    # differently in each regime rather than about the trigger axis. (13-02's comment on its
+    # single `window_grids` figure, which these four build-up grids replace.)
+    rows = build_up_rows(scores, reference_scores, default_trigger)
+    common = dict(trial_count=trials, normalise="column", note="SPY is its own row.")
+    figs["grid_mdd"] = gridfig.fig_score_grid(
+        rows, value_col="max_dd", higher_is_better=False, text_format="{:.1%}",
+        title=f"Maximum drawdown by strike and window, at a {default_trigger:.0%} trigger",
+        **common)
+    figs["grid_ret"] = gridfig.fig_score_grid(
+        rows, value_col="ret", text_format="{:+.1%}",
+        title=f"Total return by strike and window, at a {default_trigger:.0%} trigger", **common)
+    figs["grid_wod"] = gridfig.fig_score_grid(
+        rows, value_col="wealth_over_dd", text_format="{:.2f}",
+        title=(f"(1 + R) / MDD by strike and window, at a {default_trigger:.0%} trigger"),
+        **common)
+    figs["grid_score"] = gridfig.fig_score_grid(
+        rows, value_col="score", text_format="{:.3f}", normalise=None, midpoint=1.0,
+        trial_count=trials, colourbar_title="score<br>(SPY = 1)",
+        note="One shared scale centred on 1.0, the index; SPY is its own row.",
+        title=(f"The optimisation metric — relative wealth over relative drawdown, at a "
+               f"{default_trigger:.0%} trigger"))
+    figs["grid_heatmap"] = gridfig.fig_grid_heatmap(scores, trial_count=trials)
+
+    # ---- THE 1-D FIT LAYERS at the fixed trigger ----
+    points, layers = fit_strike_layers(scores, default_trigger)
+    names = list(layers)
+    sub = f"Trigger fixed at {default_trigger:.0%}."
+    figs["fit_scatter"] = gridfig.fig_strike_fit_layers(
+        points, layers, active=[], trial_count=trials, subtitle=sub,
+        title="Every observation at a fixed trigger: one point per strike per window")
+    figs["fit_poly"] = gridfig.fig_strike_fit_layers(
+        points, layers, active=[names[0]], trial_count=trials, subtitle=sub,
+        title="Layer 1 — a global quadratic through the observations")
+    figs["fit_regspline"] = gridfig.fig_strike_fit_layers(
+        points, layers, active=[names[1]], trial_count=trials, subtitle=sub,
+        title="Layer 2 — a cubic regression spline, knots fixed by hand")
+    figs["fit_pspline"] = gridfig.fig_strike_fit_layers(
+        points, layers, active=[names[2]], trial_count=trials, subtitle=sub,
+        title="Layer 3 — the penalised B-spline, smoothing chosen by GCV")
+
+    # ---- THE SURFACES ----
+    per_window = {k: v for k, v in fits.items() if not k.startswith("POOLED")}
+    pooled_key = "POOLED_DEMEANED"
+    figs["window_surfaces"] = gridfig.fig_window_surfaces(per_window, optima, bounds,
+                                                          trial_count=trials)
+    figs["pooled_contour"] = gridfig.fig_pooled_contour(
+        fits[pooled_key], demeaned_scores(scores), optima[pooled_key], bounds,
+        trial_count=trials, colourbar_title="fitted<br>deviation",
+        title="Pooled fitted surface, window-demeaned",
+        subtitle=("Height is each configuration's deviation from its own window's mean score, "
+                  "not a score — pooling the raw scores fits a nearly flat plane because which "
+                  "window a row came from dominates the variance."))
+    figs["snap_slice"] = gridfig.fig_snap_slice(fits[pooled_key], optima[pooled_key], snap,
+                                                bounds, trial_count=trials)
+    figs["pooled_surface_3d"] = gridfig.fig_pooled_surface_3d(
+        fits[pooled_key], optima[pooled_key], snap, bounds, trial_count=trials,
+        title="Pooled window-demeaned surface in three dimensions")
+
+    # ---- THE REFERENCE: 5%-a-year portfolio budget against the budget-matched 0.90x ----
+    if reference is not None:
+        lab = config_label(REFERENCE_FLOOR, default_trigger)
+        figs["reference_gfc"] = gridfig.fig_moneyness_stack(
+            {f"{lab} ({budget})": slice_result(results[lab], *GFC_WINDOW),
+             reference_label(): slice_result(reference, *GFC_WINDOW)},
+            gfc_spot, reentry_iv=LADDER_REENTRY_IV, underlying=UNDERLYING,
+            title="Two ways to size the same put: an equal premium budget against 5% of the "
+                  "portfolio a year, GFC 2007-2009")
+    return figs
 
 
 def export_optimisation_analysis(out_dir=DOCS_DIR, figures_dir=None):
-    """Publish the section from the PERSISTED sweep — no simulator runs.
+    """Publish the section from the PERSISTED sweep — no grid re-simulation.
 
     Reads back what ``main()`` wrote, refits the surfaces (seconds, pure arithmetic) and renders
     the page. Deliberately decoupled from the sweep itself: republishing after an edit to the
-    prose must not cost three minutes of simulation, and must not risk the published numbers
-    silently changing because something upstream moved.
+    prose must not cost minutes of simulation, and must not risk the published numbers silently
+    changing because something upstream moved. The only simulation here is the eight short GFC
+    mechanism runs, which are seconds.
     """
     figures_dir = DOCS_FIGURES_DIR if figures_dir is None else figures_dir
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -668,8 +909,11 @@ def export_optimisation_analysis(out_dir=DOCS_DIR, figures_dir=None):
     snap = surface.snap_to_strike(pooled_opt.point[0], float(spot.iloc[-1]), increment=1.0,
                                   predict=fits["POOLED_DEMEANED"].predict,
                                   other=pooled_opt.point[1])
+    reference = load_reference()
+    ref_scores = pd.read_csv(OUT_DIR / "reference" / "reference_scores.csv")
 
-    figs = build_publication_figures(scores, fits, optima, bounds, snap, trials)
+    figs = build_publication_figures(scores, fits, optima, bounds, snap, trials, results, spot,
+                                     reference=reference, reference_scores=ref_scores)
 
     # One standalone page per figure, so a chart can be opened by double-clicking a file with no
     # kernel and no report around it. The SAME figure objects are then handed to build_report, so
@@ -682,6 +926,19 @@ def export_optimisation_analysis(out_dir=DOCS_DIR, figures_dir=None):
         # Plotly's <body> carries no background of its own, so the margin around a dark figure is
         # browser white until this injects the shared page rule.
         path.write_text(theme.darken_page(path.read_text(encoding="utf-8")), encoding="utf-8")
+
+    # THE 3-D SURFACE AS A STATIC PNG TOO (decision D4). Plotly's Surface renders only where the
+    # viewer's browser has WebGL, and a browser with graphics acceleration switched off shows
+    # "WebGL is not supported" and nothing else — measured on this machine's Chrome, where all
+    # three WebGL contexts are unavailable. kaleido renders the SAME figure object headless, so
+    # the image cannot drift from the interactive version; the write-up shows it only when the
+    # visitor's browser has no WebGL. A failed render is reported, never fatal: the page is
+    # still correct for every visitor who has WebGL.
+    try:
+        figs["pooled_surface_3d"].write_image(figures_dir / "pooled_surface_3d.png",
+                                              width=1400, height=820)
+    except Exception as exc:  # kaleido missing or its headless browser failing to start
+        print(f"WARNING: static 3-D fallback not written ({exc!r})")
 
     build_report(
         figures=figs,
@@ -696,8 +953,8 @@ def export_optimisation_analysis(out_dir=DOCS_DIR, figures_dir=None):
                      "<code>python -m pipelines.option_grid_sweep</code> on {built}."),
         footer_note=("Portfolio Manager — thematic-fundamental research engine. "
                      "Priced with measured implied volatility, not a synthetic surface. "
-                     "IN-SAMPLE across 63 trials on the windows the parameters were read on — "
-                     "see “What this establishes, and what it does not” above."),
+                     f"IN-SAMPLE across {trials} trials on the windows the parameters were read "
+                     "on — see “What this establishes, and what it does not” above."),
     )
     print(f"\nwritten to {out_dir}:")
     for name in figs:
@@ -747,6 +1004,34 @@ def main(persist=True):
     print("\nRANKED BY WORST-OF-TWO — IN-SAMPLE, not a selection (top 12):")
     print(ranked.round(3).head(12).to_string())
 
+    # ---- 13-02.1: the regime trade-off and the within-window dispersion, printed every run ----
+    # The two headline numbers of the write-up, recomputed rather than carried over from 13-02:
+    # under a different metric and a different sizing they are new measurements, not updates.
+    both = ranked.dropna(subset=["rank_drawdown", "rank_calm"])
+    rho = float(both["rank_drawdown"].corr(both["rank_calm"], method="spearman"))
+    top_both = set(both.nsmallest(10, "rank_drawdown").index) & set(
+        both.nsmallest(10, "rank_calm").index)
+    print(f"\nrank correlation, crisis set vs calm set (Spearman): {rho:+.3f}; "
+          f"configurations in the top ten of both: {len(top_both)} {sorted(top_both)}")
+    armed_only = scores[~scores["blind_roll"]]
+    spread = armed_only.groupby("window", sort=False)["score"].agg(lambda s: s.max() - s.min())
+    print("within-window spread of the score across the armed configurations:")
+    print(spread.round(4).to_string())
+
+    # ---- 13-02.1: the 5%-a-year portfolio-budget reference run (decision D3) ----
+    # Scored on the same windows, persisted beside the grid, and NEVER part of the ranking or a
+    # fit — its sizing is a different axis from the grid's.
+    reference = reference_run(persist=persist)
+    ref_scores = scoring.score_grid({reference_label(): reference["series"]}, spot,
+                                    blotter_by_config={reference_label(): reference["blotter"]},
+                                    underlying=UNDERLYING)
+    print("\nREFERENCE — 5%/yr portfolio budget, 0.90x / dd10%:")
+    print(ref_scores[["window", "score", "ret", "max_dd", "spy_ret", "spy_max_dd"]]
+          .round(3).to_string(index=False))
+    if persist:
+        (OUT_DIR / "reference").mkdir(parents=True, exist_ok=True)
+        ref_scores.to_csv(OUT_DIR / "reference" / "reference_scores.csv", index=False)
+
     # ---- AC-5: the surfaces ----
     fits, optima, bounds, one_d = fit_surfaces(scores)
     print("\n1-D FITS FIRST (the other axis held at its default):")
@@ -784,7 +1069,7 @@ def main(persist=True):
                                   predict=fits[pooled_key].predict, other=pooled_opt.point[1])
     print(f"\nSNAPPING (spot {spot_now:.2f}): continuous {pooled_opt.point[0]:.4f} -> "
           f"strike {snap.strike:.0f} ({snap.moneyness:.4f}), cost {snap.cost:.4f} "
-          f"in floored-Calmar units")
+          f"in score units")
 
     if persist:
         OUT_DIR.mkdir(parents=True, exist_ok=True)
@@ -818,8 +1103,9 @@ def main(persist=True):
         # The raw pooled fit stays in surface_fits.csv — it is a reportable null result, not a
         # picture worth four hundred kilobytes of a flat plane.
         demeaned_note = ("height is the deviation from each window's own mean score, NOT a "
-                         "Calmar — pooling the raw scores fits a flat plane (R2 0.009) because "
-                         "window identity dominates the variance")
+                         "score — pooling the raw scores fits a near-flat plane because window "
+                         "identity dominates the variance (13-02 measured R2 0.009 under "
+                         "floored Calmar)")
         figs = {
             "grid_heatmap": gridfig.fig_grid_heatmap(scores, trial_count=trials),
             "window_surfaces": gridfig.fig_window_surfaces(
@@ -827,7 +1113,7 @@ def main(persist=True):
             "pooled_contour": gridfig.fig_pooled_contour(
                 fits[pooled_key], demeaned_scores(scores), pooled_opt, bounds,
                 trial_count=trials,
-                title=f"Pooled fitted surface, window-demeaned — {demeaned_note}"),
+                title="Pooled fitted surface, window-demeaned", subtitle=demeaned_note),
             "pooled_surface_3d": gridfig.fig_pooled_surface_3d(
                 fits[pooled_key], pooled_opt, snap, bounds, trial_count=trials,
                 title="Pooled window-demeaned surface — optimum and nearest tradeable strike"),
@@ -857,4 +1143,10 @@ def main(persist=True):
 
 
 if __name__ == "__main__":
-    main()
+    import sys
+    # `--publish-only` rebuilds docs/optimisation/ from the persisted sweep without re-running the
+    # 63 combinations — the path to take after editing the write-up's prose. With no flag the
+    # sweep runs and the page is then published from what it just wrote.
+    if "--publish-only" not in sys.argv:
+        main()
+    export_optimisation_analysis()

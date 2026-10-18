@@ -71,6 +71,123 @@ EVENT_SYMBOL = {
     MONETISE: "triangle-down",
 }
 
+# The target variable's name on every axis, colour bar and hover. Since 13-02.1 it is the RELATIVE
+# score (relative wealth over relative drawdown, SPY = 1.0), not floored Calmar; named once so a
+# figure cannot go on calling it by the old name.
+SCORE_LABEL = "relative score (1.0 = SPY)"
+
+
+# ============================================================================
+# THE SHARED FILL HOVER (13-02.1, AC-5). ONE implementation of "what happened
+# on the bar this marker sits on", used by fig_moneyness_stack here AND by
+# fig_ladder on the hedge-structures page. The two pages used to describe a
+# fill differently: fig_ladder said how many legs were opened or closed and
+# for what, and the rule's state, drawdown, multiple and IV on that bar, while
+# this module's markers said only "ROLL 0.90x". A reader comparing the two
+# pages then had less information on the page that compared MORE strikes.
+# Lives here rather than in the research script because a research script runs
+# a simulator at import time (see EVENT_SYMBOL's note), so the import has to go
+# research -> pipelines and never the other way.
+# ============================================================================
+
+# The hover lines, in the order a reader asks: what traded, what it cost or returned, how many
+# contracts that was, then the rule's state and the three quantities it decides on.
+EVENT_HOVER = ("equity %{y:.3f}<br>"
+               "opened %{customdata[0]:.0f} leg(s) for %{customdata[2]:.2f}<br>"
+               "closed %{customdata[1]:.0f} leg(s) for %{customdata[3]:.2f}<br>"
+               "contracts bought %{customdata[8]:.2f}<br>"
+               "state %{customdata[4]}<br>"
+               "drawdown %{customdata[5]:.1%}<br>"
+               "multiple %{customdata[6]:.2f}x<br>"
+               "iv %{customdata[7]:.3f}")
+
+
+def _hover_col(frame, name, index, fill):
+    """One per-bar column aligned to ``index``, tolerant of it being absent or entirely null.
+
+    ``iv`` is None under v1 and ``multiple`` is None before any premium has been paid, so a column
+    can be missing or empty. A hovertemplate that references a missing customdata slot renders the
+    literal "%{customdata[7]}", which looks like a broken figure rather than an absent number, so
+    every slot is always present, filled if need be. (Moved here from fig_ladder's ``_col``.)
+    """
+    if frame is None or name not in frame.columns:
+        return np.full(len(index), fill, dtype=object if isinstance(fill, str) else float)
+    col = frame[name].reindex(index)
+    return col.to_numpy() if isinstance(fill, str) else pd.to_numeric(col, errors="coerce").to_numpy()
+
+
+def event_customdata(events, frame, blotter, underlying="SPY"):
+    """The customdata matrix ``EVENT_HOVER`` reads, for one configuration's classified events.
+
+    ``frame`` is anything indexed by timestamp that carries the rule's per-bar ``state`` /
+    ``drawdown`` / ``multiple`` / ``iv`` (the persisted series frame, or the rule history).
+    ``contracts bought`` is summed from the blotter's OPENING option fills on that bar, so under
+    budget sizing the hover says how many puts the money actually bought, and under one-per-unit
+    sizing it says roughly 1.
+    """
+    ts = pd.DatetimeIndex(events["ts"])
+    contracts = np.zeros(len(ts))
+    if blotter is not None and len(blotter):
+        fills = scoring.classify_option_fills(blotter, underlying)
+        if len(fills):
+            # classify_option_fills carries no `qty` (it is 13-01.1's, on the DO NOT CHANGE list),
+            # so the opening flag is joined back onto the blotter by (ts, symbol). A leg symbol
+            # carries its strike and expiry and opens exactly once, so the pair is unique per
+            # opening fill.
+            opening = fills[fills["opening"]][["ts", "symbol"]].assign(
+                ts=lambda d: pd.to_datetime(d["ts"]))
+            blot = blotter.assign(ts=pd.to_datetime(blotter["ts"]))
+            opened = (blot.merge(opening, on=["ts", "symbol"])
+                      .groupby("ts")["qty"].apply(lambda q: q.abs().sum()))
+            contracts = opened.reindex(ts).fillna(0.0).to_numpy()
+    return np.column_stack([
+        events["n_open"].to_numpy(), events["n_close"].to_numpy(),
+        events["opened_premium"].to_numpy(), events["closed_value"].to_numpy(),
+        _hover_col(frame, "state", ts, ""), _hover_col(frame, "drawdown", ts, np.nan),
+        _hover_col(frame, "multiple", ts, np.nan), _hover_col(frame, "iv", ts, np.nan),
+        contracts,
+    ])
+
+
+# ============================================================================
+# TITLES THAT WRAP (13-02.1, AC-7). Plotly never wraps a title: a long one runs
+# straight off the right edge of the figure, which is what the pooled contour
+# did on the published page. Every figure in this module now builds its title
+# through _set_title, which wraps the headline and the sub-line separately and
+# reserves top margin for however many lines that produced, so a long qualifier
+# grows the figure DOWNWARD instead of off the side.
+# ============================================================================
+
+def _set_title(fig, main, sub="", main_width=90, sub_width=135):
+    import textwrap
+    head = textwrap.wrap(main, main_width) or [""]
+    tail = textwrap.wrap(sub, sub_width) if sub else []
+    text = "<br>".join(head) + "".join(f"<br><sub>{line}</sub>" for line in tail)
+    # Pinned to the TOP of the figure (yref container, yanchor top) rather than Plotly's default,
+    # which centres the title block in the top margin, so a tall block spills downward onto the
+    # plot area. Then ~28 px per headline line and ~22 per sub-line, plus a base gap, are reserved
+    # above the plot; first measured at 18 px per sub-line, which let the last line sit on the
+    # pooled contour's top edge.
+    # pad.t keeps the headline's ascenders off the figure's top edge, which y=0.99 alone clipped.
+    fig.update_layout(title=dict(text=text, x=0.01, xanchor="left", yref="container", y=1.0,
+                                 yanchor="top", pad=dict(t=14)),
+                      margin=dict(t=40 + 28 * len(head) + 22 * len(tail)))
+    return fig
+
+
+def apply_bottom_legend(fig, gap=0.16, margin_b=150):
+    """Legend horizontally BELOW the x-axis, colour bar left on the right (decision D5).
+
+    For the contour and fit figures, where the legend's marker keys (design points, the optimum,
+    the knots) collided with the colour bar's title on the right-hand side. ``gap`` is the distance
+    below the plot area as a fraction of its height; ``margin_b`` is the pixel strip reserved for
+    the axis title plus the legend, so the legend has comfortable space below the axis title
+    rather than sitting on it.
+    """
+    fig.update_layout(legend=dict(orientation="h", x=0.0, xanchor="left", y=-gap, yanchor="top"),
+                      margin=dict(b=margin_b))
+    return fig
+
 
 def moneyness_colours(labels, offset=1):
     """Deterministic label -> colour, stable across every figure in a session.
@@ -217,6 +334,12 @@ def fig_moneyness_stack(results, spot, title="", reentry_iv=None, underlying="SP
         # --------------------------------------------------------------------
         events = classify_option_events(res.get("blotter"), underlying) if show_events \
             else pd.DataFrame()
+        # The blotter may reach back before this window (slice_result keeps earlier fills so the
+        # classifier sees the position a fill is closing). Only events inside the drawn window
+        # are marked.
+        if len(events):
+            ev_ts = pd.to_datetime(events["ts"])
+            events = events[(ev_ts >= series.index.min()) & (ev_ts <= series.index.max())]
         for kind, symbol in EVENT_SYMBOL.items():
             rows = events[events["event"] == kind] if len(events) else events
             if not len(rows):
@@ -230,8 +353,12 @@ def fig_moneyness_stack(results, spot, title="", reentry_iv=None, underlying="SP
                 name=f"{label} {kind}", legendgroup=label, showlegend=False,
                 marker=dict(color=colour, symbol=symbol, size=9,
                             line=dict(color=theme.INK, width=0.6)),
-                hovertemplate=("<b>" + kind + "</b> " + label + "  %{x|%Y-%m-%d}"
-                               "<br>equity %{y:.3f}<extra></extra>")), row=1, col=1)
+                # The SHARED fill hover (see EVENT_HOVER): legs and cost, contracts bought, and
+                # the rule's state / drawdown / multiple / iv on that bar — the same read-out
+                # fig_ladder gives on the hedge-structures page.
+                customdata=event_customdata(rows, series, res.get("blotter"), underlying),
+                hovertemplate=("<b>" + kind + "</b> " + label + "  %{x|%Y-%m-%d}<br>"
+                               + EVENT_HOVER + "<extra></extra>")), row=1, col=1)
 
         # --------------------------------------------------------------------
         # PANEL 2 — the rule's OWN `multiple` (long value / premium paid), never recomputed here.
@@ -322,9 +449,9 @@ def fig_moneyness_stack(results, spot, title="", reentry_iv=None, underlying="SP
                 marker=dict(color=theme.INK, symbol=symbol, size=9),
                 hoverinfo="skip"), row=1, col=1)
 
+    _set_title(fig, title, f"IN-SAMPLE. Rebased to the window's first bar. Colour = moneyness, "
+                           f"shape = lifecycle. {MARK_CAVEAT}.")
     fig.update_layout(
-        title=(f"{title}<br><sub>IN-SAMPLE. Rebased to the window's first bar. "
-               f"Colour = moneyness, shape = lifecycle. {MARK_CAVEAT}.</sub>"),
         hovermode="closest",
         # Plotly sizes the FIGURE, not the panels — left unset this 3-row figure renders with
         # each panel squeezed into a third of 450px. theme.STACKED_FIGURE_HEIGHT is the shared
@@ -350,7 +477,7 @@ def fig_moneyness_stack(results, spot, title="", reentry_iv=None, underlying="SP
 
 def fig_score_grid(scores, value_col="score", row="config", col="window", title="",
                    trial_count=None, normalise="column", colourbar_title=None,
-                   text_format="{:.2f}", midpoint=None):
+                   text_format="{:.2f}", midpoint=None, higher_is_better=True, note=None):
     """The coloured score grid — one cell per (row, col) pair, text the raw value.
 
     ==========================================================================
@@ -373,6 +500,12 @@ def fig_score_grid(scores, value_col="score", row="config", col="window", title=
     the scale would make a floored cell look like a score — the one thing the flag exists to
     prevent — whereas an asterisk beside the number says "this denominator was set by the floor,
     not by the strategy" without altering the reader's sense of magnitude.
+
+    ``higher_is_better=False`` (13-02.1) flips the colour scale for a quantity where SMALLER is
+    better — the max-drawdown grid — so blue means "better" on every grid on the page and a reader
+    never has to re-learn the colours between two adjacent figures. ``note`` replaces the
+    sub-line's metric description, since the asterisk note only means anything on a ratio with a
+    floored denominator.
     """
     pivot = scores.pivot_table(index=row, columns=col, values=value_col, aggfunc="mean",
                                sort=False)
@@ -388,11 +521,17 @@ def fig_score_grid(scores, value_col="score", row="config", col="window", title=
         hi = np.nanmax(raw, axis=0)
         span = np.where(np.isclose(hi, lo), np.nan, hi - lo)
         z = np.where(np.isnan(span), 0.5, (raw - lo) / span)
+        # Lower-is-better quantities are flipped onto the same 0-1 scale, so 1.0 (blue) is the
+        # best cell in its column whichever direction the raw number runs.
+        if not higher_is_better:
+            z = 1.0 - z
         colourscale, zmid = "RdBu", None
-        bar_title = colourbar_title or "rank within<br>column (0-1)"
+        # Kept short: the longer "rank within column (0-1)" ran off the figure's right edge.
+        bar_title = colourbar_title or "rank in<br>window"
     else:
         z = raw
-        colourscale = "RdBu"
+        # RdBu runs red (low) to blue (high); reversed when lower is better, for the reason above.
+        colourscale = "RdBu" if higher_is_better else "RdBu_r"
         # Zero is the only meaningful anchor a Calmar has; 1.0 is the anchor for a ratio against
         # the index. Passed explicitly rather than guessed from the column name.
         zmid = 0.0 if midpoint is None else midpoint
@@ -424,14 +563,14 @@ def fig_score_grid(scores, value_col="score", row="config", col="window", title=
                        f"{value_col}: %{{customdata:.3f}}<extra></extra>")))
 
     trials = f" — {trial_count} trials" if trial_count is not None else ""
-    note = ("colour normalised WITHIN each column, so it ranks inside a window and not across "
-            "windows; the printed number is the raw value"
-            if normalise == "column" else "one shared colour scale across the whole grid")
-    fig.update_layout(
-        title=(f"{title}<br><sub>IN-SAMPLE{trials}. {note}. Floor "
-               f"{scoring.DRAWDOWN_FLOOR:.0%}; * = denominator set by the floor, so that cell is "
-               f"NOT a Calmar. {MARK_CAVEAT}.</sub>"),
-        height=120 + 42 * max(len(pivot.index), 3))
+    scale = ("colour normalised WITHIN each column, so it ranks inside a window and not across "
+             "windows; the printed number is the raw value"
+             if normalise == "column" else "one shared colour scale across the whole grid")
+    direction = "" if higher_is_better else " Lower is better here, so the colours are flipped."
+    floor_note = (f" Floor {scoring.DRAWDOWN_FLOOR:.0%}; * = drawdown set by the floor."
+                  if note is None else f" {note}")
+    _set_title(fig, title, f"IN-SAMPLE{trials}. {scale}.{direction}{floor_note} {MARK_CAVEAT}.")
+    fig.update_layout(height=fig.layout.margin.t + 80 + 42 * max(len(pivot.index), 3))
     return _inline_theme(fig)
 
 
@@ -476,9 +615,9 @@ def fig_grid_heatmap(scores, title="", trial_count=None):
     object.
     """
     return fig_score_grid(scores, value_col="score", row=Y_PARAM, col=X_PARAM,
-                          title=title or "Raw grid — floored Calmar pooled over all windows",
+                          title=title or f"Raw grid — {SCORE_LABEL}, pooled over all windows",
                           trial_count=trial_count, normalise=None,
-                          colourbar_title="pooled<br>floored Calmar", text_format="{:.2f}")
+                          colourbar_title="pooled<br>relative score", text_format="{:.2f}")
 
 
 def fig_window_surfaces(fits, optima, bounds, title="", trial_count=None, n_mesh=60):
@@ -526,12 +665,10 @@ def fig_window_surfaces(fits, optima, bounds, title="", trial_count=None, n_mesh
             row=r + 1, col=c + 1)
 
     trials = f" — {trial_count} trials" if trial_count is not None else ""
-    fig.update_layout(
-        title=(f"{title or 'Fitted surface per indicative window — x marks each optimum'}"
-               f"<br><sub>IN-SAMPLE{trials}. Each panel has its OWN colour scale: a shared one "
-               f"would show which regime was benign and hide where each optimum is. "
-               f"{MARK_CAVEAT}.</sub>"),
-        height=300 * rows + 140)
+    _set_title(fig, title or "Fitted surface per indicative window — x marks each optimum",
+               f"IN-SAMPLE{trials}. Each panel has its OWN colour scale: a shared one would show "
+               f"which regime was benign and hide where each optimum is. {MARK_CAVEAT}.")
+    fig.update_layout(height=300 * rows + 160)
     fig.update_xaxes(title_text=X_LABEL)
     fig.update_yaxes(title_text=Y_LABEL)
     for ann in fig.layout.annotations:
@@ -540,7 +677,8 @@ def fig_window_surfaces(fits, optima, bounds, title="", trial_count=None, n_mesh
     return _inline_theme(fig)
 
 
-def fig_pooled_contour(fit, scores, opt, bounds, title="", trial_count=None, n_mesh=80):
+def fig_pooled_contour(fit, scores, opt, bounds, title="", trial_count=None, n_mesh=80,
+                       subtitle="", colourbar_title="fitted"):
     """THE POOLED SURFACE AS A FILLED CONTOUR, WITH THE DESIGN POINTS DRAWN ON TOP.
 
     Same axes and same orientation as ``fig_grid_heatmap``, deliberately, so the two can be read
@@ -555,7 +693,9 @@ def fig_pooled_contour(fit, scores, opt, bounds, title="", trial_count=None, n_m
     fig = go.Figure(go.Contour(
         z=_mesh(fit, xs, ys), x=xs, y=ys, colorscale="RdBu",
         contours=dict(showlabels=True, labelfont=dict(size=10, color=theme.INK)),
-        colorbar=dict(title="fitted pooled<br>floored Calmar"),
+        # Short colour-bar title: the long one wrapped into the legend on the right (D5). The
+        # quantity is spelled out in the figure title instead.
+        colorbar=dict(title=colourbar_title),
         hovertemplate=(f"{X_LABEL}: %{{x:.3f}}<br>{Y_LABEL}: %{{y:.3f}}"
                        "<br>fitted: %{z:.3f}<extra></extra>")))
 
@@ -573,12 +713,14 @@ def fig_pooled_contour(fit, scores, opt, bounds, title="", trial_count=None, n_m
                        f"<br>{Y_LABEL} %{{y:.3f}}<extra></extra>")))
 
     trials = f" — {trial_count} trials" if trial_count is not None else ""
-    fig.update_layout(
-        title=(f"{title or 'Pooled fitted surface, on the same axes as the raw grid'}"
-               f"<br><sub>IN-SAMPLE{trials}. Open circles are the SIMULATED design points; the "
-               f"contour between them is fitted. A bulge with no point under it is the smoother "
-               f"inventing structure. {MARK_CAVEAT}.</sub>"),
-        xaxis_title=X_LABEL, yaxis_title=Y_LABEL, height=620)
+    _set_title(fig, title or "Pooled fitted surface, on the same axes as the raw grid",
+               f"{subtitle + ' ' if subtitle else ''}IN-SAMPLE{trials}. Open circles are the "
+               f"SIMULATED design points; the contour between them is fitted. A bulge with no "
+               f"point under it is the smoother inventing structure. {MARK_CAVEAT}.")
+    fig.update_layout(xaxis_title=X_LABEL, yaxis_title=Y_LABEL, height=720)
+    # Marker keys BELOW the x-axis, colour bar alone on the right (D5): the two used to share
+    # the right-hand strip and their text overprinted.
+    apply_bottom_legend(fig)
     return _inline_theme(fig)
 
 
@@ -599,7 +741,7 @@ def fig_pooled_surface_3d(fit, opt, snap, bounds, title="", trial_count=None, n_
 
     fig = go.Figure(go.Surface(
         z=z, x=xs, y=ys, colorscale="RdBu", opacity=0.92,
-        colorbar=dict(title="fitted pooled<br>floored Calmar"),
+        colorbar=dict(title="fitted"),
         hovertemplate=(f"{X_LABEL}: %{{x:.3f}}<br>{Y_LABEL}: %{{y:.3f}}"
                        "<br>fitted: %{z:.3f}<extra></extra>")))
 
@@ -616,13 +758,13 @@ def fig_pooled_surface_3d(fit, opt, snap, bounds, title="", trial_count=None, n_
 
     trials = f" — {trial_count} trials" if trial_count is not None else ""
     cost = f"{snap.cost:.4f}" if np.isfinite(snap.cost) else "n/a"
+    _set_title(fig, title or "Pooled fitted surface — continuous optimum and nearest strike",
+               f"IN-SAMPLE{trials}. Snapping cost {cost} in score units. Curvature at the "
+               f"optimum {opt.curvature:.1f}. Drag to rotate. Needs WebGL: open in Chrome or Edge "
+               f"if this panel is blank. {MARK_CAVEAT}.")
     fig.update_layout(
-        title=(f"{title or 'Pooled fitted surface — continuous optimum and nearest strike'}"
-               f"<br><sub>IN-SAMPLE{trials}. Snapping cost {cost} in floored-Calmar units. "
-               f"Curvature at the optimum {opt.curvature:.1f}. {MARK_CAVEAT}.</sub>"),
-        scene=dict(xaxis_title=X_LABEL, yaxis_title=Y_LABEL,
-                   zaxis_title="fitted floored Calmar"),
-        height=720)
+        scene=dict(xaxis_title=X_LABEL, yaxis_title=Y_LABEL, zaxis_title="fitted"),
+        height=760)
     return _inline_theme(fig)
 
 
@@ -658,7 +800,7 @@ def fig_window_paths(window_name, scores, results, spot, reentry_iv=None, underl
     kind = rows.iloc[0].get("kind", "")
     return fig_moneyness_stack(
         chosen, spot, reentry_iv=reentry_iv, underlying=underlying,
-        title=f"{window_name} ({kind}) — best, second-best and worst by floored Calmar")
+        title=f"{window_name} ({kind}) — best, second-best and worst by relative score")
 
 
 def fig_pooled_spline(fit, scores, bounds, title="", trial_count=None, n_mesh=80):
@@ -681,14 +823,161 @@ def fig_pooled_spline(fit, scores, bounds, title="", trial_count=None, n_mesh=80
         # the pair. A fitted surface that overshoots the data then shows as saturated colour,
         # which is the correct signal.
         zmin=float(pooled.min()), zmax=float(pooled.max()),
-        colorbar=dict(title="fitted pooled<br>floored Calmar"),
+        colorbar=dict(title="fitted"),
         hovertemplate=(f"{X_LABEL}: %{{x:.3f}}<br>{Y_LABEL}: %{{y:.3f}}"
                        "<br>fitted: %{z:.3f}<extra></extra>")))
 
     trials = f" — {trial_count} trials" if trial_count is not None else ""
-    fig.update_layout(
-        title=(f"{title or 'Pooled spline, on the raw grid’s axes and colour range'}"
-               f"<br><sub>IN-SAMPLE{trials}. Colour range pinned to the SIMULATED points, so "
-               f"saturation means the fit overshot the data. {MARK_CAVEAT}.</sub>"),
-        xaxis_title=X_LABEL, yaxis_title=Y_LABEL, height=600)
+    _set_title(fig, title or "Pooled spline, on the raw grid’s axes and colour range",
+               f"IN-SAMPLE{trials}. Colour range pinned to the SIMULATED points, so saturation "
+               f"means the fit overshot the data. {MARK_CAVEAT}.")
+    fig.update_layout(xaxis_title=X_LABEL, yaxis_title=Y_LABEL, height=620)
+    return _inline_theme(fig)
+
+
+# ============================================================================
+# 13-02.1 — THE FITTING PROCEDURE, BUILT UP IN LAYERS, BEFORE ANY SURFACE.
+#
+# The page used to jump straight from a grid of numbers to a 2-D tensor smooth.
+# These two figures put the 1-D step in front of it, at a FIXED monetisation
+# trigger: first the raw observations (one point per strike per window), then
+# each fitting layer drawn through them. Only once a reader has seen a curve go
+# through points they can count does a surface through 54 of them mean anything.
+# ============================================================================
+
+def fig_strike_fit_layers(points, layers, active, title="", subtitle="", trial_count=None,
+                          n_mesh=200):
+    """Scatter of the score against moneyness, one point per (strike, window), with fit layers.
+
+    Parameters
+    ----------
+    points : DataFrame
+        ``floor``, ``window``, ``kind`` and ``score`` at ONE monetisation depth. Coloured by
+        window, so a reader sees six observations stacked above each strike and can tell which
+        regime each came from.
+    layers : dict
+        name -> ``{"fit": SmoothFit, "knots": array or None, "colour": str, "dash": str}``.
+    active : iterable
+        The layer names drawn VISIBLE. Every other layer is still added, as ``legendonly``, so a
+        click on its legend entry overlays it for comparison. One builder serves the three
+        figures the page shows in sequence (polynomial, regression spline, P-spline) by changing
+        only this argument, so the three cannot drift apart in scale or styling.
+
+    Knots are drawn as vertical lines in the SAME legend group as their fit, so hiding a fit
+    hides its knots and the picture never shows knots belonging to a curve that is not on it.
+    """
+    active = set(active)
+    fig = go.Figure()
+
+    # SPY's own score is 1.0 on every window by construction, so the benchmark is a horizontal
+    # line rather than a series: above it a configuration beat holding the index.
+    fig.add_hline(y=1.0, line=dict(color=theme.INK, width=1.0, dash="dash"),
+                  annotation_text="SPY = 1.0", annotation_position="bottom right")
+
+    windows = list(dict.fromkeys(points["window"]))
+    for i, window in enumerate(windows):
+        grp = points[points["window"] == window].sort_values("floor")
+        kind = grp["kind"].iloc[0] if "kind" in grp else ""
+        colour = theme.CATEGORICAL[(i + 1) % len(theme.CATEGORICAL)]
+        fig.add_trace(go.Scatter(
+            x=grp["floor"], y=grp["score"], mode="markers", name=f"{window} ({kind})",
+            # Drawdown windows as filled circles, calm as open ones: the regime is the first
+            # thing to read off a point, before which window it was.
+            marker=dict(color=colour, size=9,
+                        symbol="circle" if kind == scoring.DRAWDOWN else "circle-open",
+                        line=dict(color=colour, width=1.6)),
+            hovertemplate=(f"{window}<br>{X_LABEL} %{{x:.3f}}<br>score %{{y:.3f}}"
+                           "<extra></extra>")))
+
+    lo, hi = float(points["floor"].min()), float(points["floor"].max())
+    xs = np.linspace(lo, hi, n_mesh)
+    y_lo, y_hi = float(points["score"].min()), float(points["score"].max())
+    for name, spec in layers.items():
+        visible = True if name in active else "legendonly"
+        fit = spec["fit"]
+        fig.add_trace(go.Scatter(
+            x=xs, y=np.asarray(fit.predict(xs), dtype=float), mode="lines", name=name,
+            legendgroup=name, visible=visible,
+            line=dict(color=spec["colour"], width=2.6, dash=spec.get("dash", "solid")),
+            hovertemplate=(f"{name}<br>{X_LABEL} %{{x:.3f}}<br>fitted %{{y:.3f}}"
+                           f"<br>edf {fit.edf:.2f}, R2 {fit.r2:.3f}<extra></extra>")))
+        knots = spec.get("knots")
+        if knots is not None and len(knots):
+            # One trace of vertical segments separated by None gaps, rather than one shape per
+            # knot, because shapes cannot join a legend group and so could not be hidden with
+            # the fit they belong to.
+            kx, ky = [], []
+            for k in knots:
+                kx += [float(k), float(k), None]
+                ky += [y_lo, y_hi, None]
+            fig.add_trace(go.Scatter(
+                x=kx, y=ky, mode="lines", name=f"{name} — knots", legendgroup=name,
+                visible=visible, showlegend=False,
+                line=dict(color=spec["colour"], width=1.0, dash="dot"),
+                hovertemplate="knot at %{x:.4f}<extra></extra>"))
+
+    trials = f" — {trial_count} trials" if trial_count is not None else ""
+    _set_title(fig, title or "Score against moneyness at a fixed trigger, with fitted curves",
+               f"{subtitle + ' ' if subtitle else ''}IN-SAMPLE{trials}. Filled = drawdown "
+               f"window, open = calm. Dotted verticals are knots; click a legend entry to overlay "
+               f"another fit. {MARK_CAVEAT}.")
+    fig.update_layout(xaxis_title=X_LABEL, yaxis_title=SCORE_LABEL, height=640,
+                      hovermode="closest")
+    apply_bottom_legend(fig, gap=0.14, margin_b=170)
+    return _inline_theme(fig)
+
+
+def fig_snap_slice(fit, opt, snap, bounds, title="", trial_count=None, window_half=0.03,
+                   n_mesh=400):
+    """The pooled fit SLICED at the optimum's trigger depth, with the continuous optimum and the
+    nearest listed strike marked — the 2-D replacement for the 3-D figure at this heading.
+
+    Two panels: the whole moneyness axis, then a zoom of ``window_half`` either side of the
+    optimum. The zoom is the argument: if the two markers sit at visibly different heights there,
+    the surface is too sharp for its optimum to be deployable; if they coincide, rounding to a
+    real strike costs nothing. It needs no WebGL, so it renders in every browser (decision D4).
+    """
+    (lox, hix), _ = bounds
+    dd = float(opt.point[1])
+    fig = make_subplots(rows=1, cols=2, column_widths=[0.6, 0.4], horizontal_spacing=0.08,
+                        subplot_titles=(f"whole axis, at a {dd:.1%} trigger",
+                                        f"zoom: ±{window_half:.2f} around the optimum"))
+    snapped_value = opt.value - (snap.cost if np.isfinite(snap.cost) else 0.0)
+    for col, (a, b) in enumerate([(lox, hix),
+                                  (max(lox, opt.point[0] - window_half),
+                                   min(hix, opt.point[0] + window_half))], start=1):
+        xs = np.linspace(a, b, n_mesh)
+        zs = np.asarray(fit.predict(xs, np.full_like(xs, dd)), dtype=float)
+        fig.add_trace(go.Scatter(
+            x=xs, y=zs, mode="lines", name="fitted slice", legendgroup="slice",
+            showlegend=(col == 1), line=dict(color=theme.CATEGORICAL[1], width=2.4),
+            hovertemplate=f"{X_LABEL} %{{x:.4f}}<br>fitted %{{y:.4f}}<extra></extra>"),
+            row=1, col=col)
+        fig.add_trace(go.Scatter(
+            x=[opt.point[0]], y=[opt.value], mode="markers", name="continuous optimum",
+            legendgroup="opt", showlegend=(col == 1),
+            marker=dict(color=theme.INK, symbol="x", size=13, line=dict(width=1)),
+            hovertemplate=f"continuous optimum {opt.point[0]:.4f}<br>fitted %{{y:.4f}}"
+                          "<extra></extra>"), row=1, col=col)
+        fig.add_trace(go.Scatter(
+            x=[snap.moneyness], y=[snapped_value], mode="markers",
+            name=f"nearest listed strike {snap.strike:.0f}", legendgroup="snap",
+            showlegend=(col == 1),
+            marker=dict(color=theme.CATEGORICAL[3], symbol="diamond-open", size=14,
+                        line=dict(width=2)),
+            hovertemplate=(f"strike {snap.strike:.0f} = {snap.moneyness:.4f} of spot"
+                           f"<br>fitted %{{y:.4f}}<extra></extra>")), row=1, col=col)
+
+    trials = f" — {trial_count} trials" if trial_count is not None else ""
+    cost = f"{snap.cost:.5f}" if np.isfinite(snap.cost) else "n/a"
+    _set_title(fig, title or "Snapping the pooled optimum to a tradeable strike",
+               f"IN-SAMPLE{trials}. Slice through the window-demeaned pooled fit at the "
+               f"optimum's trigger depth. Snapping cost {cost} in score units. {MARK_CAVEAT}.")
+    fig.update_layout(height=560, hovermode="closest")
+    fig.update_xaxes(title_text=X_LABEL)
+    fig.update_yaxes(title_text="fitted (deviation from window mean)", row=1, col=1)
+    apply_bottom_legend(fig, gap=0.2, margin_b=150)
+    for ann in fig.layout.annotations:
+        ann.font.size = 11
+        ann.font.color = theme.INK
     return _inline_theme(fig)

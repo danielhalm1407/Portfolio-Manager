@@ -202,3 +202,36 @@ def test_module_header_states_the_display_not_selection_boundary():
     assert "DISPLAY, NOT A SELECTION RULE" in doc
     assert "DISCRETE GRID ARGMAX" in doc
     assert "NOT AN ESTIMATE OF GENERALISATION" in doc
+
+
+# ============================================================================
+# 13-02.1 — THE FIT LAYERS BENEATH fit_1d
+# ============================================================================
+
+def test_fit_poly_recovers_a_quadratic_exactly():
+    x = np.linspace(0.80, 1.00, 9)
+    y = 1.0 - 30.0 * (x - 0.9) ** 2
+    fit = surface.fit_poly(x, y, degree=2)
+    assert fit.r2 == pytest.approx(1.0)
+    assert fit.edf == 3.0
+    assert float(fit.predict(0.9)[0]) == pytest.approx(1.0, abs=1e-9)
+
+
+def test_regression_spline_bends_where_a_global_quadratic_cannot():
+    # A kink at 0.9: flat to the left, falling to the right. Three interior knots let the spline
+    # follow both pieces; one global quadratic has to compromise across the whole axis.
+    x = np.repeat(np.linspace(0.80, 1.00, 9), 6)
+    y = np.where(x < 0.9, 1.0, 1.0 - 8.0 * (x - 0.9))
+    poly = surface.fit_poly(x, y, degree=2)
+    spline = surface.fit_regression_spline(x, y, (0.85, 0.90, 0.95))
+    assert spline.r2 > poly.r2
+    assert spline.edf == 3 + 3 + 1     # interior knots + degree + 1
+
+
+def test_pspline_knots_are_the_ones_fit_1d_uses_and_span_the_range():
+    x = np.repeat(np.linspace(0.80, 1.00, 9), 6)
+    knots = surface.pspline_knots(x)
+    assert knots[0] == pytest.approx(0.80) and knots[-1] == pytest.approx(1.00)
+    # n_basis 8, cubic: 8 - 3 + 1 = 6 knots inside the range, equally spaced.
+    assert len(knots) == 6
+    assert np.allclose(np.diff(knots), np.diff(knots)[0])

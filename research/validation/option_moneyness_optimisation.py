@@ -310,9 +310,12 @@ grid_scores = pd.concat([step3_scores, spy_reference_rows(step3_scores)], ignore
 # magnitude, and the hover still reports the raw value.
 # ============================================================================
 
+# SINCE 13-02.1 `score` is the RELATIVE score (relative wealth over relative drawdown, SPY = 1.0)
+# and every run is sized to the 0.95x put's premium (run_config's default rule). 13-02's floored
+# Calmar is still on every row as `calmar_floored`.
 gridfig.fig_score_grid(
     grid_scores, value_col="score",
-    title=(f"Floored Calmar by moneyness and window — monetise at "
+    title=(f"Relative score by moneyness and window — monetise at "
            f"{LADDER_MONETISE_DRAWDOWN:.0%} drawdown"),
     trial_count=len(step3), normalise="column").show()
 
@@ -349,8 +352,12 @@ print(step3_scores[["config", "window", "kind", "score", "floor_bound", "ret", "
 # it is the same root cause as the ordering caveat printed in cell 9.
 # ============================================================================
 
+# SINCE 13-02.1 this is the same number as Grid A (the score is already relative to SPY, so
+# score_vs_spy == score) and the sign caveat above no longer applies to it. Drawn on the old
+# floored Calmar instead, so the comparison 13-02 made is still available here.
+grid_scores["calmar_vs_spy"] = grid_scores["calmar_floored"] / grid_scores["spy_calmar_floored"]
 gridfig.fig_score_grid(
-    grid_scores, value_col="score_vs_spy",
+    grid_scores, value_col="calmar_vs_spy",
     title="Floored Calmar as a proportion of SPY's own — 1.0 is the index",
     trial_count=len(step3), normalise=None, midpoint=1.0,
     colourbar_title="score /<br>SPY score").show()
@@ -384,6 +391,10 @@ print(ranked.round(3).to_string())
 #
 # Printed rather than fixed: AC-3 fixes the metric, and swapping the formula
 # silently would discard a recorded decision. See scoring.calmar's own header.
+#
+# RESOLVED 2026-10-18 (13-02.1): the score is now scoring.relative_score, which
+# cannot invert. The caveat below therefore applies only to the descriptive
+# `calmar_floored` column, which is why it is still printed.
 # ============================================================================
 neg = sorted({w for w, g in step3_scores.groupby("window") if (g["spy_ret"] < 0).all()})
 if neg:
@@ -432,6 +443,10 @@ for window_name, (start, end, kind) in INDICATIVE_WINDOWS.items():
     counts = []
     for label, v in sliced.items():
         ev = scoring.classify_option_events(v["blotter"], UNDERLYING)
+        # slice_result keeps fills from BEFORE the window (13-02.1) so a close is classified
+        # against the position it closes; count only the events inside the window.
+        if len(ev):
+            ev = ev[pd.to_datetime(ev["ts"]) >= pd.Timestamp(start)]
         tally = ev["event"].value_counts() if len(ev) else pd.Series(dtype=int)
         # OPEN is counted separately from ROLL and not folded into it: after a monetisation the
         # position REOPENS, which carries opening fills alone and is therefore an OPEN, not a
@@ -447,5 +462,40 @@ for window_name, (start, end, kind) in INDICATIVE_WINDOWS.items():
         title=(f"{window_name} ({kind}) — monetise at {LADDER_MONETISE_DRAWDOWN:.0%} drawdown, "
                f"four strikes"),
         reentry_iv=LADDER_REENTRY_IV, underlying=UNDERLYING).show()
+
+# %% 11. 13-02.1 — the published figures, from the persisted budget-sized sweep
+
+# 11. The published page's figures, read back from disk
+
+# ============================================================================
+# Everything the published optimisation page draws, rebuilt here from the
+# PERSISTED sweep (outputs/option_grid_budget/) without re-running the grid:
+# the GFC mechanism steps, one panel per window, the four build-up grids (MDD,
+# R, (1+R)/MDD, the relative score — each with SPY as its own row and the
+# 5%-a-year reference run beneath), the three 1-D fit layers at the fixed
+# trigger, the surfaces, the snapping slice and the 3-D surface.
+#
+# The 3-D surface needs WebGL. VS Code's interactive window may not have it
+# (the panel then reads "WebGL is not supported"); `.show()` in a browser
+# renderer (`pio.renderers.default = "browser"`) opens it in Chrome or Edge,
+# where it rotates normally.
+# ============================================================================
+
+from portutils.strategies import surface  # noqa: E402
+
+pub_results, pub_scores = sweep.load_sweep()
+pub_trials = int(pub_scores["config"].nunique())
+pub_fits, pub_optima, pub_bounds, _ = sweep.fit_surfaces(pub_scores)
+pub_opt = pub_optima["POOLED_DEMEANED"]
+pub_snap = surface.snap_to_strike(pub_opt.point[0], float(SPOT_FULL.iloc[-1]), increment=1.0,
+                                  predict=pub_fits["POOLED_DEMEANED"].predict,
+                                  other=pub_opt.point[1])
+pub_figs = sweep.build_publication_figures(
+    pub_scores, pub_fits, pub_optima, pub_bounds, pub_snap, pub_trials, pub_results, SPOT_FULL,
+    reference=sweep.load_reference(),
+    reference_scores=pd.read_csv(sweep.OUT_DIR / "reference" / "reference_scores.csv"))
+for name, fig in pub_figs.items():
+    print(name)
+    fig.show()
 
 # %%

@@ -339,6 +339,12 @@ def calmar(equity, drawdown_floor=DRAWDOWN_FLOOR):
     checkpoint instead. Any caller ranking on a window whose return is negative
     must state this, which is why ``score_grid`` carries ``spy_ret`` on every
     row: the sign of the numerator is visible without recomputing it.
+
+    RESOLVED 2026-10-18 by 13-02.1, at the checkpoint, by REPLACING the target
+    variable rather than editing this function: ``relative_score`` below is
+    now the ``score`` column, and this floored Calmar survives unchanged as the
+    descriptive ``calmar_floored`` column so 13-02's published numbers can
+    still be reproduced and compared.
     ==========================================================================
     """
     eq = _equity_series(equity)
@@ -351,6 +357,56 @@ def calmar(equity, drawdown_floor=DRAWDOWN_FLOOR):
     # that scored well because it earned.
     floor_bound = bool(dd < drawdown_floor)
     return float(ret / max(dd, drawdown_floor)), floor_bound
+
+
+def wealth_over_drawdown(equity, drawdown_floor=DRAWDOWN_FLOOR):
+    """``(1 + R) / max(MDD, floor)`` — growth of a unit of wealth per unit of drawdown suffered.
+
+    The intermediate step between floored Calmar and ``relative_score``, and the one that removes
+    the inversion: ``1 + R`` is a wealth multiple and is POSITIVE for any loss short of total
+    ruin, so a larger drawdown can only ever lower the ratio. It is still not comparable ACROSS
+    windows (a benign window scores high whatever the hedge did), which is what dividing through
+    by the underlying's own ratio then fixes.
+    """
+    eq = _equity_series(equity)
+    dd = max_drawdown(eq)
+    ret = window_return(eq)
+    if not np.isfinite(dd) or not np.isfinite(ret):
+        return float("nan")
+    return float((1.0 + ret) / max(dd, drawdown_floor))
+
+
+def relative_score(equity, spy, drawdown_floor=DRAWDOWN_FLOOR):
+    """THE TARGET VARIABLE (13-02.1, decision D1 option (c), 2026-10-18).
+
+        score = [ (1 + R) / (1 + R_spy) ]  /  [ max(MDD, f) / max(MDD_spy, f) ]
+
+    Relative wealth over relative drawdown, both measured against the underlying on the SAME
+    window slice. 1.0 is "no better than holding SPY"; above 1.0 the configuration ended richer,
+    fell less, or both.
+
+    WHY THIS FORM. Floored Calmar inverted on losing windows (see ``calmar``): a negative return
+    over a larger drawdown moves towards zero, so 0.80x losing 54% with a 59.5% drawdown outranked
+    0.95x losing 42% with a 44.5% drawdown. Here both factors are POSITIVE, so the score is
+    increasing in the configuration's return and decreasing in its drawdown on every window,
+    winning or losing. Dividing through by SPY's own pair puts every window on one scale centred on
+    1.0, so a crisis and a calm stretch can be read, coloured and pooled together.
+
+    Option (a), the pure drawdown ratio ``MDD / MDD_spy``, was rejected as the TARGET because it
+    ignores return entirely and would let a calm window pick whatever shaved the most drawdown
+    regardless of the premium burned. It is kept as the descriptive ``dd_vs_spy`` column.
+
+    The floor ``f`` is applied to BOTH drawdowns, so a window where SPY barely dipped cannot make
+    the denominator explode.
+    """
+    eq, ref = _equity_series(equity), _equity_series(spy)
+    dd, dd_spy = max_drawdown(eq), max_drawdown(ref)
+    ret, ret_spy = window_return(eq), window_return(ref)
+    if not all(np.isfinite(v) for v in (dd, dd_spy, ret, ret_spy)) or ret_spy <= -1.0:
+        return float("nan")
+    wealth = (1.0 + ret) / (1.0 + ret_spy)
+    drawdown = max(dd, drawdown_floor) / max(dd_spy, drawdown_floor)
+    return float(wealth / drawdown)
 
 
 def premium_in_window(blotter, underlying, start, end, spot):
@@ -420,8 +476,12 @@ def score_grid(series_by_config, spy, windows=None, drawdown_floor=DRAWDOWN_FLOO
         # The reference row, computed on the SAME bounds as every strategy row. Computed once per
         # window rather than once per config: it does not depend on the configuration, and
         # recomputing it per row invites a slice that silently differs.
-        spy_score, spy_floor = calmar(spy_seg, drawdown_floor)
+        spy_calmar, spy_floor = calmar(spy_seg, drawdown_floor)
         spy_dd = max_drawdown(spy_seg)
+        # SPY against itself under relative_score is 1.0 by construction — computed rather than
+        # typed, so a slicing bug that made the reference disagree with itself would show.
+        spy_score = relative_score(spy_seg, spy_seg, drawdown_floor)
+        spy_wod = wealth_over_drawdown(spy_seg, drawdown_floor)
 
         for config, series in series_by_config.items():
             seg = _equity_series(series).loc[start:end]
@@ -433,7 +493,10 @@ def score_grid(series_by_config, spy, windows=None, drawdown_floor=DRAWDOWN_FLOO
                              "score": float("nan"), "floor_bound": False,
                              "ret": float("nan"), "max_dd": float("nan"), "n_bars": len(seg)})
                 continue
-            score, floor_bound = calmar(seg, drawdown_floor)
+            # Floored Calmar is still computed (descriptive since 13-02.1); the score is
+            # relative_score against SPY on the identical slice.
+            calmar_floored, floor_bound = calmar(seg, drawdown_floor)
+            score = relative_score(seg, spy_seg, drawdown_floor)
             strat_dd = max_drawdown(seg)
             premium = premium_in_window(blotter_by_config.get(config), underlying,
                                         start, end, spy_seg)
@@ -443,14 +506,22 @@ def score_grid(series_by_config, spy, windows=None, drawdown_floor=DRAWDOWN_FLOO
                 "kind": kind,
                 "n_bars": len(seg),
                 # THE TARGET VARIABLE. Everything that sorts, fits or optimises reads this one.
+                # Since 13-02.1 it is relative_score (relative wealth over relative drawdown).
                 "score": score,
                 "floor_bound": floor_bound,
                 "ret": window_return(seg),
                 "max_dd": strat_dd,
+                # The build-up the page walks through before the score: MDD alone, R alone,
+                # then (1+R)/MDD — each with SPY's own value beside it.
+                "wealth_over_dd": wealth_over_drawdown(seg, drawdown_floor),
+                # 13-02's original target, kept descriptive so its numbers remain reproducible.
+                "calmar_floored": calmar_floored,
                 "spy_score": spy_score,
                 "spy_floor_bound": spy_floor,
                 "spy_ret": window_return(spy_seg),
                 "spy_max_dd": spy_dd,
+                "spy_wealth_over_dd": spy_wod,
+                "spy_calmar_floored": spy_calmar,
                 # ------------------------------------------------------------------
                 # DESCRIPTIVE COLUMNS — SHOWN BESIDE EVERY RESULT, RANKING NOTHING.
                 #
@@ -481,6 +552,11 @@ def score_grid(series_by_config, spy, windows=None, drawdown_floor=DRAWDOWN_FLOO
                 # on every drawdown window — a ratio ABOVE 1.0 means the configuration did
                 # WORSE than the index, not better, because both sides are losses. The ratio
                 # is only "higher is better" on a window where the index itself made money.
+                #
+                # SINCE 13-02.1 the score is relative_score, for which spy_score is exactly 1.0
+                # and every value is positive, so this column equals `score` and the sign trap
+                # above no longer arises. Kept so downstream readers of the column do not break;
+                # the warning is retained because it still describes `calmar_floored / spy`.
                 "score_vs_spy": (score / spy_score) if (np.isfinite(spy_score)
                                                         and spy_score != 0) else float("nan"),
                 "premium_pct_spot": premium,
@@ -503,11 +579,14 @@ def spy_reference_rows(scores, label="SPY (index)"):
     Scored once per window, not per configuration, because it does not depend on the
     configuration — and recomputing it per row would invite a slice that silently differed.
     """
-    cols = ["window", "kind", "spy_score", "spy_floor_bound", "spy_ret", "spy_max_dd"]
+    cols = ["window", "kind", "spy_score", "spy_floor_bound", "spy_ret", "spy_max_dd",
+            "spy_wealth_over_dd", "spy_calmar_floored"]
     have = [c for c in cols if c in scores.columns]
     one = scores[have].drop_duplicates(subset=["window"]).copy()
     one = one.rename(columns={"spy_score": "score", "spy_floor_bound": "floor_bound",
-                              "spy_ret": "ret", "spy_max_dd": "max_dd"})
+                              "spy_ret": "ret", "spy_max_dd": "max_dd",
+                              "spy_wealth_over_dd": "wealth_over_dd",
+                              "spy_calmar_floored": "calmar_floored"})
     one["config"] = label
     # The index against itself is 1.0 by construction. Stated rather than left NaN, because a
     # blank benchmark cell in the relative grid reads as missing data when it is in fact the

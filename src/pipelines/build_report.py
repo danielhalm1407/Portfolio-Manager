@@ -180,7 +180,11 @@ def _split_sections(html, figure_at=FIGURE_AT, source_name=None):
         heading = part.split("</h2>", 1)[0] if part.startswith("<h2") else ""
         for key, stem in figure_at.items():
             if key in heading:
-                out.append(f"<!--FIGURE:{stem}-->")
+                # A key may map to ONE stem or to a LIST of them (13-02.1): the optimisation
+                # page's mechanism section carries one stacked panel per window, in order. A
+                # plain string behaves exactly as before, so the other two pages are unaffected.
+                for one in ([stem] if isinstance(stem, str) else list(stem)):
+                    out.append(f"<!--FIGURE:{one}-->")
                 matched.add(key)
     missing = set(figure_at) - matched
     if missing:

@@ -25,7 +25,8 @@ import pytest
 
 from portutils.strategies import scoring
 from portutils.strategies.scoring import (CALM, DRAWDOWN, DRAWDOWN_FLOOR, INDICATIVE_WINDOWS,
-                                          calmar, max_drawdown, rank_configs, score_grid,
+                                          calmar, max_drawdown, rank_configs,
+                                          relative_score, score_grid, wealth_over_drawdown,
                                           window_return)
 
 
@@ -252,3 +253,46 @@ def test_ranked_table_carries_the_floor_bound_share():
     ranked = rank_configs(pd.DataFrame(rows))
     assert ranked.loc["a", "floor_bound_share"] == pytest.approx(0.5)
     assert ranked.loc["b", "floor_bound_share"] == pytest.approx(0.0)
+
+
+# ============================================================================
+# 13-02.1 — THE RELATIVE SCORE (decision D1 (c))
+# ============================================================================
+
+def _ret_dd_path(ret, dd, n=60):
+    # A path that falls `dd` from its start then ends at total return `ret`: start 1.0, trough
+    # 1 - dd, end 1 + ret. Valid while 1 + ret >= 1 - dd, which every case below respects.
+    half = n // 2
+    return _series(np.concatenate([np.linspace(1.0, 1.0 - dd, half),
+                                   np.linspace(1.0 - dd, 1.0 + ret, n - half)]))
+
+
+def test_relative_score_fixes_the_gfc_inversion_pair():
+    # The pair that exposed floored Calmar (see calmar's header): 0.95x lost less AND fell less,
+    # and floored Calmar ranked it below 0.80x. The relative score must rank it above.
+    spy = _ret_dd_path(-0.55, 0.60)
+    deep = _ret_dd_path(-0.540, 0.595)
+    near = _ret_dd_path(-0.424, 0.445)
+    assert calmar(deep)[0] > calmar(near)[0]          # the old inversion, still reproducible
+    assert relative_score(near, spy) > relative_score(deep, spy)
+
+
+def test_relative_score_is_monotone_in_return_and_drawdown():
+    spy = _ret_dd_path(-0.30, 0.35)
+    base = relative_score(_ret_dd_path(-0.20, 0.30), spy)
+    # Higher return, same drawdown -> higher score; deeper drawdown, same return -> lower score.
+    assert relative_score(_ret_dd_path(-0.10, 0.30), spy) > base
+    assert relative_score(_ret_dd_path(-0.20, 0.40), spy) < base
+    # (1+R)/MDD alone is monotone too — the intermediate step on the page.
+    assert wealth_over_drawdown(_ret_dd_path(-0.20, 0.40)) < wealth_over_drawdown(
+        _ret_dd_path(-0.20, 0.30))
+
+
+def test_spy_scores_exactly_one_against_itself():
+    spy, series = _two_year_paths()
+    out = score_grid(series, spy, windows={"crash": ("2020-05-01", "2020-10-01", DRAWDOWN)})
+    row = out.set_index("config").loc["unhedged"]
+    assert row["score"] == pytest.approx(1.0)
+    assert row["spy_score"] == pytest.approx(1.0)
+    # The hedged path fell less and lost less over the crash, so it beats the index.
+    assert out.set_index("config").loc["hedged", "score"] > 1.0

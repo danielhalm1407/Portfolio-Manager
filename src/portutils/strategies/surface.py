@@ -264,6 +264,97 @@ def fit_1d(x, y, n_basis=8, degree=3, lam_grid=None, penalty_order=2):
 
 
 # ============================================================================
+# THE LAYERS BENEATH fit_1d (13-02.1). The published page builds the fitting
+# procedure up in three steps — a global polynomial, an unpenalised regression
+# spline with a handful of knots, then the penalised P-spline above — so each
+# step's weakness motivates the next. The first two exist ONLY for that display;
+# like fit_1d they are never a selection rule (see the module header).
+# ============================================================================
+
+def pspline_knots(x, n_basis=8, degree=3):
+    """The knot positions ``fit_1d`` uses for these design points, inside the fitted range.
+
+    Equally spaced on [min x, max x]: ``n_basis - degree + 1`` of them including both ends. A
+    P-spline puts its knots on a REGULAR grid and controls wiggliness through the penalty, unlike a
+    classical smoothing spline, which puts a knot at EVERY distinct x. Exposed so a figure can draw
+    them as vertical lines: they are not visible in the fit, and a reader cannot otherwise tell
+    where the pieces join.
+    """
+    x = np.asarray(x, dtype=float)
+    x = x[np.isfinite(x)]
+    lo, hi = float(x.min()), float(x.max())
+    # The same n_basis capping fit_1d applies, so the drawn knots are the fitted ones.
+    n_basis = max(int(min(n_basis, len(np.unique(x)))), degree + 1)
+    t = _knots(lo, hi, n_basis, degree)
+    return t[(t >= lo - 1e-12) & (t <= hi + 1e-12)]
+
+
+def _fixed_fit(x, y, B):
+    # Ordinary least squares on a fixed design matrix, packaged as a SmoothFit so the three
+    # layers are reported in one shape. lam is 0.0 (no penalty) and edf is the column count,
+    # which is exactly the trace of an unpenalised projection.
+    coef = np.linalg.lstsq(B, y, rcond=None)[0]
+    resid = y - B @ coef
+    rss = float(resid @ resid)
+    tss = float(((y - y.mean()) ** 2).sum())
+    edf = float(B.shape[1])
+    return coef, SmoothFit(predict=None, lam=0.0, edf=edf, gcv=float(_gcv(rss, edf, len(y), tss)),
+                           r2=1.0 - rss / tss if tss > 0 else float("nan"))
+
+
+def fit_poly(x, y, degree=2):
+    """LAYER (i): one global polynomial ``f(m) = b0 + b1 m + ... + bd m^d`` by least squares.
+
+    The simplest smooth there is, and the one whose failure motivates splines: a single global
+    polynomial has to bend everywhere at once, so a change of slope at the deep-OTM end drags the
+    fit at the at-the-money end with it.
+    """
+    x = np.asarray(x, dtype=float)
+    y = np.asarray(y, dtype=float)
+    keep = np.isfinite(x) & np.isfinite(y)
+    x, y = x[keep], y[keep]
+    # Centred and scaled before powering, so the design matrix is not ill-conditioned when x sits
+    # in a narrow band like 0.80-1.00 (raw powers of 0.9 are nearly collinear).
+    mu, sd = float(x.mean()), float(x.std()) or 1.0
+    B = np.vander((x - mu) / sd, degree + 1, increasing=True)
+    coef, fit = _fixed_fit(x, y, B)
+
+    def predict(xq):
+        return np.vander((np.atleast_1d(np.asarray(xq, dtype=float)) - mu) / sd, degree + 1,
+                         increasing=True) @ coef
+
+    return fit._replace(predict=predict)
+
+
+def fit_regression_spline(x, y, interior_knots, degree=3):
+    """LAYER (ii): an UNPENALISED cubic regression spline with the given interior knots.
+
+    Piecewise cubic, joined smoothly (continuous up to the second derivative) at each knot, fitted
+    by plain least squares. It fixes layer (i)'s problem, since each piece bends independently, but
+    swaps it for a new one: the fit depends on how many knots are chosen and where, and nothing in
+    the data chooses them. Layer (iii), ``fit_1d``, answers that by placing many knots on a regular
+    grid and letting a penalty, tuned by GCV, decide how much of that flexibility to use.
+    """
+    x = np.asarray(x, dtype=float)
+    y = np.asarray(y, dtype=float)
+    keep = np.isfinite(x) & np.isfinite(y)
+    x, y = x[keep], y[keep]
+    lo, hi = float(x.min()), float(x.max())
+    inner = np.sort(np.asarray(interior_knots, dtype=float))
+    # Full knot vector: the boundary knots repeated degree+1 times (a clamped spline), the interior
+    # ones once each. n_basis = len(inner) + degree + 1.
+    t = np.concatenate([np.full(degree + 1, lo), inner, np.full(degree + 1, hi)])
+    B = np.asarray(BSpline.design_matrix(x, t, degree).todense())
+    coef, fit = _fixed_fit(x, y, B)
+
+    def predict(xq):
+        xc = np.clip(np.atleast_1d(np.asarray(xq, dtype=float)), lo, hi)
+        return np.asarray(BSpline.design_matrix(xc, t, degree).todense()) @ coef
+
+    return fit._replace(predict=predict)
+
+
+# ============================================================================
 # 2-D
 # ============================================================================
 

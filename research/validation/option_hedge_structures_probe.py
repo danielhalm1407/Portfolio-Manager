@@ -48,6 +48,8 @@ from portutils.strategies.scoring import (MONETISE, OPEN, ROLL, classify_option_
 import pipelines.option_monetisation_batch as omb
 from pipelines.option_monetisation_batch import RESET_BARS, load_window
 from pipelines.option_probe_figures import DIV_YIELD, RATE, UNDERLYING, _inline_theme
+# The shared fill hover (13-02.1): one description of a fill for both published option pages.
+from pipelines.option_grid_figures import EVENT_HOVER, event_customdata
 
 # The report renderer 10-01 built for the probe write-up, generalised (13-01 amendment,
 # 2026-09-26) to serve THIS write-up too — one implementation, so the heading -> figure guard,
@@ -254,28 +256,21 @@ def fig_ladder(state, blotter, history, title="", reentry_iv=None, monetise_mult
         # no row and these markers hovered "drawdown NaN, iv NaN" — on exactly the events the
         # figure exists to explain.
         # ----------------------------------------------------------------
-        h = history.reindex(ts) if len(history) else pd.DataFrame(index=ts)
-        custom = np.column_stack([
-            rows["n_open"].to_numpy(), rows["n_close"].to_numpy(),
-            rows["opened_premium"].to_numpy(), rows["closed_value"].to_numpy(),
-            _col(h, "state", ts, ""), _col(h, "drawdown", ts, np.nan),
-            _col(h, "multiple", ts, np.nan), _col(h, "iv", ts, np.nan),
-        ])
+        #
+        # SINCE 13-02.1 the customdata and the hover lines come from ONE shared helper,
+        # `option_grid_figures.event_customdata` / `EVENT_HOVER`, which the optimisation page's
+        # stacked panels use too, so the two published pages describe a fill identically. The
+        # helper does the same tolerant `reindex` described above (it absorbed `_col` below), and
+        # adds one line: the number of contracts the opening fills bought, which matters once puts
+        # are sized to a premium budget rather than one per unit.
+        custom = event_customdata(rows, history if len(history) else None, blotter, UNDERLYING)
         fig.add_trace(go.Scatter(
             x=ts, y=y, mode="markers", name=style["name"],
             marker=dict(color=style["colour"], symbol=style["symbol"], size=9,
                         line=dict(color=theme.INK, width=0.6)),
             customdata=custom,
-            hovertemplate=(
-                "<b>" + kind + "</b>  %{x|%Y-%m-%d}<br>"
-                "equity %{y:.3f}<br>"
-                "opened %{customdata[0]:.0f} leg(s) for %{customdata[2]:.2f}<br>"
-                "closed %{customdata[1]:.0f} leg(s) for %{customdata[3]:.2f}<br>"
-                "state %{customdata[4]}<br>"
-                "drawdown %{customdata[5]:.1%}<br>"
-                "multiple %{customdata[6]:.2f}x<br>"
-                "iv %{customdata[7]:.3f}"
-                "<extra></extra>")), row=1, col=1)
+            hovertemplate=("<b>" + kind + "</b>  %{x|%Y-%m-%d}<br>" + EVENT_HOVER
+                           + "<extra></extra>")), row=1, col=1)
 
     # ------------------------------------------------------------------------
     # PANEL 2 — WHAT THE HEDGE WAS WORTH, as a multiple of what it cost. This is the panel that
@@ -394,6 +389,10 @@ def fig_ladder(state, blotter, history, title="", reentry_iv=None, monetise_mult
 
 def _col(frame, name, index, fill):
     """One history column as an array aligned to `index`, tolerant of it being absent.
+
+    No longer called by fig_ladder since 13-02.1 — its job moved, docstring and all, into
+    `option_grid_figures._hover_col` behind the shared `event_customdata`. Kept so anything in a
+    live session that imported it does not break.
 
     `iv` is None under v1 and `multiple` is None before any premium has been paid, so a column
     can be entirely missing or entirely null. A hovertemplate referencing a missing customdata

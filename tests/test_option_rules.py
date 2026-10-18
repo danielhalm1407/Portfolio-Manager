@@ -15,7 +15,8 @@ from portutils.portfolio.ledger import StateLedger
 from portutils.portfolio.rules import BuyAndHoldRule
 from portutils.portfolio.simulator import PortfolioSimulator
 from portutils.strategies.rules.options import (
-    ProtectivePutRule, PutSpreadRule, RollingCollarRule,
+    BudgetMatchedPutRule, PortfolioBudgetPutRule, ProtectivePutRule, PutSpreadRule,
+    RollingCollarRule,
 )
 
 
@@ -151,3 +152,45 @@ def test_collar_funds_a_breached_cap_capped_at_99_9_percent():
 def test_collar_validation():
     with pytest.raises(ValueError):
         RollingCollarRule(floor=0.90, cap=0.85)
+
+
+# ---- 13-02.1: premium-budget sizing -----------------------------------------------------------
+
+def _opens(rule):
+    return [e for e in rule.events if e["action"] == "open"]
+
+
+def test_budget_matched_spends_the_budget_strikes_premium_at_every_strike():
+    # AC-2: contracts x premium per contract == the budget strike's premium per unit held, to
+    # 1e-9, whatever the strike. Checked on every open across a falling path (three rolls).
+    for floor in (0.80, 0.875, 0.95):
+        _, _, rule, ledger = _run(_path(85.0), BudgetMatchedPutRule(floor=floor,
+                                                                     budget_moneyness=0.95))
+        assert ledger.unmarked == []
+        for e in _opens(rule):
+            spent_per_unit = e["contracts_per_unit"] * e["premium"]
+            assert spent_per_unit == pytest.approx(e["budget_premium"], abs=1e-9)
+
+
+def test_budget_matched_at_the_budget_strike_equals_the_plain_rule():
+    # At floor == budget_moneyness the scale is exactly 1, so the run must be identical to
+    # ProtectivePutRule — the subclass changes sizing and nothing else.
+    _, df_a, _, _ = _run(_path(85.0), BudgetMatchedPutRule(floor=0.95, budget_moneyness=0.95))
+    _, df_b, _, _ = _run(_path(85.0), ProtectivePutRule(floor=0.95))
+    np.testing.assert_allclose(df_a["equity"].to_numpy(), df_b["equity"].to_numpy(), atol=1e-9)
+
+
+def test_budget_matched_buys_more_contracts_deeper_out_of_the_money():
+    _, _, deep, _ = _run(_path(100.0), BudgetMatchedPutRule(floor=0.80))
+    _, _, near, _ = _run(_path(100.0), BudgetMatchedPutRule(floor=0.95))
+    assert _opens(deep)[0]["contracts_per_unit"] > 1.0
+    assert _opens(near)[0]["contracts_per_unit"] == pytest.approx(1.0)
+
+
+def test_portfolio_budget_spends_its_annual_share_pro_rata():
+    # 5% a year over a 63-bar period is 1.25% of equity per open; contracts x premium == spend.
+    _, _, rule, ledger = _run(_path(100.0), PortfolioBudgetPutRule(floor=0.90, budget_pct=0.05))
+    assert ledger.unmarked == []
+    first = _opens(rule)[0]
+    assert first["contracts"] * first["premium"] == pytest.approx(first["budget_spend"], rel=1e-9)
+    assert first["budget_spend"] == pytest.approx(0.05 * 63 / 252 * 100.0, rel=1e-6)

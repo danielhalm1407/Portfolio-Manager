@@ -758,3 +758,143 @@ class RollingCollarRule(OptionOverlayRule):
             self._log(self._ts, "carry", self.underlying, 0.0, spot, "collar carry",
                       net_cash=net, period_return=period_return,
                       new_pair_premium=opened_premium * units)
+
+
+# ================================================================================================
+# PREMIUM-BUDGET SIZING (13-02.1) — the two subclasses below change HOW MANY contracts are bought,
+# and nothing else. Both override `_strike_legs` alone (plus `_log`, to stamp the sizing on each
+# opening record), so the roll, monetise, reopen and pricing paths are inherited unchanged and
+# `ProtectivePutRule` itself stays byte-for-byte what 13-01 left. This is the same
+# subclass-through-an-existing-seam arrangement 13-01.1 used for `NarrowLedger`.
+#
+# WHY SIZING HAD TO CHANGE. Under one-put-per-unit sizing a 0.80x put costs a small fraction of a
+# 0.95x put, so the deep strike's value-as-a-multiple-of-premium could reach 7x and still barely
+# move equity: 7x of almost nothing is almost nothing. The moneyness question was therefore being
+# answered at wildly different SPEND levels, and the cheap strikes were scored as if they had been
+# bought in token size. Holding the spend fixed and letting the contract count float is what makes
+# the strikes comparable: the question becomes "for the same money, which strike protects best".
+# ================================================================================================
+
+
+class BudgetMatchedPutRule(ProtectivePutRule):
+    """Long puts at ``floor`` x spot, as many as the premium of ONE ``budget_moneyness`` put buys,
+    per unit of underlying held.
+
+    ``budget_moneyness=0.95`` (the 2026-10-18 decision) means every strike spends what a single
+    0.95x put would cost: at 0.95x the rule is identical to ``ProtectivePutRule(floor=0.95)``, and a
+    0.80x put buys several contracts for the same money. Spend per period is therefore CONSTANT
+    across strikes, and what differs is only what that spend returns.
+    """
+
+    def __init__(self, floor=0.90, budget_moneyness=0.95, **kw):
+        # The strike whose premium sets the budget, as a multiple of spot. Stored before
+        # super().__init__ for the same reason ProtectivePutRule stores `floor` first: reset()
+        # runs inside the base constructor and every attribute must already exist by then.
+        self.budget_moneyness = float(budget_moneyness)
+        super().__init__(floor=floor, **kw)
+
+    def reset(self):
+        # Per-symbol sizing read-out for the opening log record, keyed by the leg symbol the base
+        # class logs under. Rebuilt on every strike, so it only ever describes the legs just opened.
+        self._sizing = {}
+        super().reset()
+
+    def _budget_premium(self, spot):
+        # Price ONE hypothetical put at the budget strike, on the same bar, the same expiry and
+        # the same surface as the leg actually being bought. Built through the same OptionLeg /
+        # _price path, so v1 and v2 pricing are both honoured and the budget can never be priced
+        # on a different vol than the leg it is compared with.
+        ref = OptionLeg(self.underlying, "P", self.budget_moneyness * spot, open_bar=self._bar,
+                        expiry_bar=self.calendar.next_roll(self._bar),
+                        rate=self.rate, div_yield=self.div_yield)
+        return self._price({"leg": ref, "qty": 1.0, "spot_ref": spot, "premium": 0.0}, spot)
+
+    def _strike_legs(self, spot, units):
+        # Let the base class build and price the legs exactly as it always does, at `units`
+        # contracts per leg, and only THEN rescale the count. Rescaling after pricing keeps the
+        # per-contract premium the base computed — the number the multiple trigger divides by.
+        new_legs, opened_premium = super()._strike_legs(spot, units)
+        budget = self._budget_premium(spot)
+        self._sizing = {}
+        for entry in new_legs:
+            # Contracts per unit held = budget premium / this strike's premium. Guarded against a
+            # zero premium (a put priced at nothing cannot be bought "as many as the budget
+            # allows", which is infinitely many); such a leg keeps the base sizing instead.
+            scale = budget / entry["premium"] if entry["premium"] > 0 else 1.0
+            entry["qty"] *= scale
+            self._sizing[entry["leg"].symbol] = {"contracts_per_unit": scale,
+                                                 "budget_premium": budget}
+        # opened_premium is PER UNIT HEDGED by the base's convention (only the collar reads it),
+        # so it is returned unchanged rather than scaled.
+        return new_legs, opened_premium
+
+    def _log(self, ts, action, symbol, qty, price, reason, **extra):
+        # Stamp the sizing on the OPENING record of each leg, so a blotter row can say "bought 6.2
+        # contracts per unit because the 0.95x premium was 4.1" without a second lookup.
+        if action == "open" and symbol in self._sizing:
+            extra = {**self._sizing[symbol], **extra}
+        super()._log(ts, action, symbol, qty, price, reason, **extra)
+
+
+class PortfolioBudgetPutRule(ProtectivePutRule):
+    """Long puts at ``floor`` x spot, as many as a fixed share of PORTFOLIO VALUE buys.
+
+    ``budget_pct`` is an ANNUAL share of equity (0.05 = 5% a year), spent pro rata at each open:
+    a 63-bar period spends ``budget_pct * reset_bars / 252`` of the equity on that bar. Annual
+    rather than per-period because "I will spend 5% on insurance" is how a holder states the
+    allocation, and a 5%-per-quarter reading would quietly be 20% a year.
+
+    A monetise followed by a reopen spends a fresh period's budget at the reopen. That is the
+    policy as described (the monetised proceeds came back as cash), but it means the realised
+    annual spend can exceed ``budget_pct`` in a year that monetises; the blotter records each open.
+    """
+
+    def __init__(self, floor=0.90, budget_pct=0.05, **kw):
+        # Stored before super().__init__, because reset() runs inside it (see ProtectivePutRule).
+        self.budget_pct = float(budget_pct)
+        super().__init__(floor=floor, **kw)
+
+    def reset(self):
+        # Same per-symbol sizing read-out as BudgetMatchedPutRule, plus the Book and the panel
+        # prices of the CURRENT bar, which _strike_legs needs and the base signature does not pass.
+        self._sizing = {}
+        self._book_now, self._prices_now = None, None
+        super().reset()
+
+    def propose(self, ts, prices, book):
+        # Stash this bar's Book and prices for _strike_legs, then defer entirely to the base.
+        self._book_now, self._prices_now = book, prices
+        return super().propose(ts, prices, book)
+
+    def _equity_now(self):
+        # Portfolio value on this bar, with every option leg marked. The panel prices carry no
+        # option columns, and the Book values an unmarked position at zero, so the legs being
+        # closed on this bar (self._closing, at settlement) and any still open are marked here
+        # first. Otherwise a roll would size off equity minus the hedge it is just cashing in.
+        marks = dict(self._prices_now or {})
+        marks.update({leg.symbol: px for leg, px, _ in self._closing})
+        spot = marks.get(self.underlying)
+        for e in self._legs:
+            marks.setdefault(e["leg"].symbol, self._price(e, spot))
+        return float(self._book_now.equity(marks))
+
+    def _strike_legs(self, spot, units):
+        # Base builds and prices the legs at `units`; the count is then REPLACED by what this
+        # period's slice of the budget buys. `units` (hedge_ratio x held) is ignored by design:
+        # the hedge is sized to money, not to the position.
+        new_legs, opened_premium = super()._strike_legs(spot, units)
+        spend = self.budget_pct * (self.calendar.reset_bars / 252.0) * self._equity_now()
+        self._sizing = {}
+        for entry in new_legs:
+            # Contracts = spend / premium per contract. A zero premium keeps the base sizing,
+            # for the same reason as BudgetMatchedPutRule.
+            qty = spend / entry["premium"] if entry["premium"] > 0 else abs(entry["qty"])
+            entry["qty"] = np.sign(entry["qty"]) * qty
+            self._sizing[entry["leg"].symbol] = {"contracts": qty, "budget_spend": spend}
+        return new_legs, opened_premium
+
+    def _log(self, ts, action, symbol, qty, price, reason, **extra):
+        # Stamp the sizing on the opening record, as BudgetMatchedPutRule does.
+        if action == "open" and symbol in self._sizing:
+            extra = {**self._sizing[symbol], **extra}
+        super()._log(ts, action, symbol, qty, price, reason, **extra)

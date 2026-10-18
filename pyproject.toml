@@ -28,6 +28,10 @@ dependencies = [
     # not worth a dependency for two axes and sixty-odd design points when the penalised
     # B-spline it would fit is thirty lines of numpy over this.
     "scipy",
+    # Static PNG export of the 3-D response surface (pipelines/option_grid_sweep.py, plan 13-02.1).
+    # Plotly's Surface needs WebGL in the viewer's browser, and a browser with graphics
+    # acceleration off shows nothing; the PNG is the fallback the published page swaps in.
+    "kaleido",
 ]
 
 [tool.setuptools.packages.find]

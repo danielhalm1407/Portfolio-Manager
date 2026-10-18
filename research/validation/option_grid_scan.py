@@ -145,6 +145,8 @@ for window_name in INDICATIVE_WINDOWS:
 # ============================================================================
 # The same windows as NUMBERS: moneyness across, monetisation drawdown down,
 # cell colour and cell text the floored Calmar, floor-bound cells starred.
+# (Since 13-02.1 the cell is the RELATIVE score, and the sweep it reads is the
+# budget-sized one in outputs/option_grid_budget/.)
 #
 # One figure per window rather than one figure with a window axis, because
 # these are the grids the SURFACE is fitted to — and a surface is fitted per
@@ -162,7 +164,7 @@ for window_name in INDICATIVE_WINDOWS:
     kind = INDICATIVE_WINDOWS[window_name][2]
     gridfig.fig_score_grid(
         window_rows, value_col="score", row=gridfig.Y_PARAM, col=gridfig.X_PARAM,
-        title=f"{window_name} ({kind}) — floored Calmar by moneyness and monetisation depth",
+        title=f"{window_name} ({kind}) — relative score by moneyness and monetisation depth",
         trial_count=n_configs, normalise=None).show()
 
 # %% 5. The pooled grid — every observation from every window
@@ -186,7 +188,7 @@ for window_name in INDICATIVE_WINDOWS:
 pooled_rows = scores[scores["monetise_drawdown"].notna()]
 gridfig.fig_score_grid(
     pooled_rows, value_col="score", row=gridfig.Y_PARAM, col=gridfig.X_PARAM,
-    title="Pooled over all six windows — floored Calmar (dominated by window, not by parameters)",
+    title="Pooled over all six windows — relative score (SPY = 1.0 on every window)",
     trial_count=n_configs, normalise=None).show()
 
 by_kind = pooled_rows.groupby("kind")["score"].agg(["mean", "std", "min", "max"])
@@ -233,7 +235,7 @@ for name, fit in fits.items():
 gridfig.fig_pooled_spline(
     fits["POOLED_DEMEANED"], demeaned_scores(scores), bounds, trial_count=n_configs,
     title=("Pooled spline, window-demeaned — height is deviation from each window's own mean, "
-           "NOT a Calmar")).show()
+           "NOT a score")).show()
 
 # ============================================================================
 # AND THE CHECK THAT STOPS A SMOOTH PICTURE BEING OVER-READ. These fits sit
