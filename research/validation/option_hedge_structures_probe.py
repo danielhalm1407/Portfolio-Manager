@@ -218,15 +218,15 @@ def fig_ladder(state, blotter, history, title="", reentry_iv=None, monetise_mult
     # rather than an act of memory.
     fig = make_subplots(rows=3, cols=1, shared_xaxes=True,
                         row_heights=[0.52, 0.24, 0.24], vertical_spacing=0.05,
-                        subplot_titles=("equity and the market",
-                                        "long-leg value as a multiple of premium paid",
-                                        "implied vol and the re-entry gate"))
+                        subplot_titles=("Equity and the market",
+                                        "Long-leg value as a multiple of premium paid",
+                                        "Implied vol and reentry gate"))
     fig.add_trace(go.Scatter(
         x=spot_rb.index, y=spot_rb.to_numpy(), name=f"{UNDERLYING} (rebased)",
         line=dict(color=theme.CATEGORICAL[0], width=1.6),
         hovertemplate="%{x|%Y-%m-%d}<br>SPY %{y:.3f}<extra></extra>"), row=1, col=1)
     fig.add_trace(go.Scatter(
-        x=eq_rb.index, y=eq_rb.to_numpy(), name="hedged equity (rebased)",
+        x=eq_rb.index, y=eq_rb.to_numpy(), name="Hedged equity (rebased)",
         line=dict(color=theme.CATEGORICAL[1], width=1.8),
         hovertemplate="%{x|%Y-%m-%d}<br>equity %{y:.3f}<extra></extra>"), row=1, col=1)
 
@@ -288,7 +288,7 @@ def fig_ladder(state, blotter, history, title="", reentry_iv=None, monetise_mult
         else None
     if mult_path is not None and mult_path.notna().any():
         fig.add_trace(go.Scatter(
-            x=mult_path.index, y=mult_path.to_numpy(), name="value / premium",
+            x=mult_path.index, y=mult_path.to_numpy(), name="Value / premium",
             line=dict(color=theme.CATEGORICAL[5], width=1.5), connectgaps=False,
             hovertemplate="%{x|%Y-%m-%d}<br>%{y:.2f}x premium<extra></extra>"), row=2, col=1)
         # BREAK-EVEN. Above this line the legs are worth more than they cost; below it the
@@ -296,14 +296,14 @@ def fig_ladder(state, blotter, history, title="", reentry_iv=None, monetise_mult
         # ratio, not of any configuration's parameters.
         fig.add_hline(y=1.0, row=2, col=1,
                       line=dict(color=theme.INK, width=1.0, dash="dash"),
-                      annotation_text="break-even (1.0x)", annotation_position="top left")
+                      annotation_text="Break-even (1.0x)", annotation_position="top left")
         # The multiple TRIGGER level, where one is armed. On a drawdown-triggered rung this is
         # absent by design: drawing a threshold the rung never tested would invite the reader to
         # explain the marks with a rule that was not running.
         if monetise_multiple is not None:
             fig.add_hline(y=float(monetise_multiple), row=2, col=1,
                           line=dict(color=theme.CATEGORICAL[4], width=1.2, dash="dot"),
-                          annotation_text=f"monetise_multiple {float(monetise_multiple):.2f}x",
+                          annotation_text=f"Monetise multiple {float(monetise_multiple):.2f}x",
                           annotation_position="bottom left")
         # The monetise bars marked ON this curve as well as on equity. The question this panel
         # answers is "how far above its cost was the hedge when the policy took the money", and
@@ -329,7 +329,7 @@ def fig_ladder(state, blotter, history, title="", reentry_iv=None, monetise_mult
     iv_path = pd.to_numeric(history["iv"], errors="coerce") if "iv" in history else None
     if iv_path is not None and iv_path.notna().any():
         fig.add_trace(go.Scatter(
-            x=iv_path.index, y=iv_path.to_numpy(), name="real IV",
+            x=iv_path.index, y=iv_path.to_numpy(), name="Real IV",
             line=dict(color=theme.CATEGORICAL[2], width=1.4),
             hovertemplate="%{x|%Y-%m-%d}<br>iv %{y:.3f}<extra></extra>"), row=3, col=1)
 
@@ -354,7 +354,7 @@ def fig_ladder(state, blotter, history, title="", reentry_iv=None, monetise_mult
         if reentry_iv is not None:
             fig.add_hline(y=float(reentry_iv), row=3, col=1,
                           line=dict(color=theme.CATEGORICAL[4], width=1.2, dash="dot"),
-                          annotation_text=f"reentry_iv {float(reentry_iv):.3f}",
+                          annotation_text=f"Reentry IV {float(reentry_iv):.3f}",
                           annotation_position="top left")
 
     fig.update_layout(
@@ -369,9 +369,9 @@ def fig_ladder(state, blotter, history, title="", reentry_iv=None, monetise_mult
         # from; this is the one stacked figure in the repo that had drifted from it.
         height=theme.STACKED_FIGURE_HEIGHT[3],
         legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0))
-    fig.update_yaxes(title_text="rebased to window start (1.0)", row=1, col=1)
-    fig.update_yaxes(title_text="x premium paid", row=2, col=1)
-    fig.update_yaxes(title_text="implied vol", row=3, col=1)
+    fig.update_yaxes(title_text="Rebased to window start (1.0)", row=1, col=1)
+    fig.update_yaxes(title_text="Multiple of premium paid", row=2, col=1)
+    fig.update_yaxes(title_text="Implied vol", row=3, col=1)
     fig.update_xaxes(title_text=None, row=3, col=1)
     # Subplot titles are annotations, so they do not inherit the axis font. Sized down here so
     # they read as panel labels rather than three competing headlines under the real title.

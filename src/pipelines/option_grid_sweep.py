@@ -135,6 +135,13 @@ BUDGET_MONEYNESS = 0.95
 PORTFOLIO_BUDGET_PCT = 0.05
 REFERENCE_FLOOR = 0.90
 
+# THE PROFITABLE-MONETISE GUARD (13-02.1 round 2, 2026-10-19). The drawdown trigger is not
+# allowed to sell a hedge worth less than this multiple of its premium; it holds and lets the
+# ordinary roll replace it instead. Found on the GFC: the standing 0.80x programme sold a put
+# struck at the October 2007 peak for 0.009x premium four bars before expiry, then sat unhedged
+# for four months. See _ProfitableMonetiseMixin in rules/options.py for the measurement.
+MONETISE_MIN_MULTIPLE = 1.0
+
 
 # ============================================================================
 # DATA — loaded once per process, because every configuration slices the same
@@ -223,6 +230,10 @@ def run_config(floor=0.90, monetise_drawdown=None, window=None, rule_cls=BudgetM
     # the default call is sized exactly as decision D2 says without every caller repeating it.
     if rule_cls is BudgetMatchedPutRule:
         kw.setdefault("budget_moneyness", BUDGET_MONEYNESS)
+    # The guard travels with the trigger on both budget rules, never on the plain rule.
+    if monetise_drawdown is not None and rule_cls in (BudgetMatchedPutRule,
+                                                      PortfolioBudgetPutRule):
+        kw.setdefault("monetise_min_multiple", MONETISE_MIN_MULTIPLE)
     kw.update(rule_kwargs)
     rule = rule_cls(**kw)
 
@@ -341,7 +352,10 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 # 13-02.1: budget-sized results land in their OWN directory. 13-02's one-put-per-unit sweep stays
 # untouched in outputs/option_grid/ (UNIT_OUT_DIR) so the two sizings can be compared directly.
 UNIT_OUT_DIR = PROJECT_ROOT / "outputs" / "option_grid"
-OUT_DIR = PROJECT_ROOT / "outputs" / "option_grid_budget"
+# Round 2 (2026-10-19): the guarded rerun lands in its own directory too, leaving the first
+# budget-sized run (no guard, pro-rata 5% reference) in UNGUARDED_OUT_DIR for comparison.
+UNGUARDED_OUT_DIR = PROJECT_ROOT / "outputs" / "option_grid_budget"
+OUT_DIR = PROJECT_ROOT / "outputs" / "option_grid_budget_guarded"
 SERIES_DIR = OUT_DIR / "series"
 BLOTTER_DIR = OUT_DIR / "blotter"
 HISTORY_DIR = OUT_DIR / "rule_history"
@@ -757,24 +771,25 @@ def fit_strike_layers(scores, trigger=LADDER_MONETISE_DRAWDOWN):
 # LIST of stems, published in order after that section.
 WINDOW_PANEL_STEMS = [f"panel_{i}" for i in range(len(scoring.INDICATIVE_WINDOWS))]
 FIGURE_AT = {
-    "Step 1": "step1_blind",
-    "Step 2:": "step2_armed",
-    "Step 2b": "step2b_compare",
-    "window by window": WINDOW_PANEL_STEMS,
-    "drawdown on its own": "grid_mdd",
-    "return on its own": "grid_ret",
-    "Return per unit of drawdown": "grid_wod",
-    "The optimisation metric": "grid_score",
-    "quiet decades": "grid_heatmap",
-    "observations at a fixed trigger": "fit_scatter",
-    "Layer 1": "fit_poly",
-    "Layer 2": "fit_regspline",
-    "Layer 3": "fit_pspline",
-    "optimum moves between regimes": "window_surfaces",
+    # Headings revised 2026-10-19 to formal action titles; each key is a phrase unique to one h2.
+    "blind roll of deep": "step1_blind",
+    "reverses the ordering of strikes": "step2_armed",
+    "rescues deep strikes from time decay": "step2b_compare",
+    "across multiple windows": WINDOW_PANEL_STEMS,
+    "reduces maximum drawdown": "grid_mdd",
+    "costs return in calm markets": "grid_ret",
+    "single ratio": "grid_wod",
+    "common scale": "grid_score",
+    "matters most in crises": "grid_heatmap",
+    "Observations at a fixed trigger": "fit_scatter",
+    "global polynomial": "fit_poly",
+    "regression spline": "fit_regspline",
+    "penalised spline": "fit_pspline",
+    "optimum differs between regimes": "window_surfaces",
     "Pooling across windows": "pooled_contour",
-    "Snapping to a tradeable strike": "snap_slice",
+    "tradeable strike": "snap_slice",
     "three dimensions": "pooled_surface_3d",
-    "portfolio budget": "reference_gfc",
+    "share of portfolio value": "reference_gfc",
 }
 
 
@@ -835,7 +850,7 @@ def build_publication_figures(scores, fits, optima, bounds, snap, trials, result
         **common)
     figs["grid_score"] = gridfig.fig_score_grid(
         rows, value_col="score", text_format="{:.3f}", normalise=None, midpoint=1.0,
-        trial_count=trials, colourbar_title="score<br>(SPY = 1)",
+        trial_count=trials, colourbar_title="Score<br>(SPY = 1)",
         note="One shared scale centred on 1.0, the index; SPY is its own row.",
         title=(f"The optimisation metric — relative wealth over relative drawdown, at a "
                f"{default_trigger:.0%} trigger"))
@@ -865,7 +880,7 @@ def build_publication_figures(scores, fits, optima, bounds, snap, trials, result
                                                           trial_count=trials)
     figs["pooled_contour"] = gridfig.fig_pooled_contour(
         fits[pooled_key], demeaned_scores(scores), optima[pooled_key], bounds,
-        trial_count=trials, colourbar_title="fitted<br>deviation",
+        trial_count=trials, colourbar_title="Fitted<br>deviation",
         title="Pooled fitted surface, window-demeaned",
         subtitle=("Height is each configuration's deviation from its own window's mean score, "
                   "not a score — pooling the raw scores fits a nearly flat plane because which "
@@ -954,7 +969,7 @@ def export_optimisation_analysis(out_dir=DOCS_DIR, figures_dir=None):
         footer_note=("Portfolio Manager — thematic-fundamental research engine. "
                      "Priced with measured implied volatility, not a synthetic surface. "
                      f"IN-SAMPLE across {trials} trials on the windows the parameters were read "
-                     "on — see “What this establishes, and what it does not” above."),
+                     "on — see the section on out-of-sample validation above."),
     )
     print(f"\nwritten to {out_dir}:")
     for name in figs:

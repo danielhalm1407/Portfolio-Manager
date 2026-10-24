@@ -194,3 +194,46 @@ def test_portfolio_budget_spends_its_annual_share_pro_rata():
     first = _opens(rule)[0]
     assert first["contracts"] * first["premium"] == pytest.approx(first["budget_spend"], rel=1e-9)
     assert first["budget_spend"] == pytest.approx(0.05 * 63 / 252 * 100.0, rel=1e-6)
+
+
+# ---- 13-02.1 round 2: the profitable-monetise guard and the annual cap -------------------------
+
+def _peak_then_late_dip(n=N_BARS):
+    # Rise into the first roll (bar 64, so the put is struck at the PEAK), then a slow 11.5% dip
+    # that crosses the 10% trigger only a few bars before that put expires at bar 127. A 0.80x
+    # put struck at 130 (strike 104) with spot ~115 and days to go is worth almost nothing.
+    px = np.full(n, 100.0)
+    px[1:65] = np.linspace(100.0, 130.0, 64)
+    px[65:125] = np.linspace(130.0, 115.0, 60)
+    px[125:] = 115.0
+    return pd.Series(px, index=pd.bdate_range("2025-01-02", periods=n), name="SPY")
+
+
+def test_guard_holds_a_worthless_hedge_the_unguarded_rule_would_sell():
+    path = _peak_then_late_dip()
+    iv = pd.Series(0.16, index=path.index)
+    # reentry_iv=1.0 is a gate that is always open, so the only thing the guard can change is
+    # whether the near-worthless put is sold.
+    kw = dict(monetise_drawdown=0.10, reentry_iv=1.0, iv_series=iv)
+    _, _, plain, _ = _run(path, BudgetMatchedPutRule(floor=0.80, **kw))
+    _, _, guarded, _ = _run(path, BudgetMatchedPutRule(floor=0.80, monetise_min_multiple=1.0,
+                                                       **kw))
+    sold = [e for e in plain.events if e["action"] == "monetise"]
+    assert sold and sold[0]["multiple"] < 1.0        # the defect: a loss-making sale
+    assert not [e for e in guarded.events if e["action"] == "monetise"]
+
+
+def test_annual_cap_never_spends_more_than_the_allowance_in_a_year():
+    # Monetise and reopen repeatedly inside one year; the cap must still hold total spend to
+    # budget_pct of the year-start equity, where pro_rata overspends.
+    px = np.concatenate([np.full(2, 100.0), np.tile(np.r_[np.linspace(100, 85, 15),
+                                                          np.linspace(85, 100, 15)], 8)])
+    path = pd.Series(px, index=pd.bdate_range("2025-01-02", periods=len(px)), name="SPY")
+    iv = pd.Series(0.16, index=path.index)
+    kw = dict(floor=0.90, budget_pct=0.05, monetise_drawdown=0.10, reentry_iv=1.0, iv_series=iv)
+    _, _, cap, _ = _run(path, PortfolioBudgetPutRule(budget_mode="annual_cap", **kw))
+    _, _, pro, _ = _run(path, PortfolioBudgetPutRule(budget_mode="pro_rata", **kw))
+    spent = lambda r: sum(e["budget_spend"] for e in _opens(r))
+    assert len(_opens(cap)) > 4                        # it really did reopen repeatedly
+    assert spent(cap) <= 0.05 * 100.0 * 1.0001         # one budget year, start equity 100
+    assert spent(pro) > spent(cap)

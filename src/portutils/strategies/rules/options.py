@@ -776,7 +776,41 @@ class RollingCollarRule(OptionOverlayRule):
 # ================================================================================================
 
 
-class BudgetMatchedPutRule(ProtectivePutRule):
+class _ProfitableMonetiseMixin:
+    """Do not let the DRAWDOWN trigger sell a hedge worth less than ``monetise_min_multiple`` x
+    what it cost (13-02.1, checkpoint round 2, 2026-10-19).
+
+    MEASURED, on the full-history 0.80x / 10% run. The drawdown trigger measures the UNDERLYING
+    against its running peak, and that peak is deliberately carried across rolls (the 2026-09-21
+    decision). So the trigger can fire at a point in the roll cycle where the CURRENT legs have
+    gained nothing. In the standing programme the 0.80x put was struck at the 12 Oct 2007 peak
+    (strike 125); the trigger fired on 8 Jan 2008 at 138.91, four bars before that put expired, and
+    sold it for 0.009x its premium — then sat FLAT until vol fell back under the re-entry level in
+    May. A fresh-start run that happened to roll on 2 Jan 2008 monetised the same day at 1.65x.
+    Same market, same rule: the outcome turned on where in the 63-bar cycle the fall arrived.
+
+    Deep strikes suffer this most, because their value is almost all TIME value: near expiry a
+    deep out-of-the-money put is worth nearly nothing unless spot is already through the strike.
+    Selling it then buys no protection and forfeits the next roll.
+
+    The guard: if the drawdown trigger fires while the long legs are worth less than
+    ``monetise_min_multiple`` x premium, the rule does NOT monetise. It keeps the position and lets
+    the ordinary roll replace it on schedule. ``None`` restores the base behaviour exactly. The
+    multiple trigger is not guarded (it already requires a multiple by definition).
+    """
+
+    def _monetise_trigger(self, spot):
+        fired = super()._monetise_trigger(spot)
+        if fired != "drawdown" or self.monetise_min_multiple is None:
+            return fired
+        mult = self._multiple_now(spot)
+        # Undefined multiple (nothing paid) or a hedge that has not earned its premium back: hold.
+        if mult is None or mult < self.monetise_min_multiple:
+            return None
+        return fired
+
+
+class BudgetMatchedPutRule(_ProfitableMonetiseMixin, ProtectivePutRule):
     """Long puts at ``floor`` x spot, as many as the premium of ONE ``budget_moneyness`` put buys,
     per unit of underlying held.
 
@@ -786,11 +820,14 @@ class BudgetMatchedPutRule(ProtectivePutRule):
     across strikes, and what differs is only what that spend returns.
     """
 
-    def __init__(self, floor=0.90, budget_moneyness=0.95, **kw):
+    def __init__(self, floor=0.90, budget_moneyness=0.95, monetise_min_multiple=None, **kw):
         # The strike whose premium sets the budget, as a multiple of spot. Stored before
         # super().__init__ for the same reason ProtectivePutRule stores `floor` first: reset()
         # runs inside the base constructor and every attribute must already exist by then.
         self.budget_moneyness = float(budget_moneyness)
+        # The profitable-monetise guard (see _ProfitableMonetiseMixin). None = base behaviour.
+        self.monetise_min_multiple = (None if monetise_min_multiple is None
+                                      else float(monetise_min_multiple))
         super().__init__(floor=floor, **kw)
 
     def reset(self):
@@ -836,22 +873,35 @@ class BudgetMatchedPutRule(ProtectivePutRule):
         super()._log(ts, action, symbol, qty, price, reason, **extra)
 
 
-class PortfolioBudgetPutRule(ProtectivePutRule):
+class PortfolioBudgetPutRule(_ProfitableMonetiseMixin, ProtectivePutRule):
     """Long puts at ``floor`` x spot, as many as a fixed share of PORTFOLIO VALUE buys.
 
-    ``budget_pct`` is an ANNUAL share of equity (0.05 = 5% a year), spent pro rata at each open:
-    a 63-bar period spends ``budget_pct * reset_bars / 252`` of the equity on that bar. Annual
-    rather than per-period because "I will spend 5% on insurance" is how a holder states the
-    allocation, and a 5%-per-quarter reading would quietly be 20% a year.
+    ``budget_pct`` is an ANNUAL share of equity (0.05 = 5% a year). Two ways of spending it:
 
-    A monetise followed by a reopen spends a fresh period's budget at the reopen. That is the
-    policy as described (the monetised proceeds came back as cash), but it means the realised
-    annual spend can exceed ``budget_pct`` in a year that monetises; the blotter records each open.
+    ``budget_mode="annual_cap"`` (the default since 13-02.1 round 2, 2026-10-19) — a HARD annual
+    allowance, not a forecast. At the first open of each 252-bar budget year the allowance is set
+    to ``budget_pct`` x equity on that bar. Every open in that year (scheduled rolls AND reopens
+    after a monetisation) spends ``allowance left / opens still expected this year``, where the
+    expected count is the scheduled rolls remaining before the year ends, this one included. So a
+    year with four quarterly rolls spends a quarter of the allowance at each, and a reopen in the
+    middle of a quarter spends a share of what is LEFT, never fresh money: the year's total cannot
+    exceed ``budget_pct``. Monetisation proceeds return to the portfolio, not to the allowance.
+
+    ``budget_mode="pro_rata"`` — the first version: each open spends
+    ``budget_pct * reset_bars / 252`` of current equity, so a year that monetises and reopens
+    spends MORE than ``budget_pct``. Kept so the earlier published numbers can be reproduced.
     """
 
-    def __init__(self, floor=0.90, budget_pct=0.05, **kw):
+    def __init__(self, floor=0.90, budget_pct=0.05, budget_mode="annual_cap",
+                 monetise_min_multiple=None, **kw):
         # Stored before super().__init__, because reset() runs inside it (see ProtectivePutRule).
         self.budget_pct = float(budget_pct)
+        if budget_mode not in ("annual_cap", "pro_rata"):
+            raise ValueError(f"budget_mode must be 'annual_cap' or 'pro_rata', got {budget_mode!r}")
+        self.budget_mode = budget_mode
+        # The profitable-monetise guard (see _ProfitableMonetiseMixin). None = base behaviour.
+        self.monetise_min_multiple = (None if monetise_min_multiple is None
+                                      else float(monetise_min_multiple))
         super().__init__(floor=floor, **kw)
 
     def reset(self):
@@ -859,7 +909,27 @@ class PortfolioBudgetPutRule(ProtectivePutRule):
         # prices of the CURRENT bar, which _strike_legs needs and the base signature does not pass.
         self._sizing = {}
         self._book_now, self._prices_now = None, None
+        # The annual-cap ledger: bar the current budget year began on, and what is left of it.
+        self._budget_year_start = None
+        self._allowance_left = 0.0
         super().reset()
+
+    def _spend_now(self):
+        # How much premium this open may spend, under the configured budget mode.
+        equity = self._equity_now()
+        if self.budget_mode == "pro_rata":
+            return self.budget_pct * (self.calendar.reset_bars / 252.0) * equity
+        # ANNUAL CAP. A new budget year starts on the first open at least 252 bars after the last
+        # one began, with the allowance set off THAT bar's equity.
+        if self._budget_year_start is None or self._bar - self._budget_year_start >= 252:
+            self._budget_year_start = self._bar
+            self._allowance_left = self.budget_pct * equity
+        # Scheduled rolls still expected before this budget year ends, this open included.
+        bars_left = 252 - (self._bar - self._budget_year_start)
+        opens_left = max(1, int(np.ceil(bars_left / self.calendar.reset_bars)))
+        spend = self._allowance_left / opens_left
+        self._allowance_left -= spend
+        return spend
 
     def propose(self, ts, prices, book):
         # Stash this bar's Book and prices for _strike_legs, then defer entirely to the base.
@@ -883,14 +953,15 @@ class PortfolioBudgetPutRule(ProtectivePutRule):
         # period's slice of the budget buys. `units` (hedge_ratio x held) is ignored by design:
         # the hedge is sized to money, not to the position.
         new_legs, opened_premium = super()._strike_legs(spot, units)
-        spend = self.budget_pct * (self.calendar.reset_bars / 252.0) * self._equity_now()
+        spend = self._spend_now()
         self._sizing = {}
         for entry in new_legs:
             # Contracts = spend / premium per contract. A zero premium keeps the base sizing,
             # for the same reason as BudgetMatchedPutRule.
             qty = spend / entry["premium"] if entry["premium"] > 0 else abs(entry["qty"])
             entry["qty"] = np.sign(entry["qty"]) * qty
-            self._sizing[entry["leg"].symbol] = {"contracts": qty, "budget_spend": spend}
+            self._sizing[entry["leg"].symbol] = {"contracts": qty, "budget_spend": spend,
+                                                 "allowance_left": self._allowance_left}
         return new_legs, opened_premium
 
     def _log(self, ts, action, symbol, qty, price, reason, **extra):
