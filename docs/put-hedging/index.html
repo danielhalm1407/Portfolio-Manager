@@ -1,0 +1,18 @@
+<!doctype html>
+<html lang='en'><head><meta charset='utf-8'><meta name='viewport' content='width=device-width, initial-scale=1'><title>Hedging an equity portfolio with put options — Portfolio Manager</title><style>body{background:#111;color:#e0e0e0;font:16px/1.6 system-ui,-apple-system,sans-serif;max-width:40rem;margin:0 auto;padding:3rem 1.5rem}a{color:#3987e5}li{margin:.5rem 0}p.note,.note{color:#6e7681;font-size:.9rem}table{border-collapse:collapse}td,th{border:1px solid #526070;padding:.35rem .6rem;text-align:right}th:first-child,td:first-child{text-align:left}h2{border-top:1px solid #526070;padding-top:1.25rem;margin:1.75rem 0 .4rem;font-size:1.15rem}h2 + p{margin-top:.3rem}p.meta{margin:0 0 1rem}</style></head><body>
+<p class="note meta"><a href="../index.html">&larr; Portfolio Manager</a></p>
+<h1>Hedging an equity portfolio with put options</h1>
+<p>This research tests option overlays as a hedge for an equity portfolio. It is the hedging half of Portfolio Manager's structural commodity and hedging extension.</p>
+<p>The three studies build on each other. The first establishes how the pricer behaves on a synthetic volatility surface. The second watches a monetisation policy make decisions on real implied volatility through the GFC. The third sweeps the put's strike and the monetisation trigger across three crises and three calm stretches. They read best in order.</p>
+<h2><a href="../probing/index.html">Testing option price dynamics over recent drawdowns</a></h2>
+<p>How does a protective put, put spread and collar price and behave through one probe window — the pricer's own mechanics, the smirk, term structure, and the cost of carrying a hedge, worked out step by step against a synthetic implied-vol surface. Findings 1-9.</p>
+<p class="note">Data: synthetic vol surface (constant ATM level), plus a real-IV follow-on</p>
+<h2><a href="../validation/index.html">Option hedge structures compared over the GFC</a></h2>
+<p>Can a monetisation policy be seen DECIDING on real data — closing a hedge at a drawdown trigger, banking the gain, and waiting for cheaper insurance before re-opening? Four structures, one policy, every fill marked on the equity path, against a blind-roll control.</p>
+<p class="note">Data: REAL implied vol from IBKR, one window (2007-10 to 2009-03), IN-SAMPLE</p>
+<h2><a href="../optimisation/index.html">Optimising put option moneyness for drawdown-adjusted returns</a></h2>
+<p>How far out of the money should the put be struck, and how far should the market fall before the hedge is closed? A full parameter sweep scored on three crises and three calm stretches. The two regimes rank configurations in OPPOSITE directions, and the choice turns out to be decided by carry in quiet markets rather than by performance in a crash.</p>
+<p class="note">Data: REAL implied vol, 2006-2026, 63 parameter combinations over six windows, IN-SAMPLE</p>
+
+<p class="note">Every page here is generated and committed, with no server: <a href="https://github.com/danielhalm1407/Portfolio-Manager/tree/master">source on GitHub</a>. This page is generated from <a href="https://github.com/danielhalm1407/Portfolio-Manager/blob/master/research/site/put_hedging_hub.md">research/site/put_hedging_hub.md</a> by <code>python -m pipelines.build_site_index</code>.</p>
+</body></html>

@@ -55,7 +55,8 @@ WRITE_UP = PROJECT_ROOT / "research" / "validation" / "option_ladder_prices_prob
 DOCS = PROJECT_ROOT / "docs"
 # docs/probing/ since 13-01's 2026-09-26 amendment. docs/index.html is now the site HUB, which
 # links down to this report and to the 13-01 validation report; it is written by
-# pipelines/build_site_index.py and must not be overwritten here.
+# pipelines/build_site_index.py and must not be overwritten here. Since 2026-11-10 the front door
+# links to the put-hedging hub (docs/put-hedging/), and THAT hub links down to this report.
 REPORT_PATH = DOCS / "probing" / "index.html"
 
 # Which figure is dropped in after which section, keyed by a distinctive SUBSTRING of the heading
@@ -272,7 +273,8 @@ def _figure_divs(figures):
 def build_report(figures=None, write_up=WRITE_UP, out_path=REPORT_PATH, figure_at=None,
                  plotly_src=PLOTLY_SRC, title=DEFAULT_TITLE, heading=DEFAULT_HEADING,
                  header_note=DEFAULT_HEADER_NOTE, footer_note=DEFAULT_FOOTER_NOTE,
-                 source_href=None, extra_html=None, hub_href="../index.html"):
+                 source_href=None, extra_html=None, hub_href="../put-hedging/index.html",
+                 hub_label="Hedging an equity portfolio with put options"):
     """Render the write-up with its figures inline and write the report. Returns the path.
 
     SERVES TWO REPORTS (13-01 amendment, 2026-09-26). 10-01's option-overlay probe and 13-01's GFC
@@ -296,7 +298,15 @@ def build_report(figures=None, write_up=WRITE_UP, out_path=REPORT_PATH, figure_a
                      the run rather than typed into the Markdown — the same rule as the prose, one
                      level down.
     ``hub_href``     the link back up to the site hub, so a reader who arrives at one section from a
-                     shared link can reach the other. ``None`` omits it.
+                     shared link can reach the other. ``None`` omits it. Since 2026-11-10 it points
+                     at the put-hedging research hub (docs/put-hedging/), not the site front door:
+                     all three study pages belong to that piece, and that hub links up in turn.
+    ``hub_label``    the text of that link — the name of the hub it leads to.
+
+    THE WRITE-UP'S OWN TITLE WINS (2026-11-10). If the write-up opens with a ``# `` line, that line
+    becomes the page heading and ``<title>`` and is removed from the body, overriding ``title`` /
+    ``heading``. Before this, the heading argument AND the Markdown's own h1 were both printed, so
+    every page showed its title twice and editing the Markdown title changed only the second one.
 
     ``figures`` is ``{stem: go.Figure}``; when omitted the builders are imported and run here, so
     the module works standalone. The import is deferred to function scope because
@@ -327,7 +337,15 @@ def build_report(figures=None, write_up=WRITE_UP, out_path=REPORT_PATH, figure_a
     # matching source_dir or it resolves against the wrong base and 404s past the link check.
     page_dir = out_path.parent.relative_to(PROJECT_ROOT).as_posix()
     source_dir = write_up.parent.relative_to(PROJECT_ROOT).as_posix()
-    body = _split_sections(rewrite_links(render_markdown(write_up.read_text(encoding="utf-8")),
+    text = write_up.read_text(encoding="utf-8")
+    # The write-up's own "# " line is the page title (see the docstring): lifted out so it is
+    # printed once, by the header below, and so editing it in the Markdown is the whole change.
+    first, _, rest = text.partition("\n")
+    if first.startswith("# "):
+        heading = first[2:].strip()
+        title = f"{heading} — Portfolio Manager"
+        text = rest
+    body = _split_sections(rewrite_links(render_markdown(text),
                                          source_dir=source_dir, page_dir=page_dir),
                            figure_at=figure_at, source_name=write_up.name)
     # Wrap tables so the overflow rule above has something to scroll.
@@ -360,7 +378,7 @@ def build_report(figures=None, write_up=WRITE_UP, out_path=REPORT_PATH, figure_a
 
     # The link back UP to the hub. A hub that only points down is half a hub: a reader arriving here
     # from a shared link would otherwise have no way to discover the other section.
-    up = f'<p class="meta"><a href="{hub_href}">&larr; all sections</a></p>' if hub_href else ""
+    up = f'<p class="meta"><a href="{hub_href}">&larr; {hub_label}</a></p>' if hub_href else ""
 
     html = f"""<!doctype html>
 <html lang="en"><head><meta charset="utf-8">

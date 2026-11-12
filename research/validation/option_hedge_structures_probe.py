@@ -23,6 +23,7 @@
 # ============================================================================
 
 import importlib
+import sys
 import time
 
 import numpy as np
@@ -82,6 +83,12 @@ SPOT_FULL, IV_FULL = load_window()
 # enough bars for several rolls — and because real IV starts 2006-01-09, so nothing earlier is
 # covered at all.
 GFC = ("2007-10-01", "2009-03-31")
+
+# Whether the exploratory rung cells (5-8, 10-12) run. True when this file is run cell by cell in
+# an interactive session or as a plain script — exactly as before. False under `--publish`, which
+# only rebuilds docs/validation/ (see the last cell), and False when the module is IMPORTED, so
+# nothing that imports a helper from here re-runs a full-history simulation as a side effect.
+RUN_RUNGS = __name__ == "__main__" and "--publish" not in sys.argv
 
 # %% 3. run_one — the single code path every rung uses
 
@@ -422,10 +429,13 @@ def _col(frame, name, index, fill):
 #   * a blotter with one option buy and nothing else unaccounted for
 # ============================================================================
 
-state_a, blot_a, hist_a, rule_a, _ = run_one(*GFC, floor=0.90, reset_bars=10_000)
-fig_ladder(state_a, blot_a, hist_a,
-           title="RUNG 3a — one protective put, struck once, GFC 2007-10 to 2009-03").show()
-print(blot_a.to_string(index=False))
+# Skipped when the script runs with --publish (or is imported), so publishing the
+# page never re-runs the exploratory rungs or opens their .show() windows.
+if RUN_RUNGS:
+    state_a, blot_a, hist_a, rule_a, _ = run_one(*GFC, floor=0.90, reset_bars=10_000)
+    fig_ladder(state_a, blot_a, hist_a,
+               title="RUNG 3a — one protective put, struck once, GFC 2007-10 to 2009-03").show()
+    print(blot_a.to_string(index=False))
 
 # %% 6. RUNG 3b — the same put, ROLLING every 63 bars
 
@@ -442,10 +452,13 @@ print(blot_a.to_string(index=False))
 #     the leg closed, with nothing left over
 # ============================================================================
 
-state_b, blot_b, hist_b, rule_b, _ = run_one(*GFC, floor=0.90)
-fig_ladder(state_b, blot_b, hist_b,
-           title="RUNG 3b — protective put ROLLED every 63 bars, GFC").show()
-print(blot_b.to_string(index=False))
+# Skipped when the script runs with --publish (or is imported), so publishing the
+# page never re-runs the exploratory rungs or opens their .show() windows.
+if RUN_RUNGS:
+    state_b, blot_b, hist_b, rule_b, _ = run_one(*GFC, floor=0.90)
+    fig_ladder(state_b, blot_b, hist_b,
+               title="RUNG 3b — protective put ROLLED every 63 bars, GFC").show()
+    print(blot_b.to_string(index=False))
 
 # %% 7. RUNG 3c — rolling, with the drawdown monetisation trigger armed
 
@@ -466,12 +479,15 @@ print(blot_b.to_string(index=False))
 #     that HURTS through the GFC is a finding; one that fires on the wrong bar is a bug
 # ============================================================================
 
-state_c, blot_c, hist_c, rule_c, _ = run_one(
-    *GFC, floor=0.90, monetise_drawdown=0.10, reentry_iv=0.18, max_flat_bars=126)
-fig_ladder(state_c, blot_c, hist_c,
-           title="RUNG 3c — rolled put with monetise_drawdown=0.10, GFC").show()
-print(blot_c.to_string(index=False))
-print(rule_c.events_frame().to_string(index=False))
+# Skipped when the script runs with --publish (or is imported), so publishing the
+# page never re-runs the exploratory rungs or opens their .show() windows.
+if RUN_RUNGS:
+    state_c, blot_c, hist_c, rule_c, _ = run_one(
+        *GFC, floor=0.90, monetise_drawdown=0.10, reentry_iv=0.18, max_flat_bars=126)
+    fig_ladder(state_c, blot_c, hist_c,
+               title="RUNG 3c — rolled put with monetise_drawdown=0.10, GFC").show()
+    print(blot_c.to_string(index=False))
+    print(rule_c.events_frame().to_string(index=False))
 
 # %% 8. RUNG 3d — the same configuration over the FULL history
 
@@ -488,13 +504,16 @@ print(rule_c.events_frame().to_string(index=False))
 # a trigger that stops firing after some number of periods.
 # ============================================================================
 
-state_d, blot_d, hist_d, rule_d, elapsed_d = run_one(
-    floor=0.90, monetise_drawdown=0.10, reentry_iv=0.18, max_flat_bars=126)
-print(f"\nSINGLE-RUN CONSTANT: {elapsed_d:.2f}s over {len(state_d):,} bars "
-      f"({1000 * elapsed_d / len(state_d):.2f} ms/bar) — record this in the SUMMARY")
-fig_ladder(state_d, blot_d, hist_d,
-           title="RUNG 3d — the same configuration, 2006-2026 (IN-SAMPLE)").show()
-print(classify_option_events(blot_d, UNDERLYING)["event"].value_counts().to_string())
+# Skipped when the script runs with --publish (or is imported), so publishing the
+# page never re-runs the exploratory rungs or opens their .show() windows.
+if RUN_RUNGS:
+    state_d, blot_d, hist_d, rule_d, elapsed_d = run_one(
+        floor=0.90, monetise_drawdown=0.10, reentry_iv=0.18, max_flat_bars=126)
+    print(f"\nSINGLE-RUN CONSTANT: {elapsed_d:.2f}s over {len(state_d):,} bars "
+          f"({1000 * elapsed_d / len(state_d):.2f} ms/bar) — record this in the SUMMARY")
+    fig_ladder(state_d, blot_d, hist_d,
+               title="RUNG 3d — the same configuration, 2006-2026 (IN-SAMPLE)").show()
+    print(classify_option_events(blot_d, UNDERLYING)["event"].value_counts().to_string())
 
 # %% 9. RUNG 3e — the three structures over the GFC, and the figures written out
 
@@ -863,11 +882,11 @@ def export_gfc_analysis(out_dir=DOCS_DIR, window=GFC, show=False, figures_dir=No
         heading="Option hedge structures compared over the GFC",
         header_note=("Figures are fully interactive — hover, zoom and legend toggles all work, "
                      "with no server. Generated from {source_link} by "
-                     "<code>python -m research.validation.option_hedge_structures_probe</code> on {built}."),
+                     "<code>python -m research.validation.option_hedge_structures_probe --publish</code> on {built}."),
         footer_note=("Portfolio Manager — thematic-fundamental research engine. "
                      "Priced with REAL implied vol from IBKR, not a synthetic surface. "
-                     "IN-SAMPLE, one window, illustrative levels — see “What this does and "
-                     "does not support” above for what that does and does not carry."),
+                     "IN-SAMPLE, one window, illustrative levels — see the section on what this "
+                     "supports above for what that does and does not carry."),
         extra_html={"<!--TABLE:summary-->": f'<div class="table-wrap">{table.to_html()}</div>',
                    **financing_html},
     )
@@ -895,8 +914,11 @@ def export_gfc_analysis(out_dir=DOCS_DIR, window=GFC, show=False, figures_dir=No
 # Change NAME to any key in GFC_CONFIGS to probe a different structure the same way.
 # ============================================================================
 
-NAME = "protective_put"
-full_series, full_blot, full_elapsed = export_full_history_probe(NAME)
+# Skipped when the script runs with --publish (or is imported), so publishing the
+# page never re-runs the exploratory rungs or opens their .show() windows.
+if RUN_RUNGS:
+    NAME = "protective_put"
+    full_series, full_blot, full_elapsed = export_full_history_probe(NAME)
 
 # %% 11. Reload that run from disk — no re-run, no live session state required
 
@@ -916,21 +938,24 @@ full_series, full_blot, full_elapsed = export_full_history_probe(NAME)
 # reconstructs the identical picture.
 # ============================================================================
 
-reloaded_series, reloaded_blot, reloaded_runtime = load_persisted_full_run(NAME)
-print(f"reloaded {NAME}: {reloaded_runtime['bars']:,} bars, "
-      f"{reloaded_runtime['elapsed_s']:.2f}s ({reloaded_runtime['ms_per_bar']:.2f} ms/bar), "
-      f"measured {reloaded_runtime['measured_at']}")
-# EQUITY max drawdown (peak-to-trough of the strategy's own value), NOT `reloaded_series
-# ["drawdown"]` — that column is the RULE's own trigger reference, which RESETS on every reopen
-# (the 2026-09-21 decision), so its minimum understates a genuine multi-episode drawdown. Same
-# computation export_gfc_analysis's summary table uses, so the two numbers are comparable.
-eq = reloaded_series["equity"]
-print(f"final equity {eq.iloc[-1]:.2f}, "
-      f"max drawdown {float((eq / eq.cummax() - 1).min()):.1%}, {len(reloaded_blot)} fills")
+# Skipped when the script runs with --publish (or is imported), so publishing the
+# page never re-runs the exploratory rungs or opens their .show() windows.
+if RUN_RUNGS:
+    reloaded_series, reloaded_blot, reloaded_runtime = load_persisted_full_run(NAME)
+    print(f"reloaded {NAME}: {reloaded_runtime['bars']:,} bars, "
+          f"{reloaded_runtime['elapsed_s']:.2f}s ({reloaded_runtime['ms_per_bar']:.2f} ms/bar), "
+          f"measured {reloaded_runtime['measured_at']}")
+    # EQUITY max drawdown (peak-to-trough of the strategy's own value), NOT `reloaded_series
+    # ["drawdown"]` — that column is the RULE's own trigger reference, which RESETS on every reopen
+    # (the 2026-09-21 decision), so its minimum understates a genuine multi-episode drawdown. Same
+    # computation export_gfc_analysis's summary table uses, so the two numbers are comparable.
+    eq = reloaded_series["equity"]
+    print(f"final equity {eq.iloc[-1]:.2f}, "
+          f"max drawdown {float((eq / eq.cummax() - 1).min()):.1%}, {len(reloaded_blot)} fills")
 
-fig_ladder(reloaded_series, reloaded_blot, reloaded_series,
-          title=f"{NAME} — persisted full-history run, reloaded from disk, "
-                f"no re-simulation").show()
+    fig_ladder(reloaded_series, reloaded_blot, reloaded_series,
+              title=f"{NAME} — persisted full-history run, reloaded from disk, "
+                    f"no re-simulation").show()
 
 # %% 12. RUNG 3g — the other two structures, full history, runtime only
 
@@ -945,7 +970,22 @@ fig_ladder(reloaded_series, reloaded_blot, reloaded_series,
 # 11's use of it.
 # ============================================================================
 
-for _name in ("put_spread", "collar"):
-    export_full_history_probe(_name)
+# Skipped when the script runs with --publish (or is imported), so publishing the
+# page never re-runs the exploratory rungs or opens their .show() windows.
+if RUN_RUNGS:
+    for _name in ("put_spread", "collar"):
+        export_full_history_probe(_name)
 
-# %%
+# %% 13. Publish — rebuild docs/validation/ from the write-up
+
+# ============================================================================
+# THE PUBLISH ENTRY POINT. `python -m research.validation.option_hedge_structures_probe --publish`
+# (from the repo root) re-runs ONLY the four GFC configurations — 377 bars each, seconds in all —
+# and re-renders docs/validation/index.html from option_hedge_structures_probe.md. RUN_RUNGS is
+# False under the flag, so none of the exploratory cells above run. This is the path to take after
+# editing the write-up's prose; the summary table and financing sentences are regenerated from the
+# run, never typed into the Markdown, so they cannot go stale.
+# ============================================================================
+
+if __name__ == "__main__" and "--publish" in sys.argv:
+    export_gfc_analysis()

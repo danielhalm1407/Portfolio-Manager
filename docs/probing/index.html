@@ -55,12 +55,11 @@
 <script src="../assets/plotly.min.js"></script>
 </head><body>
 <header class="page">
-  <p class="meta"><a href="../index.html">&larr; all sections</a></p>
+  <p class="meta"><a href="../put-hedging/index.html">&larr; Hedging an equity portfolio with put options</a></p>
   <h1>Testing option price dynamics over recent drawdowns</h1>
-  <p class="meta">Figures are fully interactive — hover, zoom and legend toggles all work, with no server. Generated from <a href="https://github.com/danielhalm1407/Portfolio-Manager/blob/master/research/validation/option_ladder_prices_probe.md">research/validation/option_ladder_prices_probe.md</a> by <code>python -m pipelines.build_report</code> on 2026-10-17.</p>
+  <p class="meta">Figures are fully interactive — hover, zoom and legend toggles all work, with no server. Generated from <a href="https://github.com/danielhalm1407/Portfolio-Manager/blob/master/research/validation/option_ladder_prices_probe.md">research/validation/option_ladder_prices_probe.md</a> by <code>python -m pipelines.build_report</code> on 2026-11-10.</p>
 </header>
 <main>
-<h1>Testing option price dynamics over recent drawdowns</h1>
 <p><em>SPY, 250 daily bars, 2025-07-28 → 2026-07-24. Script:
 <a href="https://github.com/danielhalm1407/Portfolio-Manager/blob/master/research/validation/option_ladder_prices_probe.py"><code>option_ladder_prices_probe.py</code></a>.</em></p>
 <h2>Why this exists</h2>
@@ -676,8 +675,8 @@ reference and drifts out of reach of exactly the falls it was bought for.</li>
 worthless, because no rule was looking to realise it. Monetisation is a separate decision and
 needs its own evidence.</li>
 </ol>
-<p>The next section takes those three structures through a real crisis with a monetisation policy
-attached.</p>
+<p>The <a href="../validation/index.html">next section</a> takes those three structures through a real
+crisis with a monetisation policy attached.</p>
 <h2>Reproducing this</h2>
 <pre><code class="language-bash">python -m pipelines.option_probe_figures
 </code></pre>
