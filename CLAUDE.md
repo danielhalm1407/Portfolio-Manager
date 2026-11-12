@@ -47,6 +47,14 @@ A thematic-fundamental research engine that converts qualitative market narrativ
   is usually not the kebab-case name this repo wants. Renaming the repo copy to a descriptive name
   (and deleting the auto-named one) is still a manual step.
 
+## Published writing
+- Any prose that ends up on the published site (`research/site/*.md`, `research/validation/*.md`,
+  page titles, headings, blurbs, figure lead-ins) is written in the user's own voice: load the
+  `publish-writing-style` skill first. Its guide is `.claude/skills/publish-writing-style/STYLE.md`.
+- The user protects hand edits with git commits. When their own changes to those files appear
+  (uncommitted diff, or a commit without a Claude trailer), run `learn-writing-style` before
+  editing, so the guide learns from them and their wording is not overwritten.
+
 ## Agent roles
 - **Research agent** — theme extraction from market commentary
 - **Modelling agent** — structural fundamental analysis
