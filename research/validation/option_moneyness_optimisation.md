@@ -7,14 +7,9 @@ indicative windows. Every put is sized to the same premium budget. Script:
 
 ## Previous observations motivate this analysis
 
-We previously established, in [pricing the hedge](../../docs/probing/index.html), that the cost of
-protection is steeply convex in the strike. An at-the-money put costs roughly 14% of notional a
-year, a 0.90× put about 3.4%, and a 0.80× put almost nothing. We also established that a hedge
-which is never closed early can double in value and still expire worthless.
+A preceding analysis in [pricing the hedge](../../docs/probing/index.html) demonstrateted that the cost of protection is steeply convex and increasing with respect to the strike. For instance, an at-the-money put costs roughly 14% of notional a year, a 0.90× put about 3.4%, and a 0.80× put almost nothing. It also served to exhibit that a hedge leg can reach multiples of its initial value at one or more points along its path, yet still expire worthless.
 
-We previously established, in [running the hedge structures](../../docs/validation/index.html)
-through the 2007-09 crisis, that adding a monetisation rule was worth about seven percentage points
-against an otherwise identical blind roll.
+Furthermore, [running the hedge structures](../../docs/validation/index.html) through the 2007-09 crisis evidenced that adding a monetisation rule could contribute an additional seven percentage points of returns against an otherwise identical blind roll.
 
 Both of those results used hand-picked parameters: a 0.90× strike and a 10% monetisation trigger,
 chosen to exercise the mechanism rather than selected. A threshold tested on the window that

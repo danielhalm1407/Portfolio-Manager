@@ -57,7 +57,7 @@
 <header class="page">
   <p class="meta"><a href="../put-hedging/index.html">&larr; Hedging an equity portfolio with put options</a></p>
   <h1>Optimising put option moneyness for drawdown-adjusted returns</h1>
-  <p class="meta">Figures are fully interactive — hover, zoom and legend toggles all work, with no server. Generated from <a href="https://github.com/danielhalm1407/Portfolio-Manager/blob/master/research/validation/option_moneyness_optimisation.md">research/validation/option_moneyness_optimisation.md</a> by <code>python -m pipelines.option_grid_sweep</code> on 2026-11-10.</p>
+  <p class="meta">Figures are fully interactive — hover, zoom and legend toggles all work, with no server. Generated from <a href="https://github.com/danielhalm1407/Portfolio-Manager/blob/master/research/validation/option_moneyness_optimisation.md">research/validation/option_moneyness_optimisation.md</a> by <code>python -m pipelines.option_grid_sweep</code> on 2026-11-12.</p>
 </header>
 <main>
 <p><em>SPY, 5,201 daily bars, 2006-01-09 → 2026-09-18, priced with the ticker's own measured implied
@@ -65,13 +65,8 @@ volatility. 63 parameter combinations, each simulated once over the full history
 indicative windows. Every put is sized to the same premium budget. Script:
 <a href="https://github.com/danielhalm1407/Portfolio-Manager/blob/master/research/validation/option_moneyness_optimisation.py"><code>option_moneyness_optimisation.py</code></a>.</em></p>
 <h2>Previous observations motivate this analysis</h2>
-<p>We previously established, in <a href="../probing/index.html">pricing the hedge</a>, that the cost of
-protection is steeply convex in the strike. An at-the-money put costs roughly 14% of notional a
-year, a 0.90× put about 3.4%, and a 0.80× put almost nothing. We also established that a hedge
-which is never closed early can double in value and still expire worthless.</p>
-<p>We previously established, in <a href="../validation/index.html">running the hedge structures</a>
-through the 2007-09 crisis, that adding a monetisation rule was worth about seven percentage points
-against an otherwise identical blind roll.</p>
+<p>A preceding analysis in <a href="../probing/index.html">pricing the hedge</a> demonstrateted that the cost of protection is steeply convex and increasing with respect to the strike. For instance, an at-the-money put costs roughly 14% of notional a year, a 0.90× put about 3.4%, and a 0.80× put almost nothing. It also served to exhibit that a hedge leg can reach multiples of its initial value at one or more points along its path, yet still expire worthless.</p>
+<p>Furthermore, <a href="../validation/index.html">running the hedge structures</a> through the 2007-09 crisis evidenced that adding a monetisation rule could contribute an additional seven percentage points of returns against an otherwise identical blind roll.</p>
 <p>Both of those results used hand-picked parameters: a 0.90× strike and a 10% monetisation trigger,
 chosen to exercise the mechanism rather than selected. A threshold tested on the window that
 motivated it establishes nothing about the threshold. This analysis therefore asks the parameter
