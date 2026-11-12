@@ -50,3 +50,6 @@ archive/
 # carl-hook.py into the *nearest* .carl scope, which is now this repo.
 # Pure churn; the domain config in .carl/carl.json IS tracked.
 .carl/sessions/
+
+# detect-hand-edits.py state: describes this working copy, not the project
+.claude/hooks/state/

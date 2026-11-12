@@ -9,6 +9,14 @@ Keeps [STYLE.md](../publish-writing-style/STYLE.md) in step with how Daniel actu
 BEFORE making any edit of your own to a file they have just changed, so their wording is read as
 evidence and not overwritten.
 
+## When it runs
+
+A `UserPromptSubmit` hook (`.claude/hooks/scripts/detect-hand-edits.py`, wired in
+`.claude/settings.json`) checks the write-ups on every prompt. When it finds Daniel's own changes,
+it adds a line starting `Writing-style hook: detected ...` naming the files or commits. Treat that
+line as the trigger: run this skill on exactly those files or commits before doing anything else
+with them. Claude's own Edit/Write and shell edits are recorded by the same hook and never reported.
+
 ## 1. Collect only Daniel's text
 
 Evidence must be their writing, never Claude's. Sources, in order:
