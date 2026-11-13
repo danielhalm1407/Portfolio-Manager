@@ -172,7 +172,8 @@ def load_full(reload=False):
 
 def run_config(floor=0.90, monetise_drawdown=None, window=None, rule_cls=BudgetMatchedPutRule,
                spot=None, iv=None, reentry_iv=LADDER_REENTRY_IV,
-               max_flat_bars=LADDER_MAX_FLAT_BARS, quiet=False, **rule_kwargs):
+               max_flat_bars=LADDER_MAX_FLAT_BARS, quiet=False, underlying=UNDERLYING,
+               **rule_kwargs):
     """One parameter combination over one window. THE single code path for every step of 13-02.
 
     Parameters
@@ -191,6 +192,11 @@ def run_config(floor=0.90, monetise_drawdown=None, window=None, rule_cls=BudgetM
         window by slicing the result, which is the property AC-2 exists to protect.
     spot, iv : Series or None
         The window's closes and real IV. None loads and slices ``load_full()``.
+    underlying : str
+        The symbol the rule hedges and the simulator holds (13-02.2, 2026-11-12). Defaults to SPY,
+        so every existing caller is unchanged. A caller pricing another underlying (QQQ for the
+        2026 illustrative window) passes its OWN ``spot`` and ``iv`` with it — ``load_full()`` is
+        SPY only, and pricing a QQQ rule off SPY's closes would be wrong without failing.
 
     Returns
     -------
@@ -218,7 +224,7 @@ def run_config(floor=0.90, monetise_drawdown=None, window=None, rule_cls=BudgetM
     # simulator will visit, because `_iv_now()` raises naming the bar if one is missing, and
     # that loud failure is the behaviour we want rather than a silent fallback.
     # ------------------------------------------------------------------------
-    kw = dict(underlying=UNDERLYING, reset_bars=RESET_BARS, rate=RATE, div_yield=DIV_YIELD,
+    kw = dict(underlying=underlying, reset_bars=RESET_BARS, rate=RATE, div_yield=DIV_YIELD,
               vol_mode="v2", iv_series=iv, floor=floor)
     if monetise_drawdown is not None:
         # The policy arguments travel TOGETHER with the trigger, never separately: a re-entry
@@ -253,8 +259,8 @@ def run_config(floor=0.90, monetise_drawdown=None, window=None, rule_cls=BudgetM
     # the equity line is directly comparable to spot. Same convention as 16-03, 13-01 and the
     # ladder probe.
     # ------------------------------------------------------------------------
-    sim = PortfolioSimulator(spot.to_frame(UNDERLYING),
-                             [BuyAndHoldRule({UNDERLYING: 1.0}), rule],
+    sim = PortfolioSimulator(spot.to_frame(underlying),
+                             [BuyAndHoldRule({underlying: 1.0}), rule],
                              book=Book(base_equity=float(spot.iloc[0])),
                              starting_capital=float(spot.iloc[0]),
                              ledger=NarrowLedger())
@@ -265,7 +271,7 @@ def run_config(floor=0.90, monetise_drawdown=None, window=None, rule_cls=BudgetM
     # The same loud guard 13-01's batch, the ladder probe and overlay_runs all use: legs proposed
     # but never filled means the synthetic-marks hook is not wired, and the hedged line would
     # silently equal the unhedged one — which looks like a finding and is a bug.
-    if rule.events and not any(scoring.is_option_symbol(f.symbol, UNDERLYING) for f in sim.fills):
+    if rule.events and not any(scoring.is_option_symbol(f.symbol, underlying) for f in sim.fills):
         raise RuntimeError(f"floor={floor}: option legs were proposed but never filled")
 
     blotter = sim.blotter()
@@ -283,7 +289,7 @@ def run_config(floor=0.90, monetise_drawdown=None, window=None, rule_cls=BudgetM
               f"{len(blotter)} fills | {len(rule.events)} events")
 
     return {
-        "params": {"floor": floor, "monetise_drawdown": monetise_drawdown,
+        "params": {"floor": floor, "monetise_drawdown": monetise_drawdown, "underlying": underlying,
                    "reset_bars": RESET_BARS, "rule": rule_cls.__name__,
                    "budget_moneyness": getattr(rule, "budget_moneyness", None),
                    "budget_pct": getattr(rule, "budget_pct", None)},
@@ -472,8 +478,11 @@ def load_sweep(out_dir=None):
     return results, scores
 
 
-def tidy_scores(results, spy, underlying=UNDERLYING):
+def tidy_scores(results, spy, underlying=UNDERLYING, windows=None):
     """``scoring.score_grid`` over every combination, with the two swept PARAMETERS joined back on.
+
+    ``windows`` (13-02.2) is passed straight to ``score_grid``; None keeps the six indicative
+    windows, and the random-window set passes its own dict through the same path.
 
     The parameters have to travel with the scores or the surface cannot be fitted: a tidy frame
     keyed only by a config LABEL would need the label parsed back into numbers, and a parser is
@@ -481,7 +490,7 @@ def tidy_scores(results, spy, underlying=UNDERLYING):
     """
     scores = scoring.score_grid({k: v["series"] for k, v in results.items()}, spy,
                                 blotter_by_config={k: v["blotter"] for k, v in results.items()},
-                                underlying=underlying)
+                                underlying=underlying, windows=windows)
     params = {k: v["params"] for k, v in results.items()}
     scores["floor"] = scores["config"].map(lambda c: params[c]["floor"])
     # The blind roll's depth is `None`, which cannot sit on a numeric axis. Left as NaN and
@@ -930,6 +939,16 @@ def export_optimisation_analysis(out_dir=DOCS_DIR, figures_dir=None):
     figs = build_publication_figures(scores, fits, optima, bounds, snap, trials, results, spot,
                                      reference=reference, reference_scores=ref_scores)
 
+    # 13-02.2: the deeper strikes, the twenty random windows and the 2026 window, from what
+    # `python -m pipelines.option_grid_extension` persisted. Imported HERE because that module
+    # imports this one; deferring breaks the cycle. Skipped, with the base figure map, when the
+    # extension has not been run, so the page still builds from 13-02.1's sweep alone.
+    import pipelines.option_grid_extension as ext
+    figure_at = FIGURE_AT
+    if (ext.EXT_DIR / "scores_random.csv").exists():
+        figs.update(ext.build_extension_figures())
+        figure_at = {**FIGURE_AT, **ext.FIGURE_AT}
+
     # One standalone page per figure, so a chart can be opened by double-clicking a file with no
     # kernel and no report around it. The SAME figure objects are then handed to build_report, so
     # nothing is rendered twice and the two cannot disagree.
@@ -959,7 +978,7 @@ def export_optimisation_analysis(out_dir=DOCS_DIR, figures_dir=None):
         figures=figs,
         write_up=WRITE_UP,
         out_path=out_dir / "index.html",
-        figure_at=FIGURE_AT,
+        figure_at=figure_at,
         plotly_src=PLOTLY_SRC_INDEX,
         title="Optimising put option moneyness for drawdown-adjusted returns — Portfolio Manager",
         heading="Optimising put option moneyness for drawdown-adjusted returns",

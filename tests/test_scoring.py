@@ -296,3 +296,45 @@ def test_spy_scores_exactly_one_against_itself():
     assert row["spy_score"] == pytest.approx(1.0)
     # The hedged path fell less and lost less over the crash, so it beats the index.
     assert out.set_index("config").loc["hedged", "score"] > 1.0
+
+
+# ============================================================================
+# 13-02.2 ROUTE A — random windows and the regime label.
+# ============================================================================
+
+def _bdays(n, start="2010-01-01"):
+    return pd.bdate_range(start, periods=n)
+
+
+def test_random_windows_are_reproducible_under_a_fixed_seed():
+    # Given a fixed seed, the same windows come back every call (AC-1).
+    spot = pd.Series(np.linspace(100, 200, 2000), index=_bdays(2000))
+    assert scoring.random_windows(spot, n=20, seed=7) == scoring.random_windows(spot, n=20, seed=7)
+
+
+def test_random_windows_fit_inside_the_data_and_use_the_allowed_lengths():
+    spot = pd.Series(np.linspace(100, 200, 2000), index=_bdays(2000))
+    windows = scoring.random_windows(spot, n=50, seed=3)
+    assert len(windows) <= 50
+    for start, end, kind in windows.values():
+        seg = spot.loc[start:end]
+        # Every window is whole: its bar count is one of the drawn lengths, never cut at the end.
+        assert len(seg) in scoring.RANDOM_WINDOW_LENGTHS
+        assert kind in (DRAWDOWN, CALM, scoring.MIXED)
+
+
+def test_window_kind_labels_from_the_index_path():
+    idx = _bdays(100)
+    rising = pd.Series(np.linspace(100, 110, 100), index=idx)
+    crash = pd.Series(np.r_[np.linspace(100, 80, 50), np.linspace(80, 90, 50)], index=idx)
+    choppy = pd.Series(np.r_[np.linspace(100, 93, 50), np.linspace(93, 99, 50)], index=idx)
+    assert scoring.window_kind(rising) == CALM
+    assert scoring.window_kind(crash) == DRAWDOWN
+    assert scoring.window_kind(choppy) == scoring.MIXED
+
+
+def test_effective_window_count_counts_non_overlapping_windows():
+    windows = {"a": ("2020-01-01", "2020-03-31", CALM),
+               "b": ("2020-02-01", "2020-04-30", CALM),   # overlaps a
+               "c": ("2020-06-01", "2020-07-31", CALM)}
+    assert scoring.effective_window_count(windows) == 2

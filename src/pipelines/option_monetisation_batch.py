@@ -99,16 +99,20 @@ ILLUSTRATIVE_MAX_FLAT = 126       # and never sit unhedged for more than about s
 # DATA
 # ============================================================================
 
-def load_window():
+def load_window(symbol=UNDERLYING):
     """SPY closes and real IV on their INTERSECTION, with the truncation printed.
+
+    ``symbol`` (13-02.2, 2026-11-12) selects the underlying: both cached panels carry SPY AND QQQ
+    columns, so the 2026 illustrative window can price QQQ through this same loader rather than a
+    second copy of the intersection logic. Defaults to SPY, so every existing caller is unchanged.
 
     The price history reaches 1993 and the IV history only 2006, so v2 cannot price the first
     thirteen years at all. That loss is printed rather than silently absorbed: it is a measured
     Phase 11 finding (real ``OPTION_IMPLIED_VOLATILITY`` begins 2006-01-09), and a run that
     quietly started in 2006 would look like a choice rather than a constraint.
     """
-    spot_all = pd.read_parquet(PRICE_HISTORY)[UNDERLYING].dropna()
-    iv_all = load_real_iv()
+    spot_all = pd.read_parquet(PRICE_HISTORY)[symbol].dropna()
+    iv_all = load_real_iv(symbol=symbol)
 
     common = spot_all.index.intersection(iv_all.index)
     if len(common) == 0:

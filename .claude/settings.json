@@ -1,7 +1,4 @@
 {
-  "enabledPlugins": {
-    "get-shit-done": false
-  },
   "permissions": {
     "allow": [
       "Bash(python *)",
@@ -10,7 +7,12 @@
       "Bash(pip install -e *)",
       "Bash(ruff *)",
       "Bash(black *)",
-      "mcp__playwright__browser_navigate"
+      "mcp__playwright__browser_navigate",
+      "Bash(python -)",
+      "Bash(~/miniconda3/envs/venv-stats/python.exe -c ' *)",
+      "Bash(grep -o \"html,body{background:#111;color:#e0e0e0;margin:0}\" docs/validation/protective_put.html)",
+      "mcp__claude-in-chrome__tabs_context_mcp",
+      "ClaudeInChromeDomain(127.0.0.1:8765)"
     ],
     "deny": [
       "Bash(rm -rf *)",
@@ -19,6 +21,27 @@
     ]
   },
   "hooks": {
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python \"$CLAUDE_PROJECT_DIR/.claude/hooks/scripts/detect-hand-edits.py\" check"
+          }
+        ]
+      }
+    ],
+    "PreToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python \"$CLAUDE_PROJECT_DIR/.claude/hooks/scripts/detect-hand-edits.py\" pre"
+          }
+        ]
+      }
+    ],
     "PostToolUse": [
       {
         "matcher": "Edit|Write",
@@ -26,9 +49,25 @@
           {
             "type": "command",
             "command": "bash .claude/hooks/scripts/post-edit-lint.sh \"$CLAUDE_FILE_PATH\""
+          },
+          {
+            "type": "command",
+            "command": "python \"$CLAUDE_PROJECT_DIR/.claude/hooks/scripts/detect-hand-edits.py\" record"
+          }
+        ]
+      },
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python \"$CLAUDE_PROJECT_DIR/.claude/hooks/scripts/detect-hand-edits.py\" post"
           }
         ]
       }
     ]
+  },
+  "enabledPlugins": {
+    "get-shit-done": false
   }
 }

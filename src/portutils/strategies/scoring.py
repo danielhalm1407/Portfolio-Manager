@@ -85,6 +85,86 @@ INDICATIVE_WINDOWS = {
 # better; report the share instead.
 DRAWDOWN_FLOOR = 0.02
 
+# ============================================================================
+# RANDOM WINDOWS (13-02.2 Route A, 2026-11-12). The six indicative windows are
+# chosen by hand, so the fitted optimum rests on six regimes someone picked.
+# These are drawn instead: a start bar uniform over the history and a length
+# from RANDOM_WINDOW_LENGTHS, under a fixed seed so the set is reproducible.
+# OVERLAP IS ALLOWED, by the user's choice for this first pass, so N windows
+# are fewer than N independent observations; `effective_window_count` reports
+# how many of them could be laid end to end without overlapping.
+# ============================================================================
+
+# Two months, a quarter (one roll), six months, one year and two years of trading days. The
+# shortest are shorter than or equal to one roll, so they measure a hedge already in place rather
+# than a full roll cycle.
+RANDOM_WINDOW_LENGTHS = (42, 63, 126, 252, 504)
+# The seed for the published set. Fixed so the page and the persisted scores agree run to run.
+RANDOM_WINDOW_SEED = 1302
+# A window that is neither a clear crisis nor a clear calm stretch.
+MIXED = "mixed"
+# The labelling thresholds on the UNDERLYING's own path: a drawdown window if SPY fell at least
+# this far from a peak inside it; calm if it fell less than CALM_MAX_DD and still ended higher.
+DRAWDOWN_MIN_DD = 0.10
+CALM_MAX_DD = 0.05
+
+
+def window_kind(spot_segment):
+    """Label a window from the underlying's own path: DRAWDOWN, CALM or MIXED.
+
+    Derived from the index alone, never from any configuration's result, so the label cannot be
+    chosen by the outcome it is later used to group.
+    """
+    dd = max_drawdown(spot_segment)
+    ret = window_return(spot_segment)
+    if dd >= DRAWDOWN_MIN_DD:
+        return DRAWDOWN
+    if dd < CALM_MAX_DD and ret > 0:
+        return CALM
+    return MIXED
+
+
+def random_windows(spot, n=20, lengths=RANDOM_WINDOW_LENGTHS, seed=RANDOM_WINDOW_SEED):
+    """``n`` windows drawn at random over ``spot``'s index, in ``score_grid``'s window shape.
+
+    Returns ``{name: (start, end, kind)}``, ordered by start date. Each start bar is uniform over
+    the bars that leave room for the drawn length, so no window is cut short at the end of the
+    data. Overlap is allowed. Names carry the dates and the length so a row of the score table can
+    be matched to its window by eye.
+    """
+    idx = pd.Index(spot.index)
+    rng = np.random.default_rng(seed)
+    drawn = []
+    for _ in range(n):
+        # Draw the length first, then a start that leaves room for it.
+        length = int(rng.choice(lengths))
+        start_i = int(rng.integers(0, len(idx) - length))
+        end_i = start_i + length - 1
+        drawn.append((start_i, end_i, length))
+    out = {}
+    for start_i, end_i, length in sorted(drawn):
+        start, end = idx[start_i], idx[end_i]
+        kind = window_kind(spot.iloc[start_i:end_i + 1])
+        name = f"R {start.date()} ({length}d)"
+        out[name] = (str(start.date()), str(end.date()), kind)
+    return out
+
+
+def effective_window_count(windows):
+    """How many of ``windows`` could be kept with NO two overlapping (greedy by end date).
+
+    The honest sample size behind an overlapping draw: two windows that share most of their bars
+    are closer to one observation than to two. Reported beside the raw count, never instead.
+    """
+    spans = sorted((pd.Timestamp(s), pd.Timestamp(e)) for s, e, _ in windows.values())
+    spans.sort(key=lambda se: se[1])
+    kept, last_end = 0, None
+    for start, end in spans:
+        if last_end is None or start > last_end:
+            kept += 1
+            last_end = end
+    return kept
+
 
 def is_option_symbol(symbol, underlying):
     """True for a synthetic option leg on ``underlying``, false for the underlying itself.

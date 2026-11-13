@@ -4,7 +4,7 @@ Built from Daniel's own writing and corrections. Rules are stated as observed, e
 evidence it rests on. The `learn-writing-style` skill keeps this file current; newer evidence
 overrides older evidence, and a superseded rule is struck through rather than deleted.
 
-Evidence processed through commit: `df30edd` plus the uncommitted research/site/put_hedging_hub.md edit (2026-11-12)
+Evidence processed through commit: `58ad56a` (2026-11-12)
 
 ## The overall voice
 
@@ -46,8 +46,11 @@ Evidence processed through commit: `df30edd` plus the uncommitted research/site/
   both "We previously established..." openers with impersonal ones.
 - ~~Open recap paragraphs with "We previously established..."~~ (2026-10-19 preference,
   superseded by the 2026-11-12 edit above).
-- **"We" survives in figure lead-ins**: "Below, we compare...", "Below, we show...". This is a
-  standing preference (2026-10-19), not yet contradicted.
+- ~~**"We" survives in figure lead-ins**: "Below, we compare...", "Below, we show..."~~
+  (superseded 2026-11-12 by a direct instruction: "replace we with I").
+- **"I", never "we".** Where a sentence needs a person, it is "I": figure lead-ins read "Below, I
+  compare...", "I score every configuration on...". Direct instruction, 2026-11-12. Narrative claims
+  about results still prefer the analysis as subject.
 - ~~Never "I".~~ (superseded 2026-11-12: Daniel's hub card rewrites use "I".)
 - **"I" in hub card blurbs, impersonal in write-up bodies.** On the hub pages, the cards narrate
   Daniel's own research journey in the first person singular: "Foundationally, I construct an
@@ -136,8 +139,8 @@ Words and phrases Daniel reaches for. Prefer these to plainer or more casual equ
 ## Checklist before handing text back
 
 1. Does every `##` heading state a takeaway, not a topic?
-2. Is the subject of each narrative sentence the analysis, not "we" (figure lead-ins excepted;
-   "I" on research-piece hub cards)?
+2. Is the subject of each narrative sentence the analysis? Where a person is needed, is it "I",
+   never "we"?
 3. Any em dashes in new prose? Replace with a comma, "and", "yet" or a full stop.
 4. Any words in full capitals in body text? Rewrite without them.
 5. Any clipped fragment list where a reader needs context? Write it as full sentences that say
@@ -166,3 +169,4 @@ Words and phrases Daniel reaches for. Prefer these to plainer or more casual equ
 | 2026-11-12 | Hand edit, research/validation/option_moneyness_optimisation.md (316f5a8) | Impersonal subjects replace "we"; "For instance,", "Furthermore,"; "demonstrated", "served to exhibit", "evidenced"; hedged modal "could contribute"; no em dashes; unwrapped paragraphs |
 | 2026-11-12 | Hand edit, research/site/put_hedging_hub.md (uncommitted at time of reading), plus direct instruction | Card blurbs in first person narrating a progression ("Foundationally, I construct...", "Extending this idea further, I then..."); terse fragment list rejected as "too direct, no context"; findings teasers and bare questions removed; no full capitals in body text; "REAL" dropped from Data lines |
 | 2026-11-12 | Hand edits (uncommitted), research/validation/option_moneyness_optimisation.md and research/site/portfolio_manager_hub.md | Superlatives toned down ("matters to a significant degree", "valid measurement"); plain-language asides for parameters ("corresponding approximately to 1 quarter"); "e.g." lists in parentheses; rationale versus diversification alone; "historic levels and implied volatility" again replaces "real" |
+| 2026-11-12 | Direct instruction | "Replace we with I" across the write-ups, figure lead-ins included |
