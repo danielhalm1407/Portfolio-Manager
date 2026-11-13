@@ -662,6 +662,10 @@ WRITE_UP = PROJECT_ROOT / "research" / "validation" / "option_moneyness_optimisa
 PLOTLY_SRC_FIGURE = "../../assets/plotly.min.js"
 PLOTLY_SRC_INDEX = "../assets/plotly.min.js"
 
+# The longest the static 3-D PNG render may take before the publish gives up on it and keeps the
+# previous image. A healthy kaleido render takes a few seconds; see export_optimisation_analysis.
+PNG_RENDER_TIMEOUT_S = 60
+
 # ============================================================================
 # 13-02.1 — THE MECHANISM RUNS, THE REFERENCE RUN AND THE 1-D FIT LAYERS.
 #
@@ -968,11 +972,38 @@ def export_optimisation_analysis(out_dir=DOCS_DIR, figures_dir=None):
     # the image cannot drift from the interactive version; the write-up shows it only when the
     # visitor's browser has no WebGL. A failed render is reported, never fatal: the page is
     # still correct for every visitor who has WebGL.
-    try:
-        figs["pooled_surface_3d"].write_image(figures_dir / "pooled_surface_3d.png",
-                                              width=1400, height=820)
-    except Exception as exc:  # kaleido missing or its headless browser failing to start
-        print(f"WARNING: static 3-D fallback not written ({exc!r})")
+    #
+    # TWO GUARDS (2026-11-13), because on 2026-11-12 this one call hung for over nine minutes in
+    # kaleido's headless Chrome, after every other figure had been written in under a minute:
+    # 1. SKIP WHEN UP TO DATE. The PNG renders the pooled six-window surface, which depends only
+    #    on scores_tidy.csv. If the PNG is newer than that file, the picture cannot have changed,
+    #    so an edit to the prose never pays for a browser start-up.
+    # 2. A HARD TIMEOUT. The render runs in a daemon thread given PNG_RENDER_TIMEOUT_S; if it has
+    #    not finished, the build moves on with the previous PNG and says so. A daemon thread does
+    #    not hold the process open at exit, so a stuck render can no longer stall the publish.
+    png_path = figures_dir / "pooled_surface_3d.png"
+    scores_path = OUT_DIR / "scores_tidy.csv"
+    if png_path.exists() and png_path.stat().st_mtime >= scores_path.stat().st_mtime:
+        print("static 3-D fallback up to date — not re-rendered")
+    else:
+        import threading
+        outcome = {}
+
+        def _render():
+            try:
+                figs["pooled_surface_3d"].write_image(png_path, width=1400, height=820)
+                outcome["ok"] = True
+            except Exception as exc:  # kaleido missing or its headless browser failing to start
+                outcome["error"] = exc
+
+        worker = threading.Thread(target=_render, daemon=True)
+        worker.start()
+        worker.join(PNG_RENDER_TIMEOUT_S)
+        if worker.is_alive():
+            print(f"WARNING: static 3-D fallback timed out after {PNG_RENDER_TIMEOUT_S}s — "
+                  "the previous PNG is kept")
+        elif "error" in outcome:
+            print(f"WARNING: static 3-D fallback not written ({outcome['error']!r})")
 
     build_report(
         figures=figs,

@@ -36,6 +36,7 @@ Run as a script:  ``python -m pipelines.build_report``
 """
 
 import datetime as _dt
+import html as html_lib
 import posixpath
 import re
 
@@ -202,6 +203,85 @@ def _split_sections(html, figure_at=FIGURE_AT, source_name=None):
 
 
 # ============================================================================
+# CONTENTS (2026-11-13)
+# ============================================================================
+
+def heading_slug(text, seen):
+    """GitHub's anchor for a heading: lower case, punctuation dropped, spaces to hyphens, and a
+    ``-1``, ``-2`` suffix on repeats.
+
+    The same rule GitHub applies when it renders the Markdown, so a ``#link`` written into a
+    write-up resolves both on GitHub and on the published page. ``seen`` is the running count per
+    slug for this page, shared across every heading so repeats are numbered in document order.
+    """
+    plain = re.sub(r"<[^>]+>", "", text)
+    plain = html_lib.unescape(plain).strip().lower()
+    # Keep letters, digits, underscores, hyphens and spaces; everything else (×, %, commas,
+    # apostrophes) is dropped, as GitHub does.
+    slug = re.sub(r"[^\w\- ]", "", plain).replace(" ", "-")
+    n = seen.get(slug, 0)
+    seen[slug] = n + 1
+    return slug if n == 0 else f"{slug}-{n}"
+
+
+CONTENTS_ID = "contents"
+BACK_LINK = f'<p class="back"><a href="#{CONTENTS_ID}">&uarr; Back to contents</a></p>'
+
+
+def add_contents(body):
+    """Give every h2 and h3 an anchor, put a linked Contents list at the top of the body, and add a
+    "Back to contents" link directly below each h2 and again at the end of its section.
+
+    Generated rather than written into the Markdown, so the list cannot drift from the headings: a
+    heading renamed in the write-up renames its contents entry on the next build. h3 headings are
+    listed nested under their h2 but carry no back links of their own, since they sit inside a
+    section that already has two.
+    """
+    seen = {CONTENTS_ID: 1}
+    entries = []
+
+    def _anchor(match):
+        level, inner = match.group(1), match.group(2)
+        slug = heading_slug(inner, seen)
+        entries.append((int(level), slug, re.sub(r"<[^>]+>", "", inner)))
+        tag = f'<h{level} id="{slug}">{inner}</h{level}>'
+        # The link sits under the h2 itself, so a reader who lands mid-page can get back up at
+        # once without scrolling to the section's end.
+        return tag + BACK_LINK if level == "2" else tag
+
+    body = re.sub(r"<h([23])>(.*?)</h\1>", _anchor, body, flags=re.S)
+
+    # The closing link for each section: before every h2 except the first, and at the very end.
+    # The preamble above the first h2 belongs to no section and gets none.
+    parts = re.split(r"(?=<h2 id=)", body)
+    if len(parts) > 1:
+        body = parts[0] + "".join(p + BACK_LINK for p in parts[1:])
+
+    if not entries:
+        return body
+    # The nested list: h2 entries at the top level, each followed by its h3 entries.
+    items, open_sub = [], False
+    for level, slug, text in entries:
+        link = f'<a href="#{slug}">{text}</a>'
+        if level == 2:
+            if open_sub:
+                items.append("</ul></li>")
+                open_sub = False
+            elif items:
+                items.append("</li>")
+            items.append(f"<li>{link}")
+        else:
+            if not open_sub:
+                items.append("<ul>")
+                open_sub = True
+            items.append(f"<li>{link}</li>")
+    items.append("</ul></li>" if open_sub else "</li>")
+    toc = (f'<nav class="toc"><h2 id="{CONTENTS_ID}">Contents</h2>\n<ul>'
+           + "".join(items) + "</ul></nav>\n")
+    return toc + body
+
+
+# ============================================================================
 # THE PAGE
 # ============================================================================
 
@@ -253,6 +333,18 @@ _CSS = """
   .math .where {{ display: block; font-family: inherit; font-size: .88rem; text-align: left;
                  color: {muted}; margin-top: .75rem; }}
   .meta {{ color: {muted}; font-size: .9rem; }}
+  /* The contents list: a quiet block under the title, not a second heading competing with it. */
+  nav.toc {{ margin: 0 0 2.5rem; }}
+  nav.toc h2 {{ border-top: none; margin-top: 0; padding-top: 0; }}
+  nav.toc ul {{ margin: .25rem 0; padding-left: 1.25rem; }}
+  nav.toc li {{ margin: .2rem 0; }}
+  nav.toc ul ul {{ font-size: .92rem; }}
+  /* Back-to-contents links: small and muted, so they help navigation without reading as prose. */
+  p.back {{ font-size: .82rem; margin: .25rem 0 1rem; }}
+  p.back a {{ color: {muted}; text-decoration: none; }}
+  p.back a:hover {{ text-decoration: underline; }}
+  /* Anchored headings stop clear of the top edge when jumped to. */
+  h2[id], h3[id] {{ scroll-margin-top: 1rem; }}
   header.page {{ max-width: 46rem; margin: 0 auto 2rem; }}
   footer {{ max-width: 46rem; margin: 4rem auto 0; color: {muted}; font-size: .85rem;
            border-top: 1px solid {grid}; padding-top: 1rem; }}
@@ -364,6 +456,11 @@ def build_report(figures=None, write_up=WRITE_UP, out_path=REPORT_PATH, figure_a
     # same dict to a write-up that has not asked for that block.
     for placeholder, extra in (extra_html or {}).items():
         body = body.replace(placeholder, extra)
+
+    # The contents list and the back-to-contents links. Done LAST, once the figures and generated
+    # tables are in place, so each section's closing link lands after its figures rather than
+    # between the prose and the evidence.
+    body = add_contents(body)
 
     built = _dt.date.today().isoformat()
     css = _CSS.format(page_bg=theme.PAGE_BG, ink=theme.INK, grid=theme.GRID,
