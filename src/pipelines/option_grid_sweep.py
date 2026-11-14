@@ -784,24 +784,27 @@ def fit_strike_layers(scores, trigger=LADDER_MONETISE_DRAWDOWN):
 # LIST of stems, published in order after that section.
 WINDOW_PANEL_STEMS = [f"panel_{i}" for i in range(len(scoring.INDICATIVE_WINDOWS))]
 FIGURE_AT = {
-    # Headings revised 2026-10-19 to formal action titles; each key is a phrase unique to one h2.
+    # Headings revised 2026-10-19 to formal action titles, and the outline restructured
+    # 2026-11-14 into six top-level sections nesting down to h6. Each key is a phrase unique to
+    # one heading at ANY level; the figure lands at the end of that heading's own sub-section.
     "blind roll of deep": "step1_blind",
-    "reverses the ordering of strikes": "step2_armed",
+    "significant hedging potential": "step2_armed",
     "rescues deep strikes from time decay": "step2b_compare",
-    "across multiple windows": WINDOW_PANEL_STEMS,
+    "three crisis and three calm windows": WINDOW_PANEL_STEMS,
     "reduces maximum drawdown": "grid_mdd",
-    "costs return in calm markets": "grid_ret",
+    "hedging costs become more pertinent": "grid_ret",
     "single ratio": "grid_wod",
     "common scale": "grid_score",
     "matters most in crises": "grid_heatmap",
-    "Observations at a fixed trigger": "fit_scatter",
+    "holding the drawdown trigger fixed": "fit_scatter",
     "global polynomial": "fit_poly",
     "regression spline": "fit_regspline",
     "penalised spline": "fit_pspline",
     "optimum differs between regimes": "window_surfaces",
     "Pooling across windows": "pooled_contour",
     "tradeable strike": "snap_slice",
-    "three dimensions": "pooled_surface_3d",
+    # "three dimensions" (pooled_surface_3d) dropped from the page 2026-11-14: it repeats the
+    # pooled contour. The figure file is still written beside the others.
     "share of portfolio value": "reference_gfc",
 }
 
@@ -949,9 +952,13 @@ def export_optimisation_analysis(out_dir=DOCS_DIR, figures_dir=None):
     # extension has not been run, so the page still builds from 13-02.1's sweep alone.
     import pipelines.option_grid_extension as ext
     figure_at = FIGURE_AT
+    values = None
     if (ext.EXT_DIR / "scores_random.csv").exists():
         figs.update(ext.build_extension_figures())
         figure_at = {**FIGURE_AT, **ext.FIGURE_AT}
+        # The numbers and tables the 2026 sections of the write-up quote, computed from the same
+        # runs the figures draw, so the commentary cannot fall behind the results (2026-11-13).
+        values = ext.page_values()
 
     # One standalone page per figure, so a chart can be opened by double-clicking a file with no
     # kernel and no report around it. The SAME figure objects are then handed to build_report, so
@@ -1020,6 +1027,10 @@ def export_optimisation_analysis(out_dir=DOCS_DIR, figures_dir=None):
                      "Priced with measured implied volatility, not a synthetic surface. "
                      f"IN-SAMPLE across {trials} trials on the windows the parameters were read "
                      "on — see the section on out-of-sample validation above."),
+        values=values,
+        # The outline nests six levels below the page title (2026-11-14), so sections are cut and
+        # listed at every level, with the six main sections as body h1s.
+        section_levels=(1, 2, 3, 4, 5, 6), contents_top=1, contents_depth=6,
     )
     print(f"\nwritten to {out_dir}:")
     for name in figs:

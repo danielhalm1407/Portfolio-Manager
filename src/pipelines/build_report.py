@@ -163,23 +163,30 @@ def rewrite_links(html, source_dir="research", page_dir="docs"):
     return re.sub(r'href="([^"]+)"', _fix, html)
 
 
-def _split_sections(html, figure_at=FIGURE_AT, source_name=None):
+def _split_sections(html, figure_at=FIGURE_AT, source_name=None, levels=(2,)):
     """Return the HTML with a placeholder inserted after each mapped section.
 
-    The document is cut at ``<h2>`` boundaries: a figure belongs AFTER the whole section that
+    The document is cut at heading boundaries: a figure belongs AFTER the whole section that
     discusses it, not immediately under its heading, so the reader has the argument before the
     evidence. Every key in ``figure_at`` must match exactly one heading — an unmatched key means the
     write-up was edited and this map was not, which raises rather than publishing silently.
+
+    ``levels`` are the heading levels a section is cut at. The default, h2 only, is every page's
+    behaviour before 2026-11-14. A page whose sections nest deeper (the moneyness page, h1 to h6)
+    passes all of its levels, so a figure lands at the end of its OWN sub-section, before the
+    next heading of any level, rather than at the end of the whole top-level section.
     """
-    # Cut before each <h2, keeping the delimiter with the section it opens.
-    parts = re.split(r"(?=<h2)", html)
+    tags = "|".join(f"h{n}" for n in levels)
+    # Cut before each heading at the chosen levels, keeping the delimiter with the section it opens.
+    parts = re.split(rf"(?=<(?:{tags})[ >])", html)
     matched = set()
     out = []
     for part in parts:
         out.append(part)
         # Only the heading line is searched for the key, so a "Finding 7" mentioned in body text
         # cannot pull the figure into the wrong section.
-        heading = part.split("</h2>", 1)[0] if part.startswith("<h2") else ""
+        opened = re.match(rf"<({tags})[ >]", part)
+        heading = part.split(f"</{opened.group(1)}>", 1)[0] if opened else ""
         for key, stem in figure_at.items():
             if key in heading:
                 # A key may map to ONE stem or to a LIST of them (13-02.1): the optimisation
@@ -198,7 +205,7 @@ def _split_sections(html, figure_at=FIGURE_AT, source_name=None):
         raise KeyError(
             f"headings not found in {source_name or WRITE_UP.name}: {sorted(missing)} — either "
             "the write-up was edited without updating its figure map, or the heading exists but "
-            "is not an h2 (sections are split at h2 only)")
+            f"is not at a split level (sections are split at h{', h'.join(map(str, levels))})")
     return "".join(out)
 
 
@@ -228,54 +235,63 @@ CONTENTS_ID = "contents"
 BACK_LINK = f'<p class="back"><a href="#{CONTENTS_ID}">&uarr; Back to contents</a></p>'
 
 
-def add_contents(body):
-    """Give every h2 and h3 an anchor, put a linked Contents list at the top of the body, and add a
-    "Back to contents" link directly below each h2 and again at the end of its section.
+def add_contents(body, top=2, depth=2):
+    """Give every heading from h``top`` down ``depth`` levels an anchor, put a linked, nested
+    Contents list at the top of the body, and add a "Back to contents" link directly below each
+    top-level heading and again at the end of its section.
 
     Generated rather than written into the Markdown, so the list cannot drift from the headings: a
-    heading renamed in the write-up renames its contents entry on the next build. h3 headings are
-    listed nested under their h2 but carry no back links of their own, since they sit inside a
-    section that already has two.
+    heading renamed in the write-up renames its contents entry on the next build. Headings below
+    the top level are listed nested under their parent but carry no back links of their own,
+    since they sit inside a section that already has two.
+
+    The defaults (h2 and h3) are every page's behaviour before 2026-11-14. The moneyness page
+    passes ``top=1, depth=6``, because its outline nests six levels below the page title and
+    HTML has no h7 (the page title itself is lifted out of the Markdown by ``build_report``).
     """
     seen = {CONTENTS_ID: 1}
     entries = []
+    levels = "".join(str(n) for n in range(top, min(top + depth, 7)))
 
     def _anchor(match):
         level, inner = match.group(1), match.group(2)
         slug = heading_slug(inner, seen)
         entries.append((int(level), slug, re.sub(r"<[^>]+>", "", inner)))
         tag = f'<h{level} id="{slug}">{inner}</h{level}>'
-        # The link sits under the h2 itself, so a reader who lands mid-page can get back up at
-        # once without scrolling to the section's end.
-        return tag + BACK_LINK if level == "2" else tag
+        # The link sits under the top-level heading itself, so a reader who lands mid-page can get
+        # back up at once without scrolling to the section's end.
+        return tag + BACK_LINK if int(level) == top else tag
 
-    body = re.sub(r"<h([23])>(.*?)</h\1>", _anchor, body, flags=re.S)
+    body = re.sub(rf"<h([{levels}])>(.*?)</h\1>", _anchor, body, flags=re.S)
 
-    # The closing link for each section: before every h2 except the first, and at the very end.
-    # The preamble above the first h2 belongs to no section and gets none.
-    parts = re.split(r"(?=<h2 id=)", body)
+    # The closing link for each section: before every top-level heading except the first, and at
+    # the very end. The preamble above the first one belongs to no section and gets none.
+    parts = re.split(rf"(?=<h{top} id=)", body)
     if len(parts) > 1:
         body = parts[0] + "".join(p + BACK_LINK for p in parts[1:])
 
     if not entries:
         return body
-    # The nested list: h2 entries at the top level, each followed by its h3 entries.
-    items, open_sub = [], False
+    # The nested list, built with a stack of open levels: a deeper heading opens a sub-list under
+    # the item before it, a shallower one closes lists back down to its own level.
+    items, stack = [], []
     for level, slug, text in entries:
         link = f'<a href="#{slug}">{text}</a>'
-        if level == 2:
-            if open_sub:
-                items.append("</ul></li>")
-                open_sub = False
-            elif items:
-                items.append("</li>")
-            items.append(f"<li>{link}")
+        if not stack:
+            stack.append(level)
+        elif level > stack[-1]:
+            items.append("<ul>")
+            stack.append(level)
         else:
-            if not open_sub:
-                items.append("<ul>")
-                open_sub = True
-            items.append(f"<li>{link}</li>")
-    items.append("</ul></li>" if open_sub else "</li>")
+            items.append("</li>")
+            while len(stack) > 1 and level < stack[-1]:
+                items.append("</ul></li>")
+                stack.pop()
+        items.append(f"<li>{link}")
+    items.append("</li>")
+    while len(stack) > 1:
+        items.append("</ul></li>")
+        stack.pop()
     toc = (f'<nav class="toc"><h2 id="{CONTENTS_ID}">Contents</h2>\n<ul>'
            + "".join(items) + "</ul></nav>\n")
     return toc + body
@@ -299,6 +315,14 @@ _CSS = """
   h2 {{ font-size: 1.35rem; margin: 3rem 0 .75rem; border-top: 1px solid {grid};
        padding-top: 1.5rem; }}
   h3 {{ font-size: 1.1rem; margin: 2rem 0 .5rem; }}
+  /* Deeper levels, for a page whose outline nests below h3 (the moneyness page, 2026-11-14).
+     A body h1 is a top-level section of such a page, not the page title, which sits in the
+     header outside <main>; it is ruled heavier than an h2 so the outline reads at a glance. */
+  main h1 {{ font-size: 1.6rem; margin: 4rem 0 1rem; border-top: 2px solid {grid};
+            padding-top: 1.75rem; }}
+  h4 {{ font-size: 1.02rem; margin: 1.75rem 0 .5rem; }}
+  h5 {{ font-size: .96rem; margin: 1.5rem 0 .5rem; color: {ink}; }}
+  h6 {{ font-size: .92rem; margin: 1.25rem 0 .5rem; font-style: italic; color: {ink}; }}
   a {{ color: {link}; }}
   code {{ background: rgba(255,255,255,.06); padding: .1em .35em; border-radius: 3px;
          font-size: .9em; }}
@@ -344,7 +368,7 @@ _CSS = """
   p.back a {{ color: {muted}; text-decoration: none; }}
   p.back a:hover {{ text-decoration: underline; }}
   /* Anchored headings stop clear of the top edge when jumped to. */
-  h2[id], h3[id] {{ scroll-margin-top: 1rem; }}
+  h1[id], h2[id], h3[id], h4[id], h5[id], h6[id] {{ scroll-margin-top: 1rem; }}
   header.page {{ max-width: 46rem; margin: 0 auto 2rem; }}
   footer {{ max-width: 46rem; margin: 4rem auto 0; color: {muted}; font-size: .85rem;
            border-top: 1px solid {grid}; padding-top: 1rem; }}
@@ -362,11 +386,25 @@ def _figure_divs(figures):
             for name, fig in figures.items()}
 
 
+def fill_values(text, values):
+    """Replace every ``{{name}}`` in ``text`` with ``values[name]``; raise on any left over.
+
+    Only the double-brace form is a token, so ordinary braces in prose or code are untouched.
+    """
+    for name, value in (values or {}).items():
+        text = text.replace("{{" + name + "}}", str(value))
+    left = sorted(set(re.findall(r"\{\{([A-Za-z0-9_]+)\}\}", text)))
+    if left:
+        raise ValueError(f"unresolved write-up values: {', '.join(left)}")
+    return text
+
+
 def build_report(figures=None, write_up=WRITE_UP, out_path=REPORT_PATH, figure_at=None,
                  plotly_src=PLOTLY_SRC, title=DEFAULT_TITLE, heading=DEFAULT_HEADING,
                  header_note=DEFAULT_HEADER_NOTE, footer_note=DEFAULT_FOOTER_NOTE,
                  source_href=None, extra_html=None, hub_href="../put-hedging/index.html",
-                 hub_label="Hedging an equity portfolio with put options"):
+                 hub_label="Hedging an equity portfolio with put options", values=None,
+                 section_levels=(2,), contents_top=2, contents_depth=2):
     """Render the write-up with its figures inline and write the report. Returns the path.
 
     SERVES TWO REPORTS (13-01 amendment, 2026-09-26). 10-01's option-overlay probe and 13-01's GFC
@@ -394,6 +432,15 @@ def build_report(figures=None, write_up=WRITE_UP, out_path=REPORT_PATH, figure_a
                      at the put-hedging research hub (docs/put-hedging/), not the site front door:
                      all three study pages belong to that piece, and that hub links up in turn.
     ``hub_label``    the text of that link — the name of the hub it leads to.
+    ``section_levels`` / ``contents_top`` / ``contents_depth``
+                     how deep the page's outline goes: the heading levels figures are placed
+                     against, and the levels the contents list covers. Defaults are h2 sections
+                     and an h2/h3 contents list; see ``_split_sections`` and ``add_contents``.
+    ``values``       ``{name: text}`` substituted for ``{{name}}`` tokens in the write-up BEFORE
+                     it is rendered, so a number or a whole Markdown table in the prose is filled
+                     from the run that produced it (2026-11-13: "whenever we change the results,
+                     our commentary should update"). A token left unresolved RAISES, naming it,
+                     because a page printing ``{{spy_return}}`` is a broken page.
 
     THE WRITE-UP'S OWN TITLE WINS (2026-11-10). If the write-up opens with a ``# `` line, that line
     becomes the page heading and ``<title>`` and is removed from the body, overriding ``title`` /
@@ -437,9 +484,11 @@ def build_report(figures=None, write_up=WRITE_UP, out_path=REPORT_PATH, figure_a
         heading = first[2:].strip()
         title = f"{heading} — Portfolio Manager"
         text = rest
+    text = fill_values(text, values)
     body = _split_sections(rewrite_links(render_markdown(text),
                                          source_dir=source_dir, page_dir=page_dir),
-                           figure_at=figure_at, source_name=write_up.name)
+                           figure_at=figure_at, source_name=write_up.name,
+                           levels=section_levels)
     # Wrap tables so the overflow rule above has something to scroll.
     body = body.replace("<table>", '<div class="table-wrap"><table>').replace("</table>", "</table></div>")
 
@@ -460,7 +509,7 @@ def build_report(figures=None, write_up=WRITE_UP, out_path=REPORT_PATH, figure_a
     # The contents list and the back-to-contents links. Done LAST, once the figures and generated
     # tables are in place, so each section's closing link lands after its figures rather than
     # between the prose and the evidence.
-    body = add_contents(body)
+    body = add_contents(body, top=contents_top, depth=contents_depth)
 
     built = _dt.date.today().isoformat()
     css = _CSS.format(page_bg=theme.PAGE_BG, ink=theme.INK, grid=theme.GRID,

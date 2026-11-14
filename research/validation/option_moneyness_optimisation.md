@@ -2,6 +2,14 @@
 
 *SPY, 5,201 daily bars, 2006-01-09 → 2026-09-18, priced with the ticker's own measured implied volatility. 63 parameter combinations, each simulated once over the full history and scored on six indicative windows, then extended to 91 combinations and twenty random windows. Every put is sized to the same premium budget. Script: [`option_moneyness_optimisation.py`](option_moneyness_optimisation.py).*
 
+# Introduction
+
+## Abstract
+
+This study optimises two parameters of a put hedge on SPY: how far out of the money the put is struck, and how far the market must fall below its peak before the put is sold to bank its gain. Every configuration spends the same premium budget, is simulated once over twenty years of measured implied volatility, and is scored on its return and maximum drawdown relative to SPY.
+
+The most robust choice is a **0.85× strike with an 8% drawdown trigger**. It performs consistently well across windows spanning crises, calm markets and mixed conditions, beating SPY in 19 of 20 randomly drawn windows, and its standing does not rest on any single exceptional outcome. A 20% trigger appears best on average only because of one crash, the aftermath of March 2020, and a 6% trigger is a close second to 8%. All results are in-sample, and an out-of-sample test is the next stage.
+
 ## Previous observations motivate this analysis
 
 A preceding analysis in [pricing the hedge](../../docs/probing/index.html) demonstrateted that the cost of protection is steeply convex and increasing with respect to the strike. For instance, an at-the-money put costs roughly 14% of notional a year, a 0.90× put about 3.4%, and a 0.80× put almost nothing. It also served to exhibit that a hedge leg can reach multiples of its initial value at one or more points along its path, yet still expire worthless.
@@ -46,7 +54,13 @@ I score every configuration on three drawdowns and three calm stretches:
 
 No window starts before 2006, because that is where measured implied volatility begins.
 
-## Deeper out-of-the-money puts carry more convexity and decay faster
+# Motivating different strike and monetisation configurations over a single window
+
+Before searching the full grid, this section examines how a handful of configurations behave through a single window, the 2007-09 crisis, in order to motivate the choices the grid then compares. It sets out why the strike axis extends deep out of the money, why a monetisation rule forms part of every configuration, and why every strike is given the same premium budget.
+
+## Motivation for the range of strikes
+
+### Deeper out-of-the-money puts carry more convexity and decay faster
 
 Before any grid, I examine the paths. Every path figure below shares three stacked panels on one time axis. The first shows **equity against SPY**, with every fill marked (▲ opened, ◆ rolled, ▼ monetised); hovering over a marker gives the legs traded, what they cost or returned, the number of contracts bought, and the rule's state, drawdown, value multiple and implied vol on that day. The second shows **the long leg's value as a multiple of the premium paid**. The third shows **implied vol and the reentry gate**, with a band wherever a strike sat unhedged.
 
@@ -58,7 +72,9 @@ The second panel is where moneyness shows, and two properties of deep out-of-the
 
 Whether a deep strike wins therefore depends on the *shape* and the *timing* of the fall: how deep, how fast, how far implied vol spikes, and where in the 63-day roll cycle it arrives.
 
-## A blind roll of deep out-of-the-money puts loses more than it protects
+## Motivation for monetisation
+
+### A blind roll of deep out-of-the-money puts loses more than it protects
 
 Below, I show four strikes, all sized to the same budget, held to expiry and re-struck every 63 days, starting without a position on the first day of the GFC window.
 
@@ -72,7 +88,7 @@ Below, I show four strikes, all sized to the same budget, held to expiry and re-
 
 Held blindly, the deep strikes are worse than holding no hedge at all. The middle panel shows why: the 0.80× position's value rises to many times its premium into each leg of the fall and then decays back towards zero before expiry, because nothing in the rule ever takes the gain. Twelve contracts' worth of premium is spent every quarter and largely given back to time decay.
 
-## Monetisation on a drawdown reverses the ordering of strikes
+### Monetisation exhibits the significant hedging potential of deeper out-of-the-money puts
 
 In the figure below, a single rule changes: the hedge is closed when SPY falls 10% below its running peak.
 
@@ -85,7 +101,7 @@ In the figure below, a single rule changes: the hedge is closed when SPY falls 1
 
 The ordering reverses completely. Taken at the moment the trigger fires, the deep strike's large multiple is realised rather than decayed, and on twelve contracts it becomes the best of the four hedges. Every strike now beats SPY on both return and drawdown.
 
-## Monetisation rescues deep strikes from time decay but does not help the near strike
+### Monetisation rescues deep strikes from time decay but has a marginal impact on the near strike
 
 Below, I compare the 0.85× and 0.95× strikes when rolled blindly with the same strikes when monetised on a 10% drawdown and re-entered once implied vol falls below 0.18.
 
@@ -96,7 +112,7 @@ Below, I compare the 0.85× and 0.95× strikes when rolled blindly with the same
 
 For the 0.85× strike, monetisation recovers more than twenty percentage points of return and cuts the drawdown by seventeen, despite the hedge sitting unhedged for months after each monetisation. For the 0.95× strike the effect is small and slightly adverse on drawdown: a near-the-money put holds its value through expiry, so cashing it early gains little, and the unhedged waits cost protection. The two decisions are therefore **not separable**. The value of the monetisation rule depends on the strike, so the surface below has a genuine interaction between its two axes, and reading either axis alone would mislead.
 
-## The drawdown trigger is restricted to hedges that have earned their premium
+### The drawdown trigger is restricted to hedges that have earned their premium
 
 The full-history runs revealed a defect in the original monetisation rule. The drawdown trigger compares SPY with its running peak, and that peak is carried across rolls. It can therefore fire at a point in the roll cycle where the *current* puts have gained nothing.
 
@@ -104,7 +120,23 @@ In the standing 0.80× programme, the put was struck at the October 2007 peak (s
 
 Every result on this page therefore applies a guard: **the drawdown trigger does not monetise a hedge worth less than its premium.** If the trigger fires while the multiple is below 1.0, the rule keeps the position and lets the ordinary roll replace it on schedule. At the 10% trigger used in the figures below, the guard raised the deep strikes' scores in every window (the 0.80× hedge went from 1.32 to 1.38 in the GFC and from 1.86 to 1.94 in COVID) and left the nearer strikes unchanged. Across the whole grid its effect is not uniformly positive: at the deepest triggers it lowered the calm-market scores (0.80× at 20%, from 1.00 to 0.81), because a hedge that is not allowed to sell at a loss is held, and decays, for longer.
 
-## Performance of the hedge strategy across multiple windows
+## Motivation for a uniform premium budget
+
+### An equal premium budget allows deep out-of-the-money puts to exhibit strong crisis performance
+
+The first version of this study bought one put per unit of SPY at every strike, and found that the configurations that performed best in crises were systematically among the worst in calm markets. To test this, I ranked every configuration twice, once by its performance across the three crisis windows and once across the three calm windows, and asked whether a configuration's position in one ranking says anything about its position in the other. Under one-put-per-unit sizing it did, in the opposite direction. The higher a configuration ranked in crises, the lower it tended to rank in calm markets, and no configuration appeared in the top ten of both. The hedges that protected most were simply the ones that spent most, and they paid for that spending in every quiet year.
+
+Under an equal premium budget the two rankings are close to unrelated. A high crisis rank no longer predicts a low calm rank, and two configurations now appear in the top ten of both. Once every strike spends the same money, deep strikes stop being token hedges, and their crisis performance comes from the convexity of the options rather than from a larger spend. The change of metric described later, from a floored Calmar ratio to the relative score, does not produce this on its own. Under one-put-per-unit sizing, the two rankings still pull in opposite directions with the new metric, and the at-the-money put still ranks best in crises. **The sizing is what changes the answer.**
+
+That is not to say deep strikes are free in calm markets: as the return grid in the key takeaways below shows, they bleed more to time decay. The point is narrower. A deep strike's crisis performance now justifies its cost often enough that it is no longer pushed to the bottom of the calm ranking.
+
+I rank configurations within each regime set, using the relative score defined under the approach to optimisation below, and sort by the *worse* of the two ranks, because averaging would let a configuration that tops one set and bottoms the other look like a compromise. By that measure the best is **0.85× with an 8% trigger**, 8th in the crisis set and 2nd in the calm set, followed by 0.80× at 8% (9th and 6th). The single best crisis configuration, 0.80× at 20%, is 54th of 63 in calm markets. The blind rolls of the three deepest strikes are the three worst configurations of all 63 in both sets.
+
+# Performance across multiple windows
+
+Having motivated the configurations, this section examines how they perform across several market environments, first over the six indicative windows and then in the 2026 drawdown that followed the Iran war.
+
+## Foundational analysis over three crisis and three calm windows
 
 Below, I show the same four strikes at the 10% trigger in every indicative window, sliced from the full-history standing programme, so that each window opens with a hedge already in place, as it would for a real holder. The first table gives SPY's own return and maximum drawdown for comparison; the second gives each strike's score.
 
@@ -135,57 +167,93 @@ I read the panels against the hypothesis that a sharp, vol-spiking crash favours
 
 The hypothesis therefore holds in its strong form only for the sharp crash. With the trigger armed, the deep strike's convexity is also realised at each leg of a slow decline, so deep strikes win more often than the hypothesis predicts, provided each leg is deep enough to give them intrinsic value before they decay.
 
-## In the 2026 drawdown that followed the Iran war, only the tech hedge reached its trigger
+## Deconstruction of approaches to protection in the 2026 Iran war market environment
 
-The six indicative windows all lie in the past. To see how the strategy behaves in the current market environment, I run the same rule over 2026 to date, from 2 January to 18 September, the last day of available data. This window contains the sell-off that followed the outbreak of the Iran war in February. SPY fell 9.1% from its peak on 27 January to a trough on 30 March and had recovered that peak by 15 April. QQQ, standing in for a technology-weighted portfolio, fell further over the same dates, by 11.8%.
+This part examines the current market environment in more detail. It sets the put hedge against the timing of its legs, compares two monetisation triggers, and sets the hedge against an energy diversifier funded by the same budget.
 
-Unlike the indicative windows, these runs start without a position on the first day of the window, so the hedge is opened in January as a new holder would open it. Three strikes are shown, 0.95×, 0.80× and 0.70×, each sized to the same premium budget and monetised on a 10% drawdown. The figures below show SPY first, then QQQ.
+### In the 2026 drawdown that followed the Iran war, only the tech hedge reached its trigger
 
-| underlying | strategy | return | max drawdown |
-|---|---|---|---|
-| SPY | unhedged | +11.5% | 9.1% |
-| SPY | 0.95× | +6.2% | 7.6% |
-| SPY | 0.80× | +6.2% | 12.5% |
-| SPY | 0.70× | +6.2% | 12.4% |
-| QQQ | unhedged | +17.7% | 11.8% |
-| QQQ | 0.95× | +18.9% | 11.1% |
-| QQQ | 0.80× | +11.3% | 12.6% |
-| QQQ | 0.70× | +8.4% | 12.6% |
+The six indicative windows all lie in the past. To see how the strategy behaves in the current market environment, I run the same rule over 2026 to date, from 2 January to {{window_end}}, the last day of available data. This window contains the sell-off around the outbreak of the Iran war on 28 February. SPY fell {{spy_fall}} from its peak on {{spy_peak}} to a trough on {{spy_trough}} and had recovered that peak by {{spy_recovered}}. QQQ, standing in for a technology-weighted portfolio, fell further over the same period, by {{qqq_fall}}.
 
-For SPY, the fall stopped short of the 10% trigger, so no hedge was monetised. Every put was held to expiry and rolled, none finished in the money, and each strike therefore lost the same budget, about 5.3% of the starting value, which is why the three returns are identical. Only the 0.95× strike, close enough to the money to gain value as SPY fell, reduced the drawdown. The deeper strikes deepened it, because their premium decayed through the fall with no offsetting gain.
+Unlike the indicative windows, these runs start without a position on the first day of the window, so the hedge is opened in January as a new holder would open it. Four strikes are shown, 0.95×, 0.90×, 0.80× and 0.70×, each sized to the same premium budget and monetised on a {{trigger}} drawdown. The figures below show SPY first, then QQQ. The vertical lines mark key events of the conflict, grouped into war and diplomacy, energy infrastructure, shipping and freight, and fuel prices. Each group can be shown or hidden from the legend, and hovering over an event's marker gives its detail and date.
 
-For QQQ, the deeper fall reached the trigger. The 0.95× hedge was monetised on 27 March, one trading day before the trough, at 2.1 times its premium, and the proceeds carried it ahead of QQQ on both return and drawdown. The deeper strikes were still too far from the money to have gained much, and the 0.80× hedge did not monetise until a smaller fall in July, at 1.24 times its premium. In a drawdown of around 10%, the strike that pays is the one near the money, which reverses the ranking the deep crises favour.
+{{y2026_table}}
 
-This is a single, moderate drawdown, and it illustrates how closely the strategy depends on the depth of the fall relative to the trigger: a fall of 9% and one of 12% produced opposite outcomes for an otherwise identical hedge.
+For SPY, the fall of {{spy_fall}} stopped short of the {{trigger}} trigger, so no hedge was monetised. Every put was held to expiry and rolled, none finished in the money, and each strike therefore spent the same budget, {{spy_premium_pct}} of the starting value, which is why the four returns are identical. As measured, only the 0.95× strike, close enough to the money to gain value as SPY fell, reduced the drawdown, and the deeper strikes deepened it. Part of that deepening comes from three days of implied volatility data that appear to be in error, as explained in the following section, and the final column measures the drawdown without them. On that basis the 0.90× strike also reduced the drawdown, and the deeper strikes deepened it only slightly, because their premium decayed through the fall with no offsetting gain.
 
-## An energy diversifier funded by the same budget matched or beat the put hedge in 2026
+For QQQ, the deeper fall reached the trigger. The 0.95× hedge {{qqq_095_mon}}, one trading day before the trough, and the proceeds carried it ahead of QQQ on both return and drawdown. The 0.90× hedge {{qqq_090_mon}}, which trimmed the drawdown but did not recover the cost of the protection. The 0.80× hedge {{qqq_080_mon}}, after a smaller fall, and the 0.70× hedge {{qqq_070_mon}}. In a drawdown of around 10%, the strike that pays is the one near the money, which reverses the ranking the deep crises favour.
 
-A put hedge is one way to spend a risk budget. Another is to hold an asset that tends to rise when the portfolio falls. Below, I compare the two over the same 2026 window. Each time the 0.95× put programme opens a hedge, the diversified portfolio instead spends exactly the same premium on XLE, the S&P 500 energy sector ETF, and holds it to the end of the window. The cash leaving the portfolio is identical on every date, so the only difference is what that cash buys. The deeper strikes are available in each figure's legend.
+This is a single, moderate drawdown, and it illustrates how closely the strategy depends on the depth of the fall relative to the trigger, as falls of {{spy_fall}} and {{qqq_fall}} produced opposite outcomes for an otherwise identical hedge.
 
-| underlying | strategy | return | max drawdown |
-|---|---|---|---|
-| SPY | unhedged | +11.5% | 9.1% |
-| SPY | 0.95× put hedge | +6.2% | 7.6% |
-| SPY | energy diversifier | +12.4% | 8.8% |
-| QQQ | unhedged | +17.7% | 11.8% |
-| QQQ | 0.95× put hedge | +18.9% | 11.1% |
-| QQQ | energy diversifier | +18.5% | 11.3% |
+### The deep puts lost their value because the trough came with little time left on the leg
 
-XLE rose 37% between the start of the year and the SPY trough on 30 March, and finished the window 43% higher. For SPY, where no put was monetised, the diversifier added almost a percentage point of return over holding SPY alone and trimmed its drawdown slightly, whereas the put hedge gave up more than five points of return. The put still reduced the drawdown further, to 7.6% against 8.8%. For QQQ, where the put was monetised close to the trough, the two approaches finished within half a point of each other on return and within a quarter of a point on drawdown.
+The deeper strikes decayed to almost nothing through a fall that should have raised their value, since both a falling SPY and a rise in implied volatility increase the price of a put. To identify what offset them, I split the value of each January put into the four inputs its price depends on: the level of SPY, the level of implied volatility, the time left to expiry, and the skew slide. The skew slide is the fall in a strike's own implied volatility as the market moves towards it, because a strike that is less far out of the money sits lower on the volatility smirk. Each contribution is a Shapley value, the average effect of moving that input from its opening level to its current level across every order in which the four inputs could be moved, so the four contributions always sum to the change in the put's value.
 
-Two qualifications apply. First, the effect is small in absolute terms because the budget is small: only about 5% of the portfolio is ever moved into energy, so the diversifier cannot offset a large fall on its own. Second, the result depends on the nature of the shock. A conflict that drives energy prices higher is the case in which an energy position is most likely to rise as equities fall, and the same position may offer little protection in a crash with a different cause. The comparison therefore needs the full set of windows before it can support a conclusion, and a refiners ETF is the intended diversifier for that test.
+Each leg was bought on {{att_opened}} and expired on {{att_expiry}}. The trough on {{spy_trough}} came {{att_bars_left}} trading days before expiry, by which point implied volatility had risen from {{att_iv_open}} to {{att_iv_trough}}. The table below gives each leg's value at the trough as a multiple of its premium, the contribution of each input in the same units, and the value the same leg would have had at the same spot and volatility with its full 63 trading days still to run. The figure that follows traces the same decomposition through the life of each leg.
 
-## Every strike reduces maximum drawdown relative to SPY in crises
+{{attribution_table}}
 
-The score is built from two ingredients, and I first examine each on its own. Every grid below shows strike against window at the 10% trigger, with SPY as its own row and the 5%-a-year portfolio-budget hedge (see the final analysis section) beneath it. Colour is normalised within each column, so it ranks configurations inside a window; the printed number is the raw value.
+For the 0.80× put, the fall in SPY contributed {{att_080_spot}} times the premium and the rise in implied volatility {{att_080_vol}}, while time contributed {{att_080_time}}. The time contribution is not a steady decay. A deep out-of-the-money put is worth only its time value, and the gains from a fall and a volatility spike exist only while there is time left for SPY to reach the strike. With {{att_bars_left}} trading days remaining those gains largely disappear, and the decomposition attributes their loss to time. Had the trough arrived with the full tenor left, the 0.80× put would have been worth {{att_080_full}} times its premium and the 0.70× put {{att_070_full}} times, against {{att_095_full}} times for the 0.95× put. The result in 2026 therefore depends to a significant degree on when the fall occurred relative to the roll calendar, rather than on the pricing of deep strikes. A longer tenor, or a roll made with several weeks still to run, would reduce this exposure, and both are candidates for the out-of-sample stage.
+
+A further observation concerns the data. IBKR's implied volatility for SPY prints 0.26 on 9 and 10 February, while the VIX closed at 17.4 and 17.8 on those days, and 0.24 on 17 August against a VIX of 15.2. On other days in 2026 the IBKR series runs about three points below the VIX, so these three prints are around twelve points out of line and are most likely errors in the data rather than market moves. They briefly inflate the value of every put, and 9 February becomes the running peak of each hedged portfolio, so the drawdown measured afterwards starts from an inflated level. Excluding the three days, the drawdown of the 0.80× programme is {{spy_080_dd_excl}} rather than {{spy_080_dd_all}}, and that of the 0.95× programme {{spy_095_dd_excl}} rather than {{spy_095_dd_all}}. The prints are marked on the figures as a data note and are not removed, so every other result on this page includes them.
+
+### An 8% trigger would have monetised the SPY hedge in 2026
+
+The six-window analysis below carries forward an 8% trigger rather than the 10% used to illustrate the mechanism, as it is the best trigger in calm markets and among the best in crises. Below, I compare the two triggers over 2026 on the 0.95× and 0.90× strikes. Each strike keeps its colour, and the 8% trigger is drawn dashed.
+
+{{trigger_table}}
+
+For SPY, the 8% trigger fired where the 10% trigger did not. The 0.95× hedge was sold on {{spy_095_t08_fired}} its premium and returned {{spy_095_t08_ret}}, against {{spy_095_t10_ret}} under the 10% trigger, with a similar drawdown. The 0.90× hedge improved from {{spy_090_t10_ret}} to {{spy_090_t08_ret}}. For QQQ, the 8% trigger sold the 0.95× hedge earlier in the fall, on {{qqq_095_t08_fired}} its premium, than the 10% trigger, on {{qqq_095_t10_fired}}, and its return fell from {{qqq_095_t10_ret}} to {{qqq_095_t08_ret}}. The 0.90× hedge was sold on the same day under both triggers and finished with the same result.
+
+A shallower trigger gives up part of each monetisation in exchange for a higher chance of firing at all. In 2026 that exchange favoured the 8% trigger on SPY, where the fall stopped just short of 10%, and the 10% trigger on QQQ, where the fall was deep enough for both to fire. Across the persisted grids, the 8% trigger outscored the 10% trigger in {{t_beats_ind}} of {{t_cells_ind}} combinations of indicative window and strike, and in {{t_beats_rnd}} of {{t_cells_rnd}} over the twenty random windows. The 2026 window adds one case on each side of that preference, and the out-of-sample stage will test it on windows the trigger was not chosen from.
+
+### An energy diversifier funded by the same budget matched or beat the put hedge in 2026
+
+A put hedge is one way to spend a risk budget. Another is to hold an asset that tends to rise when the portfolio falls. Below, I compare the two over the same 2026 window. Each time the 0.95× put programme opens a hedge, the diversified portfolio instead spends exactly the same premium on XLE, the S&P 500 energy sector ETF, and holds it to the end of the window. The cash leaving the portfolio is identical on every date, so the only difference is what that cash buys. Triangles on the diversifier's line mark each purchase of XLE, and the deeper strikes are available in each figure's legend.
+
+{{energy_table}}
+
+XLE rose {{xle_to_trough}} between the start of the year and the SPY trough on {{spy_trough}}, and finished the window {{xle_window}} higher. For SPY, where no put was monetised, the diversifier returned {{spy_div_ret}} against {{spy_ret}} for SPY alone and trimmed its drawdown to {{spy_div_dd}}, whereas the put hedge returned {{spy_095_t10_ret}} with a drawdown of {{spy_095_t10_dd}}. For QQQ, where the put was monetised close to the trough, the put hedge returned {{qqq_095_t10_ret}} with a drawdown of {{qqq_095_t10_dd}}, and the diversifier {{qqq_div_ret}} with {{qqq_div_dd}}.
+
+Two qualifications apply. First, the effect is small in absolute terms because the budget is small. The trade blotter below records each purchase of XLE, the premium it replaces as a share of the index's price, and the weight of XLE in the portfolio after the purchase. A single 0.95× put costs between {{premium_pct_lo}} and {{premium_pct_hi}} of the index's price, so the same cash buys a position in XLE of a similar size. At the SPY trough on {{spy_trough}}, XLE made up {{xle_weight_at_trough}} of the portfolio, and its weight never exceeded {{xle_weight_max}}. That is too little for a rise of {{xle_peak_to_trough}} in XLE, from SPY's peak to its trough, to offset a fall of {{spy_fall}} in the index.
+
+{{blotter_table}}
+
+A deliberate allocation shows what the diversifier can do at a meaningful size. A portfolio of {{mix_core}} SPY and {{mix_weight}} XLE, bought on 2 January and held, returned {{spy_mix_ret}} with a maximum drawdown of {{spy_mix_dd}}, against {{spy_ret}} and {{spy_dd}} for SPY alone. The equivalent QQQ portfolio returned {{qqq_mix_ret}} with a drawdown of {{qqq_mix_dd}}. A diversifier can justify a larger weight than a hedge because it is not a pure cost, as it can earn a return of its own when markets are calm. Second, the result depends on the nature of the shock. A conflict that drives energy prices higher is the case in which an energy position is most likely to rise as equities fall, and the same position may offer little protection in a crash with a different cause. The comparison therefore needs the full set of windows before it can support a conclusion, and a refiners ETF is the intended diversifier for that test.
+
+### A fixed allocation to energy reduced drawdown only where energy drove the fall
+
+The 2026 window is an oil shock, the one kind of fall in which an energy position is most likely to rise. To test whether the result carries over to other conditions, I hold the same {{mix_core}} SPY and {{mix_weight}} XLE portfolio over each of the six indicative windows, bought on the first day of each window and held to its end. Below, I compare its maximum drawdown and return with SPY and XLE held alone, with 2026 shown last for reference.
+
+{{mix_windows_table}}
+
+The allocation reduced drawdown in the 2022 rates sell-off and in 2026, the two windows in which energy itself drove the market. In the GFC, XLE fell alongside the index and the allocation changed the drawdown very little, and in the COVID crash XLE fell further than the index, so the allocation deepened the drawdown. In the three calm windows it cost return, as energy lagged a rising index. An energy allocation therefore offers protection against a particular kind of shock rather than against drawdowns in general, and the two crashes the put hedge is designed for are the two in which it offered least.
+
+# Key takeaways from performance across windows
+
+Across the six indicative windows, the performance of the hedge separates into two patterns, one for crises and one for calm markets.
+
+## In crises, every strike reduces maximum drawdown relative to SPY
+
+The optimisation metric introduced in the following section is built from two ingredients, return and maximum drawdown, and I first examine each on its own. Every grid below shows strike against window at the 10% trigger, with SPY as its own row and the 5%-a-year portfolio-budget hedge (see the section on alternative strategies) beneath it. Colour is normalised within each column, so it ranks configurations inside a window; the printed number is the raw value.
 
 The grid below shows maximum drawdown, where lower is better. Through all three crises, every strike improved on SPY: the GFC's 56.5% came down to 47-50%, COVID's 34.1% to 21-32%, and the rate shock's 25.4% to 13-20%, with the deep strikes cutting most in the last two. In calm windows there is little to cut: 2013-2015 matched SPY's 7.7%, 2017 came out marginally deeper than SPY's 3.0% for the nearer strikes, and 2023-2024's 10.3% fell to around 8%.
 
-## Hedging costs return in calm markets, and deeper strikes cost more
+## In calm markets, hedging costs become more pertinent, and deeper strikes cost more
 
 The grid below shows total return, where higher is better. In crises every hedge lost less than SPY. In calm windows every hedge earned less, and the deeper the strike, the more it gave up: through 2023-2024 the 0.80× hedge returned 27.5% and the 0.95× hedge 39.9%, against SPY's 53.9%. Equal spend does not mean equal bleed. The deep strike buys twelve times as many contracts, and in a quiet market all of them decay to nothing, which is the time-decay property in the calm-market setting.
 
-## Combining return and drawdown into a single ratio
+# Approach to optimisation
+
+The windows above show how each configuration performs, but not which configuration is best. Answering that requires a single metric that ranks configurations consistently across windows, and a procedure that finds the parameters which maximise it.
+
+## Choosing an appropriate optimisation metric
+
+### Adjusting the metric for comparability
+
+A useful metric must reward return and penalise drawdown together, and must remain comparable across windows whose returns and drawdowns differ by an order of magnitude.
+
+#### Combining return and drawdown into a single ratio
 
 The grid below combines the two as (1 + R) / MDD: the growth of a unit of wealth per unit of drawdown suffered.
 
@@ -196,7 +264,7 @@ The grid below combines the two as (1 + R) / MDD: the growth of a unit of wealth
 
 Unlike a plain Calmar ratio, this cannot invert. 1 + R is a wealth multiple, positive for any loss short of total ruin, so a deeper drawdown can only lower it. It is still not comparable *across* windows: 2017's small drawdowns put every configuration near 35, and the GFC's near 1.2. It therefore ranks configurations within a column but cannot be pooled.
 
-## The relative score measures performance against SPY on a common scale
+#### The relative score measures performance against SPY on a common scale
 
 Dividing through by SPY's own value on the same window gives the optimisation metric:
 
@@ -209,23 +277,13 @@ A score above 1.0 means the configuration ended richer than SPY, fell less, or b
 
 **This replaces the floored Calmar ratio used in the first version of this study**, which had a material defect. When the window return is negative, dividing by a *larger* drawdown moves the ratio *towards* zero, so a deeper drawdown scored better. On the GFC, a 0.80× hedge that lost 54.0% with a 59.5% drawdown outranked a 0.95× hedge that lost 42.4% with a 44.5% drawdown. All three crisis windows have negative returns, so every crisis ranking inherited the inversion. The floored Calmar is still computed on every row for comparison; nothing ranks on it. The drawdown floor never binds: every window here, calm ones included, has a drawdown of at least 3%.
 
-## Crisis and calm rankings no longer conflict under an equal premium budget
+## Choosing an appropriate mechanism to optimise the metric
 
-The first version of this study found an actively *negative* trade-off between regimes. The table below separates the two changes made since.
+With the metric fixed, the optimal parameters can be read in two ways: as the best cell of the discrete grid of simulated configurations, or as the maximum of a smooth curve or surface fitted through the grid, which allows the optimum to fall between grid points.
 
-| | one put per unit, floored Calmar | one put per unit, relative score | equal budget, relative score |
-|---|---|---|---|
-| Rank correlation, crisis set vs calm set | −0.64 | −0.43 | **+0.09** |
-| Configurations in the top ten of both | 0 | 0 | **2** |
-| Best crisis configuration | 1.00× | 1.00× blind | 0.80× / 20% |
+### Optimal parameters from a discrete grid of choices
 
-The new metric alone leaves the trade-off negative and still favours the at-the-money put. **The sizing is what changes the answer.** Once every strike spends the same money, deep strikes stop being token hedges, and the configurations that perform well in crises are no longer systematically the ones that perform worst in calm markets.
-
-That is not to say deep strikes are free in calm markets: as the return grid shows, they bleed more to time decay. The point is narrower. A deep strike's crisis performance now justifies its cost often enough that it is no longer pushed to the bottom of the calm ranking.
-
-I rank configurations within each regime set and sort by the *worse* of the two ranks, because averaging would let a configuration that tops one set and bottoms the other look like a compromise. By that measure the best is **0.85× with an 8% trigger**, 8th in the crisis set and 2nd in the calm set, followed by 0.80× at 8% (9th and 6th). The single best crisis configuration, 0.80× at 20%, is 54th of 63 in calm markets. The blind rolls of the three deepest strikes are the three worst configurations of all 63 in both sets.
-
-## Parameter choice matters most in crises
+#### Parameter choice matters most in crises
 
 The spread of scores *within* each window shows where the parameter choice has most effect:
 
@@ -242,7 +300,7 @@ This reverses the first version of the study, where the GFC spread was 0.088 and
 
 The figure below shows the full design: strike across, trigger down, colour the score averaged over all six windows. Nothing here is smoothed.
 
-## The drawdown trigger is chosen for robustness rather than for its in-sample optimum
+#### The drawdown trigger must be chosen for robustness rather than for its in-sample optimum
 
 The trigger axis is not smooth. Averaged over all six windows, the score rises and falls as the trigger moves in steps of 2-4%:
 
@@ -259,13 +317,21 @@ The 20% trigger has the highest in-sample average, but almost entirely because i
 
 A defensible choice is therefore not the argmax. **An 8% trigger** is close to the best on average, is the best of all in calm markets, sits among the top ten in both regime sets, and fires more often, so each monetisation depends less on the timing of a single fall. That is the trigger this analysis would carry forward, subject to the out-of-sample test.
 
-## Observations at a fixed trigger, before any fitting
+### Optimal parameters over a continuous range of choices
+
+#### Evaluating fitting procedures to find the optimal choice of a single parameter
+
+##### Overview of performance across strikes, holding the drawdown trigger fixed
 
 The grid gives 54 points per window, and a smooth curve fitted through them allows the optimum to be read between grid points as well as on them. Before any surface, I apply the same idea in one dimension. Below, I fix the trigger at 10% and plot the score against the strike, with **one point per strike per window**, so that six observations stand above each of the nine strikes. Filled markers are crisis windows, open markers calm ones, and the dashed line is SPY.
 
 Two features are visible before any fitting. The spread *between* windows at a given strike is far larger than the change *along* the strike axis. And within most windows the points fall, or stay flat, as the strike moves towards the money: averaged over windows, the score falls from 1.40 at 0.80× to 1.08 at 1.00×.
 
-## A global polynomial cannot bend locally
+##### Comparison of fitting procedures
+
+Below, I compare three ways of fitting a smooth curve through these observations, in increasing order of flexibility.
+
+###### A global polynomial cannot bend locally
 
 The simplest smooth fits one polynomial to the whole axis by least squares:
 
@@ -276,7 +342,7 @@ f(m) = β<sub>0</sub> + β<sub>1</sub> m + β<sub>2</sub> m<sup>2</sup> &nbsp;&n
 
 Its weakness is that it is *global*: one set of coefficients must fit both ends at once, so a bend at the deep out-of-the-money end drags the fit at the at-the-money end with it. Here the data barely curve, so the quadratic is close to a straight line (in-sample R² 0.109, peak at 0.80×).
 
-## A regression spline bends locally but its knots are arbitrary
+###### A regression spline bends locally but its knots are arbitrary
 
 A spline divides the axis at **knots** and fits a separate cubic on each piece, joined so that the curve, its slope and its curvature are all continuous at every knot. In B-spline form:
 
@@ -287,7 +353,7 @@ f(m) = Σ<sub>j=1</sub><sup>K+4</sup> α<sub>j</sub> B<sub>j</sub>(m) &nbsp;&nbs
 
 Each piece bends independently, which resolves the polynomial's weakness but introduces another: nothing in the data determines how many knots to use or where to place them. Too few, and the curve cannot bend where it needs to; too many, and it follows every point. With three hand-placed knots it fits no better than the quadratic here (R² 0.110) and uses seven coefficients to do so.
 
-## A penalised spline lets the data choose its smoothness
+###### A penalised spline lets the data choose its smoothness
 
 The fit actually used is a **P-spline** (Eilers and Marx): many knots on an evenly spaced grid, and a penalty on how sharply neighbouring coefficients change, so that the *penalty*, rather than the knot count, controls how much the curve can bend.
 
@@ -309,7 +375,9 @@ This differs from a classical **smoothing spline**, which places a knot at *ever
 
 **Here GCV selects the straight line**: λ at the top of its range, edf 2.0, R² 0.109. The data do not support any bend. Within this axis the score simply falls as the strike approaches the money, so the one-dimensional optimum is the deep edge, 0.80×. More observations, rather than a more flexible curve, are what this fit needs, which is the subject of the section on random windows below.
 
-## Extending the fit to both parameters with a tensor-product surface
+#### Extending the fitting procedure to find the optimal choice of multiple parameters
+
+##### Extending the fit to both parameters with a tensor-product surface
 
 The same construction extends to both axes at once. The basis is the product of a moneyness basis and a trigger basis, with one penalty along each axis:
 
@@ -326,7 +394,13 @@ Two cautions apply to reading these surfaces, both measured rather than assumed.
 
 **Effective degrees of freedom do not measure sharpness here.** For the same reason, edf reports how easily the basis represents the surface rather than how sharply it is peaked. On a controlled test a broad bowl scored 31.3 effective degrees of freedom and a narrow spike 21.9, the wrong way round. Curvature at the optimum separates the two cleanly (−8 against −3,232) and is the quantity quoted.
 
-## The fitted optimum differs between regimes
+# Evaluation of optimal parameter choices
+
+This section assesses what the fitted optima imply, first taking the optimisation at face value and then adjusting it for robustness across market environments.
+
+## Assessment of pure optimisation
+
+### The fitted optimum differs between regimes
 
 | window | kind | fitted optimum: strike / trigger | best simulated cell | curvature |
 |---|---|---|---|---|
@@ -339,41 +413,52 @@ Two cautions apply to reading these surfaces, both measured rather than assumed.
 
 The fitted *strike* now agrees across regimes much more than it did, sitting between 0.80× and 0.84× in five of six windows. The *trigger* still divides by regime: crises prefer a deep trigger (12-20%), which lets the hedge run well into the fall, while calm windows prefer a shallow one (6-8%), which realises small gains before they decay. Where the fit and the best simulated cell disagree by more than one grid step, as in 2017 and in the GFC trigger, the fit is not trustworthy and the grid cell should be read instead.
 
-## Pooling across windows places the optimum at the edge of the design
+### Pooling across windows places the optimum at the edge of the design
 
 Fitting one surface to all 378 observations directly is dominated by which window each row came from, since crisis scores run around 2 and calm ones around 1. Removing each window's mean first leaves the parameter effect common to all regimes, measured as a deviation from each window's own average. With the guard in place, that fit is essentially a tilted plane (edf 4.0, R² 0.07): it rises towards deeper strikes and deeper triggers, and its optimum is the **corner of the design, 0.80× with a 20% trigger**.
 
 The height of that surface is a deviation from a window mean, **not** a score. The optimum is an in-sample optimum, and a corner optimum is a warning rather than an answer: within this design the surface is still rising where the axes stop, so "0.80×" partly means "the axis stopped there".
 
-## Snapping the optimum to a tradeable strike
+### Snapping the optimum to a tradeable strike
 
 A fitted optimum is a real number, and no exchange lists most of them. At a spot of 761.69 the nearest listed strike to 0.800 of spot is **609**, a moneyness of 0.7995, and the fitted score difference is zero to five decimal places.
 
 That result is weaker than it appears. The optimum sits on the boundary, where the fitted surface is clipped at its edge, so a near-zero snapping cost says nothing about how sharp the surface is. It is reported because the question matters again once the moneyness axis is extended below 0.80, as the section on random windows below does.
 
-## The pooled surface in three dimensions
 
-Below, I show the same window-demeaned pooled surface as a rotatable 3-D object, with the continuous optimum and the nearest listed strike marked. Rotating it requires WebGL in the browser. Where WebGL is unavailable, as in an editor's built-in preview or a browser with graphics acceleration disabled, a static rendering of the same figure is shown instead.
+## Accommodating the optimisation for robustness across environments
 
-<img id="surface-3d-fallback" src="figures/pooled_surface_3d.png" alt="Pooled window-demeaned surface, static rendering" style="display:none; width:100%; margin:1.5rem 0;">
-<script>
-  // Show the static PNG only when this browser cannot create a WebGL context, i.e. exactly when
-  // the interactive 3-D figure below would render as a blank "WebGL is not supported" panel.
-  // The interactive figure itself is then hidden, since all it would show is Plotly's grey
-  // "WebGL is not supported" panel; it sits later in the page, hence the wait for the DOM.
-  (function () {
-    var c = document.createElement("canvas");
-    var gl = c.getContext("webgl") || c.getContext("experimental-webgl");
-    if (gl) { return; }
-    document.getElementById("surface-3d-fallback").style.display = "block";
-    document.addEventListener("DOMContentLoaded", function () {
-      var div = document.getElementById("fig-pooled_surface_3d");
-      if (div && div.closest(".figure")) { div.closest(".figure").style.display = "none"; }
-    });
-  })();
-</script>
+### Across twenty random windows, the robust optimum is 0.85× with an 8% trigger
 
-## A fixed share of portfolio value as an alternative budget
+The six indicative windows were chosen by hand, and their pooled optimum sat on the 0.80× edge of the strike axis. To address both limitations, I extend the strike axis down to 0.70× in the same 0.025 steps, adding 28 configurations to make 91, and score every configuration on twenty windows drawn at random from the full history. Each window starts on a random day and lasts 42, 63, 126, 252 or 504 trading days, under a fixed seed so the same windows are drawn on every run. The windows may overlap, and without overlap they amount to twelve separate stretches. Five are drawdowns of at least 10%, four are calm stretches and eleven are mixed. As before, every window is a slice of the standing full-history programme.
+
+A single extreme window can dominate an average, so I rank configurations by their **median** score across windows rather than their mean. Below, I show the mean score for every strike and trigger, then the median, then the score against the strike at the 8% trigger, with the median at each strike marked as a cross and the P-spline fitted through the observations, and finally the pooled, window-demeaned surface.
+
+- **The mean favours the deepest corner for a reason that does not generalise.** The best mean cell is 0.75× with a 20% trigger, and the pooled surface places its optimum at the 0.70× / 20% corner. Both rest on the aftermath of one crash. After fourteen years of premium decay had reduced it to 62% of SPY's value, the 0.70× programme with a 20% trigger sold its puts on 12 March 2020 for almost four times the value of the SPY it was hedging, and then sat largely in cash. That lowered its drawdown relative to SPY in every later window, which scores it at 2.1 to 2.6, and at 5.1 in the window containing the crash itself.
+- **The median places the optimum at 0.85× with an 8% trigger.** Its median score is 1.22, it beats SPY in 19 of the 20 windows, and its lower quartile (1.13) is the highest of any configuration. The 0.875× and 0.90× strikes at the same trigger are within 0.02 of it, and every strike from 0.70× to 0.95× scores best at the 8% trigger. 0.85× with a 6% trigger is the closest alternative, also beating SPY in 19 windows with a slightly better worst case (0.95 against 0.94), but with a lower median of 1.15.
+- **The blind roll confirms the earlier ordering.** Held blindly, the score rises steadily towards the money, from 0.56 at 0.70× to 1.18 at 1.00×, and the strikes below 0.80× are the weakest configurations in the grid.
+
+At the 8% trigger the P-spline peaks at 0.86× and the median at 0.85×, yet the fit explains only 6% of the variation in the score, because the variation between windows still dwarfs the variation along the strike axis. The median grid is the more reliable read. Together with the six-window analysis, it identifies 0.85× with an 8% trigger as the robust choice: it performs well in crisis, calm and mixed windows alike, and unlike the 20% trigger that tops the mean, its standing does not depend on the timing of one exceptional crash. Every number here remains in-sample.
+
+### Additional analysis is needed to validate the strategy's out-of-sample performance and the robustness of its optimal parameters
+
+**Established.** Holding the premium budget fixed changes the answer. Deep out-of-the-money puts, bought in quantity and monetised on a drawdown trigger, beat nearer strikes in two of three crises and reduce drawdowns relative to SPY in all three, and the trade-off between crisis and calm performance that appeared fundamental under one-put-per-unit sizing largely disappears. Deep strikes still bleed more to time decay in calm markets. The remaining regime dependence lies in the trigger, which crises want deep and calm markets want shallow, and the trigger response is uneven enough that a robust choice (8%) is preferable to the in-sample optimum (20%). A monetisation rule is not optional for deep strikes: held blindly, they are worse than no hedge.
+
+**Not established.** Nothing here is out-of-sample. Every threshold was read on the same windows it was scored on, across 63 trials, which is more than enough freedom to fit noise. The grid's best cell is not a recommendation and is not described as one.
+
+Five specific limitations, stated plainly:
+
+1. **Six windows are too few.** Three crises are three observations of crisis behaviour, one of them (COVID) shorter than a single roll. The twenty random windows above add observations, but they overlap and amount to twelve non-overlapping stretches, and history before 2006 is still to be added.
+2. **The six-window optimum lies at the edge of the strike axis.** On the axis extended to 0.70×, the robust optimum moves inside it, to around 0.85×, and the deepest strikes win only through the aftermath of a single crash.
+3. **Results depend on where a fall arrives in the roll cycle.** The GFC comparison turned on roll timing. Laddered expiries would average that timing risk away and are noted for a later plan.
+4. **The budget is one choice.** Matching to the 0.95× premium spends 5.7-7.1% of equity a year. A smaller budget will change the calm-window results more than the crisis ones.
+5. **No transaction costs.** Fills are at the model price. Deep out-of-the-money options trade with wide spreads relative to their price, and twelve contracts per unit makes that cost twelve times larger. This flatters exactly the configurations that win here.
+
+The outstanding question is whether any of this survives contact with data it was not fitted on. Answering it requires a procedure that re-selects parameters on each training split and scores them on held-out blocks, measuring the *procedure* rather than any fixed parameter set. That is the next piece of work, and until it is done nothing on this page should be deployed.
+
+## Alternative strategies may yield contrasting outcomes
+
+### A fixed share of portfolio value as an alternative budget
 
 The main analysis fixes spend *per unit of SPY*, matched to one 0.95× put at each roll or reopen. A holder is more likely to state the allocation as a share of the portfolio: "I will spend 5% a year on insurance". I therefore run that rule once over the full history, at 0.90× with a 10% trigger and the same guard, outside the grid.
 
@@ -392,37 +477,7 @@ Measured over 21 calendar years, the median spend was 4.98% a year, and the mean
 
 It sits below the budget-matched 0.90× hedge through the GFC and the rate shock and close to it elsewhere, which is what a somewhat smaller spend should produce. The figure below compares the two through the GFC.
 
-## Across twenty random windows, the robust optimum lies near 0.85× rather than at the deepest strike
-
-The six indicative windows were chosen by hand, and the pooled optimum sat on the 0.80× edge of the strike axis. This section addresses both limitations together. I extend the strike axis down to 0.70× in the same 0.025 steps, adding 28 configurations to make 91, and score every configuration on twenty windows drawn at random from the full history. Each window starts on a randomly chosen day and lasts 42, 63, 126, 252 or 504 trading days, under a fixed seed so that the same windows are drawn on every run. The windows may overlap; kept without overlap, they amount to twelve separate stretches. Labelled by SPY's own path, five are drawdowns of at least 10%, four are calm stretches with a drawdown under 5% and a positive return, and eleven are mixed. As before, every window is a slice of the standing full-history programme, so nothing is re-simulated per window.
-
-Below, I show the mean score over the twenty windows for every strike and trigger, then the score against the strike at the 10% trigger with the P-spline through it, and finally the pooled, window-demeaned surface.
-
-Three findings stand out.
-
-- **The blind roll confirms the earlier ordering over many more windows.** Held blindly, the score rises steadily towards the money, from 0.56 at 0.70× to 1.18 at 1.00×. The strikes added below 0.80× are the weakest configurations in the grid.
-- **With the trigger armed, the score peaks in the interior of the axis.** At the 10% trigger the mean score rises from 1.03 at 0.70× to a peak of 1.22 at 0.875× and falls to 1.11 at the money, and it peaks at 0.85-0.875× in the drawdown, calm and mixed windows alike. The 0.85-0.90× strikes beat SPY in 15 of the 20 windows.
-- **The deepest corner wins on average, but for a reason that does not generalise.** Averaged over every window, the best cell is 0.75× with a 20% trigger, and the pooled surface places its optimum at the 0.70× / 20% corner. That result rests on the aftermath of a single crash. After fourteen years of premium decay had reduced it to 62% of SPY's value, the 0.70× programme with a 20% trigger sold its puts on 12 March 2020 for almost four times the value of the SPY it was hedging. For years afterwards, most of that portfolio sat in cash, which lowered its drawdown relative to SPY in every later window. Those windows score it at 2.1 to 2.6, and the two-year window that contains the crash itself at 5.1. Excluding that one window, or ranking by the median rather than the mean, moves the optimum to 0.85× with a 6-8% trigger.
-
-The fitted curves add little on their own: the P-spline at the fixed trigger explains 5% of the variation in the score and the pooled surface 6%, because the variation between windows still dwarfs the variation along either axis. The grid itself is the more reliable read. Taken together with the six-window analysis, it points to a strike around 0.85× and a shallow trigger of 6-8% as the robust region, with the deepest strikes justified only by the timing of an exceptional crash. Every number here remains in-sample.
-
-## Additional analysis is needed to validate the strategy's out-of-sample performance and the robustness of its optimal parameters
-
-**Established.** Holding the premium budget fixed changes the answer. Deep out-of-the-money puts, bought in quantity and monetised on a drawdown trigger, beat nearer strikes in two of three crises and reduce drawdowns relative to SPY in all three, and the trade-off between crisis and calm performance that appeared fundamental under one-put-per-unit sizing largely disappears. Deep strikes still bleed more to time decay in calm markets. The remaining regime dependence lies in the trigger, which crises want deep and calm markets want shallow, and the trigger response is uneven enough that a robust choice (8%) is preferable to the in-sample optimum (20%). A monetisation rule is not optional for deep strikes: held blindly, they are worse than no hedge.
-
-**Not established.** Nothing here is out-of-sample. Every threshold was read on the same windows it was scored on, across 63 trials, which is more than enough freedom to fit noise. The grid's best cell is not a recommendation and is not described as one.
-
-Five specific limitations, stated plainly:
-
-1. **Six windows are too few.** Three crises are three observations of crisis behaviour, one of them (COVID) shorter than a single roll. The twenty random windows above add observations, but they overlap and amount to twelve non-overlapping stretches, and history before 2006 is still to be added.
-2. **The six-window optimum lies at the edge of the strike axis.** On the axis extended to 0.70×, the robust optimum moves inside it, to around 0.85×, and the deepest strikes win only through the aftermath of a single crash.
-3. **Results depend on where a fall arrives in the roll cycle.** The GFC comparison turned on roll timing. Laddered expiries would average that timing risk away and are noted for a later plan.
-4. **The budget is one choice.** Matching to the 0.95× premium spends 5.7-7.1% of equity a year. A smaller budget will change the calm-window results more than the crisis ones.
-5. **No transaction costs.** Fills are at the model price. Deep out-of-the-money options trade with wide spreads relative to their price, and twelve contracts per unit makes that cost twelve times larger. This flatters exactly the configurations that win here.
-
-The outstanding question is whether any of this survives contact with data it was not fitted on. Answering it requires a procedure that re-selects parameters on each training split and scores them on held-out blocks, measuring the *procedure* rather than any fixed parameter set. That is the next piece of work, and until it is done nothing on this page should be deployed.
-
-## Reproducing this analysis
+# Reproducing this analysis
 
 ```bash
 python -m pipelines.option_grid_sweep                 # the 63-run sweep, then the page

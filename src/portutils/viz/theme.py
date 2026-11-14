@@ -109,6 +109,50 @@ CATEGORICAL = [
 ]
 
 
+# ============================================================================
+# PUT-STRIKE RAMP — one sequential orange-to-yellow scale for every put strike.
+#
+# WHY A RAMP AND NOT CATEGORICAL SLOTS (user request, 2026-11-13). Strikes are ORDERED: a 0.80x
+# put is "between" a 0.90x and a 0.70x one, and categorical slots threw that ordering away (the
+# 0.80x line was aqua, between an orange 0.95x and a yellow 0.70x). With one hue family, every
+# put reads as "a put" before it reads as "which put", and the darker the orange the nearer the
+# money. The underlying keeps CATEGORICAL[0] blue, so it stays the one cool line on the panel.
+#
+# The stops are the user's own: the existing CATEGORICAL orange moves to 0.90x, a slightly
+# darker orange takes 0.95x, and a brighter yellow than CATEGORICAL's #c98500 takes 0.70x.
+# Strikes between stops are interpolated linearly in RGB, and strikes outside the range clamp
+# to the end colour. Every stop is at least 3.4:1 against PLOT_BG (rgb(17,17,17)); the darkest,
+# at 1.00x, is the tightest.
+# ============================================================================
+PUT_STRIKE_STOPS = (
+    (0.70, "#f5c22a"),  # bright yellow: deepest out of the money
+    (0.80, "#e9842b"),  # amber: midway between the user's yellow and orange
+    (0.90, "#d95926"),  # CATEGORICAL[1], the orange the 0.95x line used to carry
+    (0.95, "#c94d1f"),  # slightly darker orange
+    (1.00, "#b8401a"),  # burnt orange: at the money
+)
+
+
+def put_strike_colour(moneyness):
+    """Hex colour for a put struck at ``moneyness`` (strike / spot) on the orange-yellow ramp."""
+    m = float(moneyness)
+    stops = PUT_STRIKE_STOPS
+    # Clamp outside the ramp rather than extrapolating, so no strike gets a colour that is not
+    # on the scale the reader has learned.
+    if m <= stops[0][0]:
+        return stops[0][1]
+    if m >= stops[-1][0]:
+        return stops[-1][1]
+    # Find the bracketing pair and interpolate each RGB channel between them.
+    for (m0, c0), (m1, c1) in zip(stops, stops[1:]):
+        if m0 <= m <= m1:
+            w = (m - m0) / (m1 - m0)
+            rgb0 = [int(c0[i:i + 2], 16) for i in (1, 3, 5)]
+            rgb1 = [int(c1[i:i + 2], 16) for i in (1, 3, 5)]
+            return "#" + "".join(f"{round(a + w * (b - a)):02x}" for a, b in zip(rgb0, rgb1))
+    return stops[-1][1]
+
+
 def ticker_colour_map(symbols, overrides=None):
     """Deterministic symbol -> colour, stable across runs and across figures.
 

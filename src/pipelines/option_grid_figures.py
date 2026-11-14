@@ -38,6 +38,9 @@ EVERY FIGURE IS IN-SAMPLE, and says so in its own title. No figure here may be c
 validated, selected or recommended parameter set.
 """
 
+import re
+import textwrap
+
 import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
@@ -201,11 +204,151 @@ def moneyness_colours(labels, offset=1):
     underlying rather than a new colour. Past the end the labels go MUTED grey, which reads as
     "not individually tracked" instead of lying about identity.
     """
+    # PUT-STRIKE RAMP FIRST (2026-11-13). When every label names a strike ("0.90x/dd10%",
+    # "best — 0.85x/dd10% (1.12)") and no two name the SAME strike, colour by strike on the
+    # theme's orange-to-yellow ramp: one hue family for every put, darker nearer the money, and
+    # the same strike the same colour in every figure regardless of which others it is drawn with.
+    # When two labels share a strike (a blind-against-armed comparison, two sizings of one put)
+    # the ramp would draw them as twins, so those figures keep the categorical slots below.
+    strikes = [re.search(r"(\d+\.\d+)x", str(label)) for label in labels]
+    if strikes and all(strikes):
+        values = [round(float(m.group(1)), 4) for m in strikes]
+        if len(set(values)) == len(values):
+            return {label: theme.put_strike_colour(v) for label, v in zip(labels, values)}
+
+    styles = moneyness_styles(labels)
+    if styles is not None:
+        return {label: s["colour"] for label, s in styles.items()}
+
     out = {}
     for i, label in enumerate(labels):
         slot = i + offset
         out[label] = theme.CATEGORICAL[slot] if slot < len(theme.CATEGORICAL) else theme.GRID
     return out
+
+
+# Opacity of a BLIND-roll line drawn beside an armed configuration of the same strike (user
+# request, 2026-11-13): same colour, so the strike is read at once, and faded, so the blind roll
+# reads as the reference the armed line is compared against.
+BLIND_OPACITY = 0.6
+# Dash patterns for two or more ARMED triggers on the same strike, deepest trigger first. The
+# deepest stays solid because it is the page's long-standing illustration (10%).
+TRIGGER_DASHES = ("solid", "dash", "dot", "dashdot")
+
+
+def moneyness_styles(labels):
+    """label -> ``{"colour", "opacity", "dash"}`` on the put-strike ramp, or None.
+
+    Colour is always the strike's ramp colour. Labels that share a strike are told apart by
+    something other than hue: a blind roll is faded to ``BLIND_OPACITY``, and armed triggers on
+    the same strike take ``TRIGGER_DASHES`` in order of trigger depth. Returns None when a label
+    names no strike, or when two labels share both strike AND trigger (two sizings of one put),
+    because neither opacity nor dash can then say which is which and the caller should fall back
+    to categorical colours.
+    """
+    parsed = []
+    for label in labels:
+        strike = re.search(r"(\d+\.\d+)x", str(label))
+        if strike is None:
+            return None
+        trig = re.search(r"/(blind|dd(\d+)%)", str(label))
+        depth = None if trig is None or trig.group(1) == "blind" else float(trig.group(2))
+        blind = trig is not None and trig.group(1) == "blind"
+        parsed.append((label, round(float(strike.group(1)), 4), blind, depth))
+    keys = [(s, b, d) for _, s, b, d in parsed]
+    if len(set(keys)) != len(keys):
+        return None
+    out = {}
+    for label, strike, blind, depth in parsed:
+        same = [p for p in parsed if p[1] == strike]
+        style = {"colour": theme.put_strike_colour(strike), "opacity": 1.0, "dash": "solid"}
+        if len(same) > 1:
+            if blind:
+                style["opacity"] = BLIND_OPACITY
+            else:
+                depths = sorted({p[3] for p in same if not p[2] and p[3] is not None},
+                                reverse=True)
+                if depth in depths:
+                    style["dash"] = TRIGGER_DASHES[min(depths.index(depth),
+                                                       len(TRIGGER_DASHES) - 1)]
+        out[label] = style
+    return out
+
+
+# Default visibility per event category on the 2026 figures. Categories not listed here start
+# hidden (legend click to show), so a figure opens on the events that frame the window.
+EVENT_DEFAULT_VISIBLE = ("War and diplomacy", "Data notes")
+# One line style per category, so categories are told apart without a legend lookup.
+EVENT_STYLE = {
+    "War and diplomacy": dict(color=theme.INK, dash="dash"),
+    "Energy infrastructure": dict(color=theme.CATEGORICAL[7], dash="dot"),
+    "Shipping and freight": dict(color=theme.CATEGORICAL[2], dash="dot"),
+    "Fuel prices": dict(color=theme.CATEGORICAL[4], dash="dot"),
+    "Data notes": dict(color=theme.MUTED, dash="dashdot"),
+}
+
+
+# Events closer than this many days apart have their labels staggered vertically.
+LABEL_GAP_DAYS = 30
+
+
+def add_event_lines(fig, events, visible=EVENT_DEFAULT_VISIBLE):
+    """Labelled vertical lines for dated events, toggleable by category, with detail on hover.
+
+    ``events`` is a frame with ``date``, ``category``, ``label``, ``detail`` and ``source``. Each
+    event is a layout SHAPE spanning every subplot (yref ``paper``), so one line crosses all the
+    stacked panels, plus an invisible-line marker at the top of the first panel that carries the
+    hover text. Shape and marker share a ``legendgroup`` per category, and one legend entry per
+    category toggles every event in it. Events outside the figure's date range are skipped.
+    """
+    if events is None or not len(events):
+        return fig
+    # The x range drawn, and the top of the first panel, read from the traces already on it.
+    xs, top, bottom = [], [], []
+    for tr in fig.data:
+        if tr.x is not None and len(tr.x):
+            xs.extend(pd.to_datetime(pd.Series(tr.x)).dropna())
+        if getattr(tr, "yaxis", None) in (None, "y") and tr.y is not None:
+            vals = pd.to_numeric(pd.Series(tr.y), errors="coerce").dropna()
+            if len(vals):
+                top.append(float(vals.max()))
+                bottom.append(float(vals.min()))
+    if not xs:
+        return fig
+    lo, hi = min(xs), max(xs)
+    y_mark = max(top) if top else 1.0
+    span = (y_mark - min(bottom)) if bottom else 1.0
+    shown = set()
+    # Labels of events close together in time are STAGGERED down from the top of the first
+    # panel, so neighbouring labels (the MoU signed and broken within weeks) do not print over
+    # each other. A gap of more than LABEL_GAP_DAYS resets to the top level.
+    level, prev = 0, None
+    for _, ev in events.sort_values("date").iterrows():
+        when = pd.Timestamp(ev["date"])
+        if when < lo or when > hi:
+            continue
+        level = (level + 1) % 4 if prev is not None and (when - prev).days <= LABEL_GAP_DAYS             else 0
+        prev = when
+        y_at = y_mark - level * 0.07 * span
+        cat = ev["category"]
+        style = EVENT_STYLE.get(cat, dict(color=theme.MUTED, dash="dot"))
+        vis = True if cat in visible else "legendonly"
+        group = f"event: {cat}"
+        fig.add_shape(type="line", xref="x", yref="paper", x0=when, x1=when, y0=0, y1=1,
+                      line=dict(color=style["color"], width=1, dash=style["dash"]),
+                      opacity=0.8, layer="below", legendgroup=group, name=cat,
+                      showlegend=cat not in shown, visible=vis)
+        shown.add(cat)
+        fig.add_trace(go.Scatter(
+            x=[when], y=[y_at], mode="markers+text", text=[ev["label"]],
+            textposition="top center", textfont=dict(size=9, color=style["color"]),
+            marker=dict(color=style["color"], symbol="triangle-down", size=8),
+            name=ev["label"], legendgroup=group, showlegend=False, visible=vis,
+            # Wrapped for the hover box, which does not wrap on its own.
+            customdata=[["<br>".join(textwrap.wrap(str(ev["detail"]), 70)), ev["source"]]],
+            hovertemplate=("<b>%{text}</b>  %{x|%d %b %Y}<br>" + cat + "<br>"
+                           "%{customdata[0]}<extra></extra>")), row=1, col=1)
+    return fig
 
 
 def _rebase(series):
@@ -237,7 +380,7 @@ def _numeric(frame, column):
 
 
 def fig_moneyness_stack(results, spot, title="", reentry_iv=None, underlying="SPY",
-                        colours=None, show_events=True):
+                        colours=None, show_events=True, events=None):
     """Three stacked panels, several moneyness levels at once, one shared x-axis.
 
     Parameters
@@ -271,7 +414,14 @@ def fig_moneyness_stack(results, spot, title="", reentry_iv=None, underlying="SP
     that let it back in is a physical act rather than an act of memory.
     """
     labels = list(results)
+    # Held under its own name: the loop below rebinds `events` to each run's lifecycle events.
+    event_lines = events
+    # Opacity and dash per label (2026-11-13): a blind roll beside an armed line on the same
+    # strike shares its colour and is faded; two armed triggers on one strike differ by dash.
+    styles = moneyness_styles(labels) if colours is None else None
     colours = moneyness_colours(labels) if colours is None else colours
+    opacity = {lab: (styles[lab]["opacity"] if styles else 1.0) for lab in labels}
+    dash = {lab: (styles[lab]["dash"] if styles else "solid") for lab in labels}
 
     fig = make_subplots(rows=3, cols=1, shared_xaxes=True,
                         row_heights=[0.52, 0.24, 0.24], vertical_spacing=0.05,
@@ -323,7 +473,7 @@ def fig_moneyness_stack(results, spot, title="", reentry_iv=None, underlying="SP
 
         fig.add_trace(go.Scatter(
             x=equity.index, y=equity.to_numpy(), name=label, legendgroup=label,
-            line=dict(color=colour, width=1.6),
+            line=dict(color=colour, width=1.6, dash=dash[label]), opacity=opacity[label],
             hovertemplate="%{x|%Y-%m-%d}<br>" + label + " %{y:.3f}<extra></extra>"), row=1, col=1)
 
         # --------------------------------------------------------------------
@@ -351,6 +501,7 @@ def fig_moneyness_stack(results, spot, title="", reentry_iv=None, underlying="SP
                 # twelve entries saying almost nothing. The three SHAPE keys are added once at
                 # the end instead, in neutral ink.
                 name=f"{label} {kind}", legendgroup=label, showlegend=False,
+                opacity=opacity[label],
                 marker=dict(color=colour, symbol=symbol, size=9,
                             line=dict(color=theme.INK, width=0.6)),
                 # The SHARED fill hover (see EVENT_HOVER): legs and cost, contracts bought, and
@@ -371,7 +522,8 @@ def fig_moneyness_stack(results, spot, title="", reentry_iv=None, underlying="SP
         if mult is not None:
             fig.add_trace(go.Scatter(
                 x=mult.index, y=mult.to_numpy(), name=label, legendgroup=label, showlegend=False,
-                line=dict(color=colour, width=1.4), connectgaps=False,
+                line=dict(color=colour, width=1.4, dash=dash[label]), connectgaps=False,
+                opacity=opacity[label],
                 hovertemplate="%{x|%Y-%m-%d}<br>" + label
                               + " %{y:.2f}x premium<extra></extra>"), row=2, col=1)
             # The monetise bars marked ON this curve as well as on equity: "how far above its
@@ -406,7 +558,8 @@ def fig_moneyness_stack(results, spot, title="", reentry_iv=None, underlying="SP
                 fig.add_trace(go.Scatter(
                     x=series.index, y=np.where(flat, level, np.nan),
                     name=f"{label} FLAT", legendgroup=label, showlegend=False,
-                    mode="lines", line=dict(color=colour, width=5), opacity=0.45,
+                    mode="lines", line=dict(color=colour, width=5),
+                    opacity=0.45 * opacity[label],
                     connectgaps=False,
                     hovertemplate="%{x|%Y-%m-%d}<br>" + label
                                   + " unhedged<extra></extra>"), row=3, col=1)
@@ -449,6 +602,9 @@ def fig_moneyness_stack(results, spot, title="", reentry_iv=None, underlying="SP
                 marker=dict(color=theme.INK, symbol=symbol, size=9),
                 hoverinfo="skip"), row=1, col=1)
 
+    # Dated events (the 2026 window), drawn last so their markers sit above every line.
+    add_event_lines(fig, event_lines)
+
     _set_title(fig, title, f"IN-SAMPLE. Rebased to the window's first bar. Colour = moneyness, "
                            f"shape = lifecycle. {MARK_CAVEAT}.")
     fig.update_layout(
@@ -477,7 +633,8 @@ def fig_moneyness_stack(results, spot, title="", reentry_iv=None, underlying="SP
 
 def fig_score_grid(scores, value_col="score", row="config", col="window", title="",
                    trial_count=None, normalise="column", colourbar_title=None,
-                   text_format="{:.2f}", midpoint=None, higher_is_better=True, note=None):
+                   text_format="{:.2f}", midpoint=None, higher_is_better=True, note=None,
+                   aggfunc="mean"):
     """The coloured score grid — one cell per (row, col) pair, text the raw value.
 
     ==========================================================================
@@ -507,10 +664,21 @@ def fig_score_grid(scores, value_col="score", row="config", col="window", title=
     sub-line's metric description, since the asterisk note only means anything on a ratio with a
     floored denominator.
     """
-    pivot = scores.pivot_table(index=row, columns=col, values=value_col, aggfunc="mean",
+    # ``aggfunc`` (2026-11-14): "median" gives the grid a reader can trust when one window is an
+    # outlier, as the March 2020 aftermath is over the random windows.
+    pivot = scores.pivot_table(index=row, columns=col, values=value_col, aggfunc=aggfunc,
                                sort=False)
     floored = scores.pivot_table(index=row, columns=col, values="floor_bound", aggfunc="max",
                                  sort=False) if "floor_bound" in scores.columns else None
+    # A NUMERIC parameter axis is put in numeric order (2026-11-14). sort=False keeps window
+    # columns in their narrative order, but it also kept strikes in the order rows were appended,
+    # so the 0.700-0.775 strikes added by 13-02.2 printed to the right of 1.000.
+    if pd.api.types.is_numeric_dtype(pivot.columns):
+        pivot = pivot.sort_index(axis=1)
+        floored = floored.reindex(columns=pivot.columns) if floored is not None else None
+    if pd.api.types.is_numeric_dtype(pivot.index):
+        pivot = pivot.sort_index()
+        floored = floored.reindex(index=pivot.index) if floored is not None else None
 
     raw = pivot.to_numpy(dtype=float)
     if normalise == "column":
@@ -603,7 +771,7 @@ def _mesh(fit, xs, ys):
     return z.reshape(gx.shape)
 
 
-def fig_grid_heatmap(scores, title="", trial_count=None):
+def fig_grid_heatmap(scores, title="", trial_count=None, aggfunc="mean"):
     """THE RAW DESIGN POINTS — moneyness across, monetisation drawdown down, colour the score
     pooled over every window. No smoothing anywhere: this is what was actually simulated.
 
@@ -617,7 +785,8 @@ def fig_grid_heatmap(scores, title="", trial_count=None):
     return fig_score_grid(scores, value_col="score", row=Y_PARAM, col=X_PARAM,
                           title=title or f"Raw grid — {SCORE_LABEL}, pooled over all windows",
                           trial_count=trial_count, normalise=None,
-                          colourbar_title="Pooled<br>relative score", text_format="{:.2f}")
+                          colourbar_title=f"{aggfunc.capitalize()}<br>relative score",
+                          text_format="{:.2f}", aggfunc=aggfunc)
 
 
 def fig_window_surfaces(fits, optima, bounds, title="", trial_count=None, n_mesh=60):
@@ -846,7 +1015,7 @@ def fig_pooled_spline(fit, scores, bounds, title="", trial_count=None, n_mesh=80
 # ============================================================================
 
 def fig_strike_fit_layers(points, layers, active, title="", subtitle="", trial_count=None,
-                          n_mesh=200):
+                          n_mesh=200, colour_by="window", show_median=False):
     """Scatter of the score against moneyness, one point per (strike, window), with fit layers.
 
     Parameters
@@ -865,6 +1034,11 @@ def fig_strike_fit_layers(points, layers, active, title="", subtitle="", trial_c
 
     Knots are drawn as vertical lines in the SAME legend group as their fit, so hiding a fit
     hides its knots and the picture never shows knots belonging to a curve that is not on it.
+
+    ``colour_by="kind"`` (2026-11-14) colours points by regime rather than by window, with one
+    legend entry per regime. Twenty random windows as twenty legend entries wrapped into a block
+    taller than the space reserved for it and covered the plot. ``show_median`` adds the median
+    score across windows at each strike as crosses, the robust centre the section ranks on.
     """
     active = set(active)
     fig = go.Figure()
@@ -875,12 +1049,23 @@ def fig_strike_fit_layers(points, layers, active, title="", subtitle="", trial_c
                   annotation_text="SPY = 1.0", annotation_position="bottom right")
 
     windows = list(dict.fromkeys(points["window"]))
+    kind_colour = {scoring.DRAWDOWN: theme.CATEGORICAL[7], "calm": theme.CATEGORICAL[2],
+                   "mixed": theme.CATEGORICAL[6]}
+    kinds_shown = set()
     for i, window in enumerate(windows):
         grp = points[points["window"] == window].sort_values("floor")
         kind = grp["kind"].iloc[0] if "kind" in grp else ""
-        colour = theme.CATEGORICAL[(i + 1) % len(theme.CATEGORICAL)]
+        if colour_by == "kind":
+            # One legend entry per regime: the first window of each kind carries it.
+            colour = kind_colour.get(kind, theme.MUTED)
+            extra = dict(legendgroup=f"kind-{kind}", showlegend=kind not in kinds_shown,
+                         name=f"{kind} window")
+            kinds_shown.add(kind)
+        else:
+            colour = theme.CATEGORICAL[(i + 1) % len(theme.CATEGORICAL)]
+            extra = dict(name=f"{window} ({kind})")
         fig.add_trace(go.Scatter(
-            x=grp["floor"], y=grp["score"], mode="markers", name=f"{window} ({kind})",
+            x=grp["floor"], y=grp["score"], mode="markers", **extra,
             # Drawdown windows as filled circles, calm as open ones: the regime is the first
             # thing to read off a point, before which window it was.
             marker=dict(color=colour, size=9,
@@ -888,6 +1073,13 @@ def fig_strike_fit_layers(points, layers, active, title="", subtitle="", trial_c
                         line=dict(color=colour, width=1.6)),
             hovertemplate=(f"{window}<br>{X_LABEL} %{{x:.3f}}<br>score %{{y:.3f}}"
                            "<extra></extra>")))
+
+    if show_median:
+        med = points.groupby("floor")["score"].median()
+        fig.add_trace(go.Scatter(
+            x=med.index, y=med.to_numpy(), mode="markers", name="Median across windows",
+            marker=dict(color=theme.INK, symbol="x", size=13, line=dict(width=1)),
+            hovertemplate=f"median<br>{X_LABEL} %{{x:.3f}}<br>score %{{y:.3f}}<extra></extra>"))
 
     lo, hi = float(points["floor"].min()), float(points["floor"].max())
     xs = np.linspace(lo, hi, n_mesh)

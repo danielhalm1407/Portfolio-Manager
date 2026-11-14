@@ -369,7 +369,10 @@ def _inline_theme(fig, secondary_axis_spacing=None):
 def _strike_colours(moneyness=MONEYNESS):
     # One fixed colour per ladder strike, assigned in ladder order so the same strike is the same
     # colour in every figure — the same guarantee theme.ticker_colour_map gives for tickers.
-    return {m: theme.CATEGORICAL[i] for i, m in enumerate(moneyness)}
+    # Since 2026-11-13 the colour comes from the strike ITSELF on theme's orange-to-yellow put
+    # ramp rather than from ladder order, so a 0.90x put is the same orange here as on the
+    # moneyness pages, and the guarantee holds across ladders, not only within one.
+    return {m: theme.put_strike_colour(m) for m in moneyness}
 
 
 def fig_smirk(spot=SMIRK_SPOT, tenors=SMIRK_TENORS, grid=SMIRK_MONEYNESS_GRID, base=BASE_VOL):
