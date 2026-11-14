@@ -195,6 +195,14 @@ def _split_sections(html, figure_at=FIGURE_AT, source_name=None, levels=(2,)):
                 for one in ([stem] if isinstance(stem, str) else list(stem)):
                     out.append(f"<!--FIGURE:{one}-->")
                 matched.add(key)
+    # A key matching MORE than one heading inserts its figures twice with the same div id, and
+    # the browser then draws each figure once and leaves the duplicate as an empty box. Raise.
+    for key in figure_at:
+        hits = [h for h in re.findall(rf"<({tags})[ >](.*?)</\1>", html, flags=re.S)
+                if key in h[1]]
+        if len(hits) > 1:
+            raise KeyError(f"figure key {key!r} matches {len(hits)} headings in "
+                           f"{source_name or WRITE_UP.name}; make it unique to one")
     missing = set(figure_at) - matched
     if missing:
         # Name the write-up that was ACTUALLY rendered. This used to report WRITE_UP.name — the

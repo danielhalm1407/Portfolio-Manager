@@ -181,6 +181,26 @@ def score_random(results, spot, n=N_RANDOM_WINDOWS):
     return windows, scores
 
 
+def fit_median_surface(scores):
+    """The pooled surface fitted to the MEDIAN score of each configuration across the random
+    windows (2026-11-14), replacing the window-demeaned mean surface on the page.
+
+    The mean surface was pulled to the 0.70x / 20% corner by one window's aftermath (March 2020).
+    The median is the robust centre the section ranks on, so the surface is fitted to it: one
+    observation per (strike, trigger), blind rolls excluded. Because the medians are a fixed grid
+    with no noise, cross-validation fits close to interpolation; the optimum's position is the
+    reading, as with the per-window surfaces.
+    """
+    df = scores.dropna(subset=["score"])
+    df = df[~df["blind_roll"]]
+    med = (df.groupby(["floor", "monetise_drawdown"])["score"].median()
+           .rename("score").reset_index())
+    bounds = ((float(med["floor"].min()), float(med["floor"].max())),
+              (float(med["monetise_drawdown"].min()), float(med["monetise_drawdown"].max())))
+    fit = surface.fit_2d(med["floor"], med["monetise_drawdown"], med["score"])
+    return fit, surface.optimum(fit, bounds), bounds, med
+
+
 def fit_random(scores, trigger=sweep.LADDER_MONETISE_DRAWDOWN):
     """The pooled fits on the random set: the window-demeaned 2-D surface and the 1-D strike layers
     at a fixed trigger.
@@ -587,8 +607,16 @@ FIGURE_AT = {
     "energy diversifier": ["y2026_energy_spy", "y2026_energy_qqq"],
     "fixed allocation to energy": ["energy_mix_windows"],
     "time left on the leg": ["y2026_attribution"],
-    "8% trigger": ["y2026_trigger_spy", "y2026_trigger_qqq"],
+    # Not "8% trigger": the random-window heading also carries that phrase, which inserted these
+    # two figures a second time with duplicate ids and left two empty boxes (fixed 2026-11-14).
+    "would have monetised the SPY hedge": ["y2026_trigger_spy", "y2026_trigger_qqq"],
 }
+
+
+def _median_contour_args(scores):
+    # (fit, design points, optimum, bounds) in the order fig_pooled_contour takes them.
+    fit, opt, bounds, med = fit_median_surface(scores)
+    return fit, med, opt, bounds
 
 
 def build_extension_figures(trigger=sweep.LADDER_MONETISE_DRAWDOWN):
@@ -614,11 +642,11 @@ def build_extension_figures(trigger=sweep.LADDER_MONETISE_DRAWDOWN):
                       f"allowed. Crosses mark the median across windows."),
             title="Relative Score against Moneyness over Random Windows, with the P-spline"),
         "ext_random_contour": gridfig.fig_pooled_contour(
-            fit, sweep.demeaned_scores(scores), opt, bounds, trial_count=trials,
-            colourbar_title="Fitted<br>deviation",
-            title="Pooled Fitted Surface over Random Windows, Window-Demeaned",
-            subtitle=("Height is each configuration's deviation from its own window's mean "
-                      "score.")),
+            *_median_contour_args(scores), trial_count=trials,
+            colourbar_title="Fitted<br>median score",
+            title="Pooled Fitted Surface of the Median Score over Random Windows",
+            subtitle=("Height is the fitted median relative score across the random windows "
+                      "(SPY = 1.0).")),
     }
     energy = load_energy()
     events = load_events()
